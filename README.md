@@ -1,1 +1,4 @@
-# Yonoshiya-Ticket-Sticker
+# 執行
+```
+./run_app.sh
+```
