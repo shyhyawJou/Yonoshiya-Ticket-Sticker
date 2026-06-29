@@ -1,0 +1,518 @@
+# -- coding: utf-8 --
+
+import sys
+import os
+import platform
+from ctypes import *
+import cv2
+from loguru import logger
+import numpy as np
+import ctypes
+from config import Config
+from mmr_engine import Rotated_RTMDET
+
+# 兼容不同操作系统加载 动态库
+currentsystem = platform.system()
+if currentsystem == 'Windows':
+    sys.path.append(os.path.join(os.getenv('MVCAM_COMMON_RUNENV'), "Samples", "Python", "MvImport"))
+else:
+    sys.path.append(os.path.join("..", "..", "MvImport"))
+from MvCameraControl_class import *
+
+# 兼容Python 2.x和3.x的输入处理
+if sys.version_info[0] < 3:
+    input_func = raw_input
+else:
+    input_func = input
+
+
+# ---------------------------------------------------------------------------
+# HikDeviceManager：負責「與單一相機無關」的全域層級操作
+#   - 字串解碼（decoding_char）
+#   - 列舉裝置（enum_devices）
+#   - SDK 初始化 / 反初始化（initialize / finalize），方便搭配 with 使用
+# ---------------------------------------------------------------------------
+class HikDeviceManager:
+    """
+    負責 SDK 初始化/反初始化、列舉裝置、字串解碼等與單一相機無關的全域操作。
+
+    一般使用者不需要直接操作這個 class —— HikCamera 內部已經自動建立並管理一個
+    HikDeviceManager 實例。只有在你想自己客製化裝置列舉流程時才需要直接用它，例如:
+
+        mgr = HikDeviceManager()
+        mgr.initialize()
+        device_list = mgr.enum_devices()
+        mgr.finalize()
+    """
+
+    def __enter__(self):
+        self.initialize()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.finalize()
+        return False
+
+    # ---------------- SDK 初始化 ----------------
+    @staticmethod
+    def initialize():
+        """初始化 SDK，並印出版本號"""
+        MvCamera.MV_CC_Initialize()
+        sdk_version = MvCamera.MV_CC_GetSDKVersion()
+        logger.info("SDKVersion[0x%x]" % sdk_version)
+        return sdk_version
+
+    @staticmethod
+    def finalize():
+        """反初始化 SDK"""
+        MvCamera.MV_CC_Finalize()
+
+    # ---------------- 字串解碼 ----------------
+    @staticmethod
+    def decoding_char(ctypes_char_array):
+        """
+        安全地从 ctypes 字符数组中解码出字符串。
+        适用于 Python 2.x 和 3.x，以及 32/64 位环境。
+        """
+        byte_str = memoryview(ctypes_char_array).tobytes()
+
+        null_index = byte_str.find(b'\x00')
+        if null_index != -1:
+            byte_str = byte_str[:null_index]
+
+        for encoding in ['gbk', 'utf-8', 'latin-1']:
+            try:
+                return byte_str.decode(encoding)
+            except UnicodeDecodeError:
+                continue
+
+        return byte_str.decode('latin-1', errors='replace')
+
+    # ---------------- 列舉裝置 ----------------
+    def enum_devices(self):
+        """
+        列舉所有可用裝置，回傳 deviceList (MV_CC_DEVICE_INFO_LIST)
+        """
+        deviceList = MV_CC_DEVICE_INFO_LIST()
+        tlayerType = (MV_GIGE_DEVICE | MV_USB_DEVICE | MV_GENTL_CAMERALINK_DEVICE
+                      | MV_GENTL_CXP_DEVICE | MV_GENTL_XOF_DEVICE)
+
+        ret = MvCamera.MV_CC_EnumDevices(tlayerType, deviceList)
+        if ret != 0:
+            raise RuntimeError("enum devices fail! ret[0x%x]" % ret)
+
+        if deviceList.nDeviceNum == 0:
+            raise RuntimeError("find no device!")
+
+        logger.info("Find %d devices!" % deviceList.nDeviceNum)
+
+        for i in range(0, deviceList.nDeviceNum):
+            self._print_device_info(deviceList, i)
+
+        return deviceList
+
+    def _print_device_info(self, deviceList, index):
+        """印出單一裝置的型號、序號/IP 等資訊"""
+        mvcc_dev_info = cast(deviceList.pDeviceInfo[index], POINTER(MV_CC_DEVICE_INFO)).contents
+        decode = self.decoding_char
+
+        if mvcc_dev_info.nTLayerType in (MV_GIGE_DEVICE, MV_GENTL_GIGE_DEVICE):
+            logger.info("gige device: [%d]" % index)
+            logger.info("device model name: %s" % decode(
+                mvcc_dev_info.SpecialInfo.stGigEInfo.chModelName))
+
+            nip1 = ((mvcc_dev_info.SpecialInfo.stGigEInfo.nCurrentIp & 0xff000000) >> 24)
+            nip2 = ((mvcc_dev_info.SpecialInfo.stGigEInfo.nCurrentIp & 0x00ff0000) >> 16)
+            nip3 = ((mvcc_dev_info.SpecialInfo.stGigEInfo.nCurrentIp & 0x0000ff00) >> 8)
+            nip4 = (mvcc_dev_info.SpecialInfo.stGigEInfo.nCurrentIp & 0x000000ff)
+            logger.info("current ip: %d.%d.%d.%d" % (nip1, nip2, nip3, nip4))
+        elif mvcc_dev_info.nTLayerType == MV_USB_DEVICE:
+            logger.info("u3v device: [%d]" % index)
+            logger.info("device model name: %s" % decode(
+                mvcc_dev_info.SpecialInfo.stUsb3VInfo.chModelName))
+            logger.info("user serial number: %s" % decode(
+                mvcc_dev_info.SpecialInfo.stUsb3VInfo.chSerialNumber))
+        elif mvcc_dev_info.nTLayerType == MV_GENTL_CAMERALINK_DEVICE:
+            logger.info("CML device: [%d]" % index)
+            logger.info("device model name: %s" % decode(
+                mvcc_dev_info.SpecialInfo.stCMLInfo.chModelName))
+            logger.info("user serial number: %s" % decode(
+                mvcc_dev_info.SpecialInfo.stCMLInfo.chSerialNumber))
+        elif mvcc_dev_info.nTLayerType == MV_GENTL_CXP_DEVICE:
+            logger.info("CXP device: [%d]" % index)
+            logger.info("device model name: %s" % decode(
+                mvcc_dev_info.SpecialInfo.stCXPInfo.chModelName))
+            logger.info("user serial number: %s" % decode(
+                mvcc_dev_info.SpecialInfo.stCXPInfo.chSerialNumber))
+        elif mvcc_dev_info.nTLayerType == MV_GENTL_XOF_DEVICE:
+            logger.info("XoF device: [%d]" % index)
+            logger.info("device model name: %s" % decode(
+                mvcc_dev_info.SpecialInfo.stXoFInfo.chModelName))
+            logger.info("user serial number: %s" % decode(
+                mvcc_dev_info.SpecialInfo.stXoFInfo.chSerialNumber))
+
+    # ---------------- 取單一裝置資訊（給 HikCamera 用） ----------------
+    @staticmethod
+    def get_device_info(deviceList, index):
+        """
+        從 deviceList 中取出指定 index 的 MV_CC_DEVICE_INFO 結構，
+        供 HikCamera(device_info) 使用。
+        """
+        if index >= deviceList.nDeviceNum:
+            raise ValueError("device index %d out of range (found %d devices)"
+                              % (index, deviceList.nDeviceNum))
+        return cast(deviceList.pDeviceInfo[index], POINTER(MV_CC_DEVICE_INFO)).contents
+
+
+# ---------------------------------------------------------------------------
+# 主角：HikCamera class
+# ---------------------------------------------------------------------------
+class HikCamera:
+    """
+    封裝海康相機的 SDK 初始化、裝置列舉、開啟、參數設定、取像、存檔、關閉流程。
+
+    內部會自動建立並管理一個 HikDeviceManager，負責 SDK 的初始化/反初始化與裝置列舉，
+    所以外部只需要面對 HikCamera 這一個物件即可。
+
+    用法 (with，自動釋放):
+        with HikCamera(device_index=0, cfg=cfg) as hc:
+            ok, img = hc.read()
+            hc.save_image(img, save_type=1)
+
+    用法 (手動釋放):
+        hc = HikCamera(device_index=0, cfg=cfg)
+        ok, img = hc.read()
+        hc.save_image(img)
+        hc.release()    # 一行關掉相機 + SDK
+    """
+
+    # Mono8 的像素格式碼（用於判斷是否為黑白相機）
+    PIXEL_TYPE_MONO8 = 17301505
+
+    def __init__(self, device_index, cfg: Config):
+        """
+        :param device_index: 要開啟的裝置在列舉結果中的索引
+        :param cfg: Config 物件，內含 runtime.camera.source 與 camera_params 等設定
+        """
+        self.device_index = device_index
+        self.grab_timeout_ms = 5000
+
+        # HikCamera 內部自己持有一個 HikDeviceManager，負責 SDK 生命週期與列舉裝置
+        self.device_manager = HikDeviceManager()
+        self.device_info = None   # 開啟後才會填入，供除錯/查詢用
+
+        self.cam = MvCamera()
+        self.cfg = cfg
+        self._is_sdk_initialized = False
+        self._is_open = False
+        self._is_grabbing = False
+
+        device_count = HikCamera.list_available_devices()
+        if self.cfg.runtime.camera.source >= device_count:
+            raise ValueError(f"valid camera ID are {range(0, device_count + 1)}")
+
+        try:
+            self.open()
+        except Exception:
+            self.release()
+            raise
+
+    # ---------------- 列舉裝置（不需要知道 HikDeviceManager 也能用） ----------------
+    @classmethod
+    def list_available_devices(cls):
+        """
+        列舉目前可用的裝置數量（並印出每台裝置的型號/序號等資訊），方便使用者
+        決定要用哪個 device_index 來建立 HikCamera。
+
+        內部會短暫初始化 SDK、列舉、再反初始化，跟之後 HikCamera(device_index=...).open()
+        各自獨立，互不影響。
+
+        :return: 找到的裝置數量 (int)
+        """
+        mgr = HikDeviceManager()
+        mgr.initialize()
+        try:
+            device_list = mgr.enum_devices()
+            return device_list.nDeviceNum
+        finally:
+            mgr.finalize()
+
+    # ---------------- context manager 支援 ----------------
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.release()
+        # 不吞掉例外，讓外層照常看到錯誤
+        return False
+
+    # ---------------- 開啟相機與設定參數 ----------------
+    def open(self):
+        """
+        完整開啟流程：初始化 SDK → 列舉裝置 → 取得指定裝置 → 建立 handle →
+        開裝置 → 設定參數 → 開始取流
+        """
+        # 1. 初始化 SDK（透過內部的 device_manager）
+        self.device_manager.initialize()
+        self._is_sdk_initialized = True
+
+        # 2. 列舉裝置，取得指定 index 的裝置資訊
+        device_list = self.device_manager.enum_devices()
+        self.device_info = self.device_manager.get_device_info(device_list, self.device_index)
+
+        # 3. 建立 handle
+        ret = self.cam.MV_CC_CreateHandle(self.device_info)
+        if ret != 0:
+            raise RuntimeError("create handle fail! ret[0x%x]" % ret)
+
+        # 4. 開裝置；若失敗，handle 已建立但裝置未開，要銷毀 handle 再往外丟例外
+        ret = self.cam.MV_CC_OpenDevice(MV_ACCESS_Exclusive, 0)
+        if ret != 0:
+            self.cam.MV_CC_DestroyHandle()
+            raise RuntimeError("open device fail! ret[0x%x]" % ret)
+        self._is_open = True
+
+        # ch:探测网络最佳包大小(只对GigE相机有效)
+        if self.device_info.nTLayerType in (MV_GIGE_DEVICE, MV_GENTL_GIGE_DEVICE):
+            nPacketSize = self.cam.MV_CC_GetOptimalPacketSize()
+            if int(nPacketSize) > 0:
+                ret = self.cam.MV_CC_SetIntValue("GevSCPSPacketSize", nPacketSize)
+                if ret != 0:
+                    logger.warning("Set Packet Size fail! ret[0x%x]" % ret)
+            else:
+                logger.warning("Get Packet Size fail! ret[0x%x]" % nPacketSize)
+
+        # ch:设置触发模式为off；失敗時裝置已開，要關裝置 + 銷毀 handle 再丟例外
+        ret = self.cam.MV_CC_SetEnumValue("TriggerMode", MV_TRIGGER_MODE_OFF)
+        if ret != 0:
+            self.cam.MV_CC_CloseDevice()
+            self._is_open = False
+            self.cam.MV_CC_DestroyHandle()
+            raise RuntimeError("set trigger mode fail! ret[0x%x]" % ret)
+
+        # 設定相機參數
+        self.set_camera_parameters()
+
+        # 開始取流；失敗時同樣要關裝置 + 銷毀 handle 再丟例外
+        ret = self.cam.MV_CC_StartGrabbing()
+        if ret != 0:
+            self.cam.MV_CC_CloseDevice()
+            self._is_open = False
+            self.cam.MV_CC_DestroyHandle()
+            raise RuntimeError("start grabbing fail! ret[0x%x]" % ret)
+        self._is_grabbing = True
+
+        return self
+
+    def set_camera_parameters(self):
+        logger.info('=' * 25 + ' Set Camera Parameter ' + '=' * 25)
+        params = self.cfg.camera_params
+        for name, info in params.items():
+            value = info['value']
+            typ = info['type']
+
+            if typ == 'float':
+                ret = self.cam.MV_CC_SetFloatValue(name, value)
+            elif typ == 'int':
+                ret = self.cam.MV_CC_SetIntValue(name, value)
+            elif typ == 'bool':
+                ret = self.cam.MV_CC_SetBoolValue(name, value)
+            elif typ == 'enum':
+                ret = self.cam.MV_CC_SetEnumValue(name, value)
+            else:
+                raise ValueError(f'invalid camera parameter type: {typ}')
+
+            if ret == 0:
+                logger.success(f'Set [{name}] to {value} !')
+            else:
+                logger.warning(f'Set camera parameter [{name}] failed !')
+
+        logger.info('=' * 60)
+
+    # ---------------- 取像 ----------------
+    # 目前確認相機的 PixelFormat 為 BayerRG8 (0x01080009 / 17301513)
+    PIXEL_TYPE_BAYER_RG8 = 17301513
+
+    def read(self):
+        """
+        使用 MV_CC_GetImageBuffer 取一張影像（SDK 內部管理 buffer，不自行配置）。
+        取得後立刻把資料複製出來（string_at 會做記憶體複製），再呼叫
+        MV_CC_FreeImageBuffer 把 buffer 還給 SDK，避免持有 SDK 內部記憶體的參照。
+
+        每次呼叫都使用全新的 MV_FRAME_OUT() 結構（而不是共用同一個 instance attribute），
+        避免任何「結構殘留上一輪資料」的可能性。
+
+        回傳已經做好色彩空間轉換的 numpy array (BGR 或 Mono)。
+        對應到 frame_info 的部分以 self._last_frame_info 暴露給外部（含寬高、幀號、像素格式）。
+        """
+        stOutFrame = MV_FRAME_OUT()
+        memset(byref(stOutFrame), 0, sizeof(stOutFrame))
+
+        ret = self.cam.MV_CC_GetImageBuffer(stOutFrame, self.grab_timeout_ms)
+        if ret != 0 or not stOutFrame.pBufAddr:
+            logger.warning("MV_CC_GetImageBuffer failed! ret[0x%x]" % ret)
+            return False, None
+
+        try:
+            width = stOutFrame.stFrameInfo.nWidth
+            height = stOutFrame.stFrameInfo.nHeight
+            pixel_type = stOutFrame.stFrameInfo.enPixelType
+            frame_len = stOutFrame.stFrameInfo.nFrameLen
+
+            logger.debug(f'stOutFrame.stFrameInfo.nWidth: {width}')
+            logger.debug(f'stOutFrame.stFrameInfo.nHeight: {height}')
+            logger.debug(f'stOutFrame.stFrameInfo.enPixelType: {pixel_type}')
+            logger.debug(f'stOutFrame.stFrameInfo.nFrameLen: {frame_len}')
+
+            logger.debug(
+                "實體抓圖成功！Width[%d], Height[%d], 幀號[%d], PixelType[0x%08x], FrameLen[%d]"
+                % (width, height, stOutFrame.stFrameInfo.nFrameNum, pixel_type, frame_len)
+            )
+
+            # ★ 驗證用：若 frame_len 跟 width*height 差距過大，代表結構體仍有錯位，
+            #   記下來、但仍以 width*height 為準去讀取資料（這是我們確定知道是對的兩個值）。
+            expected_len = width * height
+            if frame_len != expected_len:
+                logger.debug(
+                    f"[結構驗證] nFrameLen({frame_len}) 與 width*height({expected_len}) 不一致，"
+                    f"stFrameInfo 可能仍有欄位錯位！以 width*height 為準讀取。"
+                )
+
+            # 立刻把 SDK 緩衝區的資料複製出來。string_at 本身就是複製，
+            # 複製完成後 buffer 就可以安全交還給 SDK (MV_CC_FreeImageBuffer)。
+            raw_bytes = string_at(stOutFrame.pBufAddr, expected_len)
+
+            img_out = self._decode_to_image(raw_bytes, width, height, pixel_type)
+
+            # 保留最後一次取像資訊，方便外部存檔時拿幀號等資訊
+            self._last_frame_info = stOutFrame.stFrameInfo
+
+            return True, img_out
+
+        finally:
+            # 無論成功或失敗，buffer 都要還給 SDK
+            self.cam.MV_CC_FreeImageBuffer(stOutFrame)
+
+    def _decode_to_image(self, raw_bytes, width, height, pixel_type):
+        """
+        從複製出來的原始 bytes 解出影像，並進行色彩空間轉換。
+        """
+        total_pixels = width * height
+        img_gray = np.frombuffer(raw_bytes, dtype=np.uint8, count=total_pixels)
+        img_2d = img_gray.reshape((height, width))
+
+        try:
+            if pixel_type == self.PIXEL_TYPE_MONO8:
+                img_out = img_2d
+                logger.debug('pixel_type is PIXEL_TYPE_MONO8 !')
+            elif pixel_type == self.PIXEL_TYPE_BAYER_RG8:
+                img_out = cv2.cvtColor(img_2d, cv2.COLOR_BayerRG2BGR)
+            else:
+                logger.debug(
+                    f"未預期的 pixel_type: 0x{pixel_type:08x} ({pixel_type})，"
+                    f"嘗試以 BayerRG8 解析（相機目前確認設定為 BayerRG8）"
+                )
+                img_out = cv2.cvtColor(img_2d, cv2.COLOR_BayerRG2BGR)
+            img_out = cv2.cvtColor(img_out, cv2.COLOR_BGR2RGB)
+        except Exception as e:
+            logger.error("色彩轉換失敗，採用原圖輸出... %s" % str(e))
+            img_out = img_2d
+
+        return img_out
+
+    # ---------------- 存檔 ----------------
+    def save_image(self, img, save_type=4, file_path=None):
+        """
+        將 read() 回傳的影像存成檔案。
+
+        :param img: numpy array 影像（BGR 或灰階）
+        :param save_type: 0-raw(不支援於此函式,請用 save_raw), 1-jpg, 2-bmp, 3-tif, 4-png
+        :param file_path: 自訂檔名；None 則自動依寬高與幀號命名
+        """
+        ext_map = {1: ".jpg", 2: ".bmp", 3: ".tif", 4: ".png"}
+        ext = ext_map.get(int(save_type), ".png")
+
+        if file_path is None:
+            fi = getattr(self, "_last_frame_info", None)
+            if fi is not None:
+                file_path = "Image_w%d_h%d_fn%d%s" % (fi.nWidth, fi.nHeight, fi.nFrameNum, ext)
+            else:
+                file_path = "Image%s" % ext
+
+        img_to_save = img
+        cv2.imwrite(file_path, img_to_save)
+
+        logger.success("影像已完美生成，路徑：%s" % file_path)
+        return file_path
+
+    def isOpened(self):
+        return self._is_open
+
+    # ---------------- 關閉相機 ----------------
+    def release(self):
+        """
+        完整關閉流程：停止取流 → 關閉裝置 → 銷毀 handle → 反初始化 SDK
+        任何步驟失敗都不中斷，盡量釋放所有資源（相機 + SDK 都會處理）。
+        """
+        if self._is_grabbing:
+            ret = self.cam.MV_CC_StopGrabbing()
+            if ret != 0:
+                logger.warning("stop grabbing fail! ret[0x%x]" % ret)
+            self._is_grabbing = False
+
+        if self._is_open:
+            ret = self.cam.MV_CC_CloseDevice()
+            if ret != 0:
+                logger.warning("close device fail! ret[0x%x]" % ret)
+            self._is_open = False
+
+        self.cam.MV_CC_DestroyHandle()
+
+        # 連同 SDK 一起反初始化，外部只需呼叫這一個 release() 就能釋放乾淨
+        if self._is_sdk_initialized:
+            self.device_manager.finalize()
+            self._is_sdk_initialized = False
+        logger.success('release the camera !')
+
+
+# ---------------------------------------------------------------------------
+# main：互動式選擇裝置，開啟、取一張圖、存檔
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    try:
+        USE_MMR = True
+
+        logger.remove()
+        logger.add(sys.stderr, level='INFO')
+
+        # 步驟 1：列舉裝置數量，讓使用者看清楚有哪些相機可選
+        # （HikCamera 內部會自己用它的 HikDeviceManager 完成，外部不需要碰到那個名字）
+        device_count = HikCamera.list_available_devices()
+
+        from config import load_config
+        cfg = load_config('tasks/ocr/config.yaml')
+        class_names = [c.name for c in cfg.classes]
+
+        if USE_MMR:
+            mmr = Rotated_RTMDET(
+                path=cfg.runtime.model.object_det, 
+                classes=class_names, 
+                conf_thresh=cfg.thresholds.ai_conf,
+                iou_thresh=cfg.thresholds.ai_iou
+            )  
+        else:
+            mmr = None
+
+        # 如果不想用 with，也可以這樣手動寫，效果一樣:
+        hc = HikCamera(cfg.runtime.camera.source, cfg=cfg)
+        i = 0
+        while True:
+            ok, img = hc.read()
+            if mmr is not None:
+                plotted, boxes = mmr.detect(img, True)
+            i += 1
+            logger.info(f'第 {i} frame')
+        hc.release()   # 一行同時關閉相機 + 反初始化 SDK
+
+    except Exception as e:
+        logger.error(e)
