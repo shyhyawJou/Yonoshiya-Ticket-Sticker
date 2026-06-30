@@ -1,0 +1,61 @@
+includes:
+  classes: classes.yaml
+  menus_mapping: menus_mapping.yaml
+mqtt:
+  host: localhost
+  port: 1883
+  base_topic: ocr
+  session: v1
+runtime:
+  model:
+    object_det: ./object_9cls_v0101.dla
+    ocr_det: ./yoshi_det_v0101.dla
+    ocr_cls: ./cls_v2.dla
+    ocr_rec: ./yoshi_rec_v0101.dla
+    text: ./japan_dict.txt
+  camera:
+    source: 0
+    width: 4024
+    height: 3036
+    device: 'hik' # hik | aravis
+  stream:
+    port: 9527
+thresholds:
+  ai_conf: 0.5
+  ai_iou: 0.4
+placement:
+  roi_strink: 0.1
+  iou_assign: 0.3
+  iou_candidate: 0.8
+  drift_iou_thresh: 0.95
+stability:
+  n_settle_frame: 6
+  k_container_fail: 3
+  k_container_new: 15
+  tray_missing_frame: 15
+camera_params:
+    aravis:
+        GainAuto: 'Off'
+        Gain: 5.0
+        ExposureAuto: 'Off'
+        ExposureTime: 75000.0
+        BalanceWhiteAuto: Continuous
+    hik:
+        DeviceLinkThroughputLimitPercentage: 
+            value: 70
+            type: 'int'
+        AcquisitionFrameRateEnable:
+            value: true
+            type: 'bool'
+        AcquisitionFrameRate: 
+            value: 15.0
+            type: 'float'
+        ExposureMode:
+            value: 0
+            type: 'enum' 
+        ExposureTime: 
+            value: 50000.0
+            type: 'float' 
+        Gain:
+            value: 6.0
+            type: 'float' 

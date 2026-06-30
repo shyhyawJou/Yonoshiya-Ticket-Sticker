@@ -32,6 +32,7 @@ class CameraCfg:
     source: Any
     width: int
     height: int
+    device: str  # 'aravis' or 'hik'
 
 @dataclass
 class StreamCfg:
@@ -192,7 +193,8 @@ def load_config(config_path: str) -> Config:
             camera=CameraCfg(
                 source=camera["source"],
                 width=camera["width"],
-                height=camera["height"]
+                height=camera["height"],
+                device=camera["device"]
             ),
             stream=StreamCfg(port=int(stream["port"]))
         )

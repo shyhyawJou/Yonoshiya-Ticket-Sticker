@@ -235,47 +235,11 @@ class StreamManager:
 
   
     def start_camera(self) -> None:
-        
-        # open camera
-        #logger.info(f"啟動工業相機 (Aravis)... 目標寬高: {self.cfg.runtime.camera.width}x{self.cfg.runtime.camera.height}")
-        logger.info(f"啟動工業相機 (HIK)... 目標寬高: {self.cfg.runtime.camera.width}x{self.cfg.runtime.camera.height}")
-
-        # ctrl_dict = vars(self.cfg.camera_params)
-        #assert self.cfg.camera_params is dict, type(self.cfg.camera_params)
-        ctrl_dict = self.cfg.camera_params
-        features_str = " ".join([f"{k}={v}" for k, v in ctrl_dict.items()])
-        #logger.info(f"啟動工業相機 (Aravis)...: {features_str}")
-        logger.info(f"啟動工業相機 (HIK)...: {features_str}")
-        #gst_str = (
-        #    f'aravissrc features="{features_str}" ! '  
-        #    'bayer2rgb ! '
-        #    'queue ! '
-        #    'videoconvert ! '
-        #    f'video/x-raw,format=BGR,width={self.cfg.runtime.camera.width},height={self.cfg.runtime.camera.height} ! '
-        #    'queue ! '
-        #    'appsink drop=true max-buffers=1 sync=false'
-        #)
-        # gst_str = (
-        #     f'aravissrc features="{features_str}" ! ' 
-        #     'queue ! '
-        #     # 將格式指定為 rgb (對應 OpenCV 的 BayerRG)，且通常 Bayer 格式是 8-bit (rgb) 或 16-bit (rgb16)
-        #     f'video/x-bayer,format=rgb,width={self.cfg.runtime.camera.width},height={self.cfg.runtime.camera.height} ! '
-        #     'queue ! '
-        #     'appsink drop=true max-buffers=1 sync=false'
-        # )
-        
-        #self.capture = cv2.VideoCapture(gst_str, cv2.CAP_GSTREAMER)
-        #self.capture = HikCamera(self.cfg.runtime.camera.source, self.cfg)
-        #if not self.capture.isOpened():
-        #    raise ValueError("Failed to open camera.")
-        
         if self.camera_alone:
             self.capture_thread = threading.Thread(target=self._camera_worker, daemon=True)
             self.capture_thread.start()
         else:
-            self.capture = HikCamera(self.cfg.runtime.camera.source, self.cfg)
-            if not self.capture.isOpened():
-                raise ValueError("Failed to open camera.")
+            self.init_camera()
 
         self._running = True
 
@@ -420,10 +384,7 @@ class StreamManager:
         """
         獨立的相機取像執行緒 (Producer)
         """
-        self.capture = HikCamera(self.cfg.runtime.camera.source, self.cfg)
-        if not self.capture.isOpened():
-            raise ValueError("Failed to open camera.")
-
+        self.init_camera()
         logger.info("Camera Worker 啟動")
 
         consecutive_errors = 0
@@ -724,6 +685,32 @@ class StreamManager:
 
         else:
             logger.warning(f"UNKNOWN_CMD: {cmd}")
+
+    def init_camera(self):
+        if self.cfg.runtime.camera.device == 'hik':
+            logger.info(f"使用工業相機 (HIK)...")
+            self.capture = HikCamera(self.cfg.runtime.camera.source, self.cfg)
+        elif self.cfg.runtime.camera.device == 'aravis':
+            ctrl_dict = self.cfg.camera_params['aravis']
+            features_str = " ".join([f"{k}={v}" for k, v in ctrl_dict.items()])
+            logger.info(f"使用工業相機 (Aravis)..., feature str: {features_str}")
+            gst_str = (
+                f'aravissrc features="{features_str}" ! '  
+                'bayer2rgb ! '
+                'queue ! '
+                'videoconvert ! '
+                f'video/x-raw,format=BGR,width={self.cfg.runtime.camera.width},height={self.cfg.runtime.camera.height} ! '
+                'queue ! '
+                'appsink drop=true max-buffers=1 sync=false'
+            )
+            self.capture = cv2.VideoCapture(gst_str, cv2.CAP_GSTREAMER)
+        else:
+            raise ValueError('valid camera are "aravis" and "hik"')
+
+        if not self.capture.isOpened():
+            raise ValueError("Failed to open camera.")
+        
+        logger.success(f'opened [{self.cfg.runtime.camera.device}] camera !')
 
 
 def main():

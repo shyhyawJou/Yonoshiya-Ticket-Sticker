@@ -17,7 +17,11 @@ if currentsystem == 'Windows':
     sys.path.append(os.path.join(os.getenv('MVCAM_COMMON_RUNENV'), "Samples", "Python", "MvImport"))
 else:
     sys.path.append(os.path.join("..", "..", "MvImport"))
-from MvCameraControl_class import *
+
+try:
+    from MvCameraControl_class import *
+except Exception as e:
+    logger.warning(f'{e}')
 
 # 兼容Python 2.x和3.x的输入处理
 if sys.version_info[0] < 3:
@@ -306,7 +310,7 @@ class HikCamera:
 
     def set_camera_parameters(self):
         logger.info('=' * 25 + ' Set Camera Parameter ' + '=' * 25)
-        params = self.cfg.camera_params
+        params = self.cfg.camera_params['hik']
         for name, info in params.items():
             value = info['value']
             typ = info['type']
@@ -363,7 +367,6 @@ class HikCamera:
             logger.debug(f'stOutFrame.stFrameInfo.nHeight: {height}')
             logger.debug(f'stOutFrame.stFrameInfo.enPixelType: {pixel_type}')
             logger.debug(f'stOutFrame.stFrameInfo.nFrameLen: {frame_len}')
-
             logger.debug(
                 "實體抓圖成功！Width[%d], Height[%d], 幀號[%d], PixelType[0x%08x], FrameLen[%d]"
                 % (width, height, stOutFrame.stFrameInfo.nFrameNum, pixel_type, frame_len)

@@ -1,0 +1,10 @@
+classes:
+  - { id: 0, name: tray }  
+  - { id: 1, name: order_ticket }  
+  - { id: 2, name: order_sticker }  
+  - { id: 3, name: sesame_front}
+  - { id: 4, name: sesame_back}
+  - { id: 5, name: wafusauce_front}
+  - { id: 6, name: wafusauce_back}
+  - { id: 7, name: cream_front}
+  - { id: 8, name: cream_back}
