@@ -210,6 +210,10 @@ class HikCamera:
         self._is_sdk_initialized = False
         self._is_open = False
         self._is_grabbing = False
+        self.stOutFrame = None
+        self.dst_buffer_size = None
+        self.dst_buffer = None
+        self.dst_ptr = None
 
         device_count = HikCamera.list_available_devices()
         if self.cfg.runtime.camera.source >= device_count:
@@ -306,6 +310,21 @@ class HikCamera:
             raise RuntimeError("start grabbing fail! ret[0x%x]" % ret)
         self._is_grabbing = True
 
+        # 設定 "去馬賽克" 演算法
+        ret = self.cam.MV_CC_SetBayerCvtQuality(1)
+        if ret != 0:
+            logger.warning(f"Set Bayer Cvt Quality fail! ret[0x{ret:x}]")
+
+        # 創建必要 buffer
+        self.stOutFrame = MV_FRAME_OUT()
+        memset(byref(self.stOutFrame), 0, sizeof(self.stOutFrame))
+        
+        w = self.cfg.runtime.camera.width
+        h = self.cfg.runtime.camera.height
+        self.dst_buffer_size = w * h * 3
+        self.dst_buffer = (c_ubyte * self.dst_buffer_size)()
+        self.dst_ptr = cast(self.dst_buffer, POINTER(c_ubyte))
+
         return self
 
     def set_camera_parameters(self):
@@ -334,9 +353,6 @@ class HikCamera:
         logger.info('=' * 60)
 
     # ---------------- 取像 ----------------
-    # 目前確認相機的 PixelFormat 為 BayerRG8 (0x01080009 / 17301513)
-    PIXEL_TYPE_BAYER_RG8 = 17301513
-
     def read(self):
         """
         使用 MV_CC_GetImageBuffer 取一張影像（SDK 內部管理 buffer，不自行配置）。
@@ -349,8 +365,7 @@ class HikCamera:
         回傳已經做好色彩空間轉換的 numpy array (BGR 或 Mono)。
         對應到 frame_info 的部分以 self._last_frame_info 暴露給外部（含寬高、幀號、像素格式）。
         """
-        stOutFrame = MV_FRAME_OUT()
-        memset(byref(stOutFrame), 0, sizeof(stOutFrame))
+        stOutFrame = self.stOutFrame
 
         ret = self.cam.MV_CC_GetImageBuffer(stOutFrame, self.grab_timeout_ms)
         if ret != 0 or not stOutFrame.pBufAddr:
@@ -362,66 +377,51 @@ class HikCamera:
             height = stOutFrame.stFrameInfo.nHeight
             pixel_type = stOutFrame.stFrameInfo.enPixelType
             frame_len = stOutFrame.stFrameInfo.nFrameLen
+            frame_id = stOutFrame.stFrameInfo.nFrameNum
+
+            w = self.cfg.runtime.camera.width
+            h = self.cfg.runtime.camera.height
+            if width != w or height != h:
+                logger.error(f'frame size is different from setting ! real frame size: {w, h}')
+                return False, None
 
             logger.debug(f'stOutFrame.stFrameInfo.nWidth: {width}')
             logger.debug(f'stOutFrame.stFrameInfo.nHeight: {height}')
             logger.debug(f'stOutFrame.stFrameInfo.enPixelType: {pixel_type}')
             logger.debug(f'stOutFrame.stFrameInfo.nFrameLen: {frame_len}')
-            logger.debug(
-                "實體抓圖成功！Width[%d], Height[%d], 幀號[%d], PixelType[0x%08x], FrameLen[%d]"
-                % (width, height, stOutFrame.stFrameInfo.nFrameNum, pixel_type, frame_len)
-            )
+            logger.debug(f'stOutFrame.stFrameInfo.nFrameNum: {frame_id}')
 
-            # ★ 驗證用：若 frame_len 跟 width*height 差距過大，代表結構體仍有錯位，
-            #   記下來、但仍以 width*height 為準去讀取資料（這是我們確定知道是對的兩個值）。
-            expected_len = width * height
-            if frame_len != expected_len:
-                logger.debug(
-                    f"[結構驗證] nFrameLen({frame_len}) 與 width*height({expected_len}) 不一致，"
-                    f"stFrameInfo 可能仍有欄位錯位！以 width*height 為準讀取。"
-                )
+            stConvertParam = MV_CC_PIXEL_CONVERT_PARAM()
+            memset(byref(stConvertParam), 0, sizeof(stConvertParam))
 
-            # 立刻把 SDK 緩衝區的資料複製出來。string_at 本身就是複製，
-            # 複製完成後 buffer 就可以安全交還給 SDK (MV_CC_FreeImageBuffer)。
-            raw_bytes = string_at(stOutFrame.pBufAddr, expected_len)
+            src_ptr = cast(stOutFrame.pBufAddr, POINTER(c_ubyte))
 
-            img_out = self._decode_to_image(raw_bytes, width, height, pixel_type)
+            stConvertParam.nWidth = width
+            stConvertParam.nHeight = height
+            stConvertParam.pSrcData = src_ptr
+            stConvertParam.nSrcDataLen = frame_len
+            stConvertParam.enSrcPixelType = pixel_type  # 原始 Bayer 格式
+            stConvertParam.enDstPixelType = PixelType_Gvsp_BGR8_Packed       # 目標格式,給 OpenCV 用 BGR
 
-            # 保留最後一次取像資訊，方便外部存檔時拿幀號等資訊
-            self._last_frame_info = stOutFrame.stFrameInfo
+            # 計算目的端 buffer 大小,並配置
+            stConvertParam.pDstBuffer = self.dst_ptr
+            stConvertParam.nDstBufferSize = self.dst_buffer_size
 
-            return True, img_out
+            ret = self.cam.MV_CC_ConvertPixelType(stConvertParam)
+            if ret != 0:
+                logger.error(f"Convert Pixel Type failed ! ret[0x{ret:x}]")
+                return False, None
+
+            img_out = np.frombuffer(self.dst_buffer, dtype=np.uint8).copy()
+            img_out = img_out.reshape(height, width, 3)
 
         finally:
-            # 無論成功或失敗，buffer 都要還給 SDK
-            self.cam.MV_CC_FreeImageBuffer(stOutFrame)
+            ret = self.cam.MV_CC_FreeImageBuffer(stOutFrame)
+            if ret != 0:
+                logger.error(f"Free Image Buffer failed ! ret[0x{ret:x}]")
+                return False, None
 
-    def _decode_to_image(self, raw_bytes, width, height, pixel_type):
-        """
-        從複製出來的原始 bytes 解出影像，並進行色彩空間轉換。
-        """
-        total_pixels = width * height
-        img_gray = np.frombuffer(raw_bytes, dtype=np.uint8, count=total_pixels)
-        img_2d = img_gray.reshape((height, width))
-
-        try:
-            if pixel_type == self.PIXEL_TYPE_MONO8:
-                img_out = img_2d
-                logger.debug('pixel_type is PIXEL_TYPE_MONO8 !')
-            elif pixel_type == self.PIXEL_TYPE_BAYER_RG8:
-                img_out = cv2.cvtColor(img_2d, cv2.COLOR_BayerRG2BGR)
-            else:
-                logger.debug(
-                    f"未預期的 pixel_type: 0x{pixel_type:08x} ({pixel_type})，"
-                    f"嘗試以 BayerRG8 解析（相機目前確認設定為 BayerRG8）"
-                )
-                img_out = cv2.cvtColor(img_2d, cv2.COLOR_BayerRG2BGR)
-            img_out = cv2.cvtColor(img_out, cv2.COLOR_BGR2RGB)
-        except Exception as e:
-            logger.error("色彩轉換失敗，採用原圖輸出... %s" % str(e))
-            img_out = img_2d
-
-        return img_out
+        return img_out is not None, img_out
 
     # ---------------- 存檔 ----------------
     def save_image(self, img, save_type=4, file_path=None):
@@ -483,7 +483,7 @@ class HikCamera:
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     try:
-        USE_MMR = True
+        USE_MMR = False
 
         logger.remove()
         logger.add(sys.stderr, level='INFO')
