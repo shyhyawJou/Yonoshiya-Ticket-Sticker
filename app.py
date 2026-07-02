@@ -16,7 +16,6 @@ import cv2
 import threading
 import subprocess
 
-from mjpeg_streamer import Stream, MjpegServer
 from config import load_config
 from mqtt_bus import MqttBus, MqttSettings
 from ocr_engine import AsyncOCR
@@ -24,6 +23,7 @@ from mmr_engine import Rotated_RTMDET
 from hikcam import HikCamera
 from logic_engine import LogicEngine
 from video import Video
+from streamer import Mjpeg_Streamer
 
 
 def _now():
@@ -73,12 +73,10 @@ class StreamManager:
         # --- init streamer ---
         self.stream_mode = "detect"
         self.stream_size = (1280, 960)   
-        # self.stream_size = (4024, 3036)   
-        self.stream_fps = 15
-        self.init_streamer()
+        self.streamer = Mjpeg_Streamer(route='/meal', quality=40)
+        self.streamer.start()
 
         logger.info(f"StreamManager v{ver} 初始化成功!")
-
 
     def _load_task(self, task: str):
         """
@@ -144,7 +142,6 @@ class StreamManager:
 
         logger.info(f"已成功載入任務: {task}")
 
-
     def _save_frame(self, frame: np.ndarray, folder_name: str) -> None:
         try:
             save_path_dir = self.save_dir / folder_name
@@ -160,7 +157,6 @@ class StreamManager:
      
         except Exception as e:
             logger.error(f"儲存影像失敗 (Folder: {folder_name}): {e}")
-
 
     def _update_camera_config(self, key: str, value) -> None:
         """
@@ -219,7 +215,6 @@ class StreamManager:
             logger.error(f"更新 config.yaml 失敗: {e}")
             return False
 
-
     def _on_ocr_callback(self, frame_crop, rec_res, dt_boxes, is_flip, time_cost, metadata):
         """
         由 OCR Thread 呼叫的 Callback
@@ -232,7 +227,6 @@ class StreamManager:
             "metadata": metadata
         }
         self.ocr_result_queue.put(result_pkg)
-
   
     def start_camera(self) -> None:
         if self.camera_alone:
@@ -277,7 +271,6 @@ class StreamManager:
 
         return frame
 
-
     def reload_camera(self, payload: dict) -> None:
         """動態更新相機參數並軟重啟"""
         logger.info(f"收到動態修改相機參數請求: {payload}")
@@ -312,33 +305,6 @@ class StreamManager:
             logger.error(f"相機重啟失敗: {e}")
         finally:
             self._is_reloading_camera = False 
-
-
-    def reload_stream(self, mode: str) -> None:
-        """動態切換串流模式並重啟 MJPEG Stream"""
-        logger.info(f"收到動態切換串流模式請求: {mode}")
-
-        if mode not in ["detect", "setting"]:
-            logger.error(f"未知的串流模式: '{mode}'")
-            return
-
-        if self.stream_mode == mode:
-            logger.info(f"當前已是 '{mode}' 模式，不需重啟串流")
-            return
-        
-        # self._is_reloading_stream = True  
-        # logger.info("準備關閉舊串流...")    
-        # self.stop_stream()
-
-        # try:
-        #     self.stream_mode = mode
-        #     self.init_streamer()
-        #     logger.info(f"串流已使用新模式 '{mode}' 重新啟動")
-        # except Exception as e:
-        #     logger.error(f"串流重啟失敗: {e}")
-        # finally:
-        #     self._is_reloading_stream = False
-
 
     def _draw_overlay(self, frame):
         """
@@ -378,7 +344,6 @@ class StreamManager:
                     transformed_pts = transformed_pts.reshape(4, 2).astype(int)
                     cv2.polylines(vis_frame, [transformed_pts], isClosed=True, color=(0, 255, 0), thickness=2)
         return vis_frame
-
 
     def _camera_worker(self):
         """
@@ -425,7 +390,6 @@ class StreamManager:
         
         self.capture.release()
         logger.info("Camera Worker 結束")
-
 
     def stream_frames(self) -> None:
         """Main loop"""
@@ -544,26 +508,13 @@ class StreamManager:
 
                 if self.stream_mode == "detect":
                     stream_out = cv2.resize(out, self.stream_size)
-                    self.stream.set_frame(stream_out)
+                    self.streamer.push_frame(stream_out)
                 else:
-                    self.stream.set_frame(out)
+                    self.streamer.push_frame(out)
 
             except Exception:
                 logger.error(traceback.format_exc())
                 break
-
-
-    def init_streamer(self):
-        if self.stream_mode == "setting":
-            target_size = (self.cfg.runtime.camera.width, self.cfg.runtime.camera.height)
-        else:
-            target_size = self.stream_size
-
-        self.stream = Stream("meal", size=target_size, quality=50, fps=self.stream_fps)
-        self.server = MjpegServer("127.0.0.1", self.cfg.runtime.stream.port)
-        self.server.add_stream(self.stream)
-        self.server.start()
-
 
     def stop_camera(self):
         if self.capture and self.capture.isOpened():
@@ -577,11 +528,10 @@ class StreamManager:
         else:
             pass
 
-
     def stop_stream(self):
-        if self.server:
+        if self.streamer is not None:
             try:
-                self.server.stop()
+                self.streamer.stop()
                 logger.info("MJPEG streamer stopped.")
             except Exception as e:
                 logger.error(f"Stop streamer error: {e}")
@@ -592,11 +542,10 @@ class StreamManager:
                     logger.error(f"Stop streamer BaseException: {e}")
                     raise e
             finally:
-                self.server = None
+                self.streamer = None
                 logger.info("MJPEG streamer -> None.")
         else:
             pass
-
 
     def cleanup(self) -> None:
         """Release resources and disconnect MQTT cleanly."""
@@ -620,7 +569,6 @@ class StreamManager:
         self.stop_stream()
         logger.info("Cleaned up.")
 
-
     # ---------- commands ----------
     def _handle_cmd(self, cmd: str, payload: dict) -> None:
         #logger.info(f"收到 MQTT 指令: '{cmd}', 內容: {payload}"    
@@ -637,16 +585,7 @@ class StreamManager:
                 logger.warning(f"不支援 {payload} 畫圖設定")
 
         elif cmd == "mode_setting":
-            mode_type = payload.get("type")
-            # if mode_type == "stream":
-            #     stream_mode = payload.get("mode")
-            #     if stream_mode:
-            #         threading.Thread(target=self.reload_stream, args=(stream_mode,), daemon=True).start()
-            #         self.stream_mode = stream_mode
-            #     else:
-            #         logger.warning("缺少 'mode' 參數")
-            # else:
-            #     logger.warning(f"不支援 {mode_type} 模式設定")
+            pass
                 
         elif cmd == "capture":
             self._trigger_capture = True
