@@ -342,6 +342,8 @@ class HikCamera:
                 ret = self.cam.MV_CC_SetBoolValue(name, value)
             elif typ == 'enum':
                 ret = self.cam.MV_CC_SetEnumValue(name, value)
+            elif typ == 'string':
+                ret = self.cam.MV_CC_SetEnumValueByString(name, value)
             else:
                 raise ValueError(f'invalid camera parameter type: {typ}')
 
