@@ -199,11 +199,11 @@ def load_config(config_path: str) -> Config:
 
         # Camera
         ca = base["camera_params"]
-        #camera_params = CameraParmCfg(
-        #    Gain = float(ca["Gain"]),
-        #    ExposureAuto = str(ca["ExposureAuto"]),
-        #    ExposureTime = float(ca["ExposureTime"])
-        #)
+        camera_params = CameraParmCfg(
+            Gain = float(ca["Gain"]),
+            ExposureAuto = str(ca["ExposureAuto"]),
+            ExposureTime = float(ca["ExposureTime"])
+        )
 
         return Config(
             mqtt=mqtt,
@@ -211,8 +211,7 @@ def load_config(config_path: str) -> Config:
             thresholds=thresholds,
             placement=placement,
             stability=stability,
-            #camera_params=camera_params,
-            camera_params=ca,
+            camera_params=camera_params,
             classes=classes,
             menus=menus
         )

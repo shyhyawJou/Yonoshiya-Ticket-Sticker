@@ -1,3 +1,5 @@
+# mode: "tray"（原本綁 tray 盤的狀態機） | "single"（單一訂單、不需要 tray 盤）
+mode: tray
 includes:
   classes: classes.yaml
   menus_mapping: menus_mapping.yaml
@@ -54,16 +56,27 @@ camera_params:
         ExposureMode:
             value: 'Timed'
             type: 'string'
-        # 2. 新增或修改 ExposureAuto 來啟動自動曝光
-        #ExposureAuto:
-        #    value: 2  # 2 通常代表 Continuous（連續自動曝光）
-        #    type: 'enum'
         ExposureAuto:
-            value: 'Continuous'  # Continuous, Off
+            value: 'Off'
             type: 'string' 
+            allowed:
+                - 'Continuous'
+                - 'Once'
+                - 'Off'
         ExposureTime: 
-            value: 50000.0
+            value: 75000.0
             type: 'float' 
+            max: 500000
+            min: 20
+        GainAuto:
+            value: 'Off'
+            type: 'string' 
+            allowed:
+                - 'Continuous'
+                - 'Once'
+                - 'Off'
         Gain:
-            value: 5.0
+            value: 6.0
             type: 'float' 
+            max: 23.981199264526367
+            min: 0.0

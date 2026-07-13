@@ -158,63 +158,6 @@ class StreamManager:
         except Exception as e:
             logger.error(f"儲存影像失敗 (Folder: {folder_name}): {e}")
 
-    def _update_camera_config(self, key: str, value) -> None:
-        """
-        更新 config.yaml 文件中的 camera 參數
-        """
-        section = "camera_params"
-        param_rules = {
-                "GainAuto": {"type": str, "allowed": ["Continuous", "Once", "Off"]},
-                "Gain": {"type": float, "min": 0.0, "max": 18.0},
-                "ExposureAuto": {"type": str, "allowed": ["Continuous", "Once", "Off"]},
-                "ExposureTime": {"type": float, "min": 60.0, "max": 60000.0},
-        }
-        if key not in param_rules:
-            logger.warning(f"參數 '{key}' 不在允許修改，已略過")
-            return False
-
-        rule = param_rules[key]
-        valid_value = value
-        try:
-            if rule["type"] == str:
-                valid_value = str(value).strip()
-                if valid_value not in rule["allowed"]:
-                    logger.error(f"參數 '{key}' 的值 '{valid_value}' 不合法，允許的值: {rule['allowed']}")
-                    return False
-            elif rule["type"] == float:
-                valid_value = float(value)
-                if valid_value < rule["min"] or valid_value > rule["max"]:
-                    logger.error(f"參數 '{key}' 的值 '{valid_value}' 超出範圍 ({rule['min']} ~ {rule['max']})")
-                    return False
-        except ValueError:
-            logger.error(f"參數 '{key}' 的數值型態錯誤 (無法轉換為 {rule['type'].__name__})")
-            return False
-
-        try:
-            with open(self.config_path, 'r', encoding='utf-8') as f:
-                config_data = yaml.safe_load(f)
-
-            if section not in config_data:
-                config_data[section] = {}
-
-            if config_data[section].get(key) == valid_value:
-                logger.debug(f"參數 '{key}' 數值未變 ({valid_value})，不執行更新")
-                return False
-
-            config_data[section][key] = valid_value
-            with open(self.config_path, 'w', encoding='utf-8') as f:
-                yaml.dump(config_data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
-            
-            if hasattr(self.cfg, section):
-                setattr(getattr(self.cfg, section), key, valid_value)
-            
-            logger.info(f"更新 camera_params 成功 '{key}' -> {valid_value}")
-            return True
-
-        except Exception as e:
-            logger.error(f"更新 config.yaml 失敗: {e}")
-            return False
-
     def _on_ocr_callback(self, frame_crop, rec_res, dt_boxes, is_flip, time_cost, metadata):
         """
         由 OCR Thread 呼叫的 Callback
@@ -271,40 +214,6 @@ class StreamManager:
 
         return frame
 
-    def reload_camera(self, payload: dict) -> None:
-        """動態更新相機參數並軟重啟"""
-        logger.info(f"收到動態修改相機參數請求: {payload}")
-
-        key = payload.get("control")
-        value = payload.get("value")
-
-        if key is None or value is None:
-            logger.error("MQTT Payload 格式錯誤，缺少 'control' 或 'value'")
-            return
-
-        if not self._update_camera_config(key, value):
-            return
-        
-        self._is_reloading_camera = True  
-        logger.info("準備關閉舊影像串流...")
-        self.stop_camera()
-        
-        if self.camera_alone and self.capture_thread and self.capture_thread.is_alive():
-            self.capture_thread.join(timeout=2.0)
-
-        time.sleep(0.1)
-        try:
-            self.start_camera()  
-            logger.info("相機已使用新參數重新啟動！")
-            self.bus.publish_system({
-                "ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime()),
-                "type": "CAMERA_PARAMS_DONE",
-                "msg": {}
-            })
-        except Exception as e:
-            logger.error(f"相機重啟失敗: {e}")
-        finally:
-            self._is_reloading_camera = False 
 
     def _draw_overlay(self, frame):
         """
@@ -415,6 +324,7 @@ class StreamManager:
                 if self.camera_alone:
                     try:
                         frame = self.frame_queue.get(block=True, timeout=1.0)
+                        # self.tmp_frame = frame.copy()
                     except queue.Empty:
                         continue
                 else:   
@@ -571,7 +481,8 @@ class StreamManager:
 
     # ---------- commands ----------
     def _handle_cmd(self, cmd: str, payload: dict) -> None:
-        #logger.info(f"收到 MQTT 指令: '{cmd}', 內容: {payload}"    
+        logger.info(f"收到 MQTT 指令: '{cmd}', 內容: {payload}")
+        
         if cmd == "plot_setting":
             if "box" in payload:
                 val = payload["box"]
@@ -585,7 +496,48 @@ class StreamManager:
                 logger.warning(f"不支援 {payload} 畫圖設定")
 
         elif cmd == "mode_setting":
-            pass
+            new_mode = payload.get("mode")
+            if new_mode not in ("tray", "single"):
+                logger.warning(f"[MODE] 不支援的 mode: '{new_mode}'，僅接受 'tray' 或 'single'")
+                return
+
+            if new_mode == self.cfg.mode:
+                logger.info(f"[MODE] 目前已經是 '{new_mode}' 模式，略過切換")
+                return
+
+            logger.info(f"[MODE] 切換模式: '{self.cfg.mode}' -> '{new_mode}'，重建狀態機...")
+            with self.data_lock:
+                old_mode = self.cfg.mode
+                try:
+                    self.cfg.mode = new_mode
+                    # 重新 new 一份 LogicEngine：舊的 tracker/state machine（連同
+                    # 裡面所有 trays 狀態）直接被丟棄，不需要額外做清空動作。
+                    self.logic = LogicEngine(
+                        cfg=self.cfg,
+                        bus=self.bus,
+                        mmr=self.mmr,
+                        rec_path=self.cfg.runtime.model.ocr_rec,
+                        dict_path=self.cfg.runtime.model.text
+                    )
+                except Exception as e:
+                    logger.error(f"[MODE] 切換模式失敗，退回 '{old_mode}': {e}")
+                    self.cfg.mode = old_mode
+                    return
+
+                # 舊模式殘留的 OCR 結果/畫面暫存資料一併清掉，避免對到錯的 tray_id
+                self.ocr_data = None
+                while not self.ocr_result_queue.empty():
+                    try:
+                        self.ocr_result_queue.get_nowait()
+                    except Exception:
+                        break
+
+            logger.info(f"[MODE] 已切換為 '{new_mode}' 模式")
+            self.bus.publish_system({
+                "ts": _now(),
+                "type": "MODE_CHANGED",
+                "msg": {"mode": new_mode}
+            })
                 
         elif cmd == "capture":
             self._trigger_capture = True
@@ -594,6 +546,12 @@ class StreamManager:
         elif cmd == "reset":
             reset_type = payload.get("type")
             tray_id = payload.get("tray_id")
+
+            # 用原始畫面 (未經錄影壓縮) 存檔，檔名含日期時間避免覆蓋
+            # if hasattr(self, "tmp_frame") and self.tmp_frame is not None:
+            #     self._save_frame(self.tmp_frame, "reset_capture")
+            # else:
+            #     logger.warning("[RESET] tmp_frame 尚未就緒，略過截圖")
 
             logger.info(f"[RESET] 收到重置指令 (type: '{reset_type}')...")
             with self.data_lock:
@@ -618,10 +576,13 @@ class StreamManager:
         elif cmd == "hardware_ctrl":
             ctrl_type = payload.get("type")
             if ctrl_type == "camera":
-                #threading.Thread(target=self.reload_camera, args=(payload,), daemon=True).start()
-                self.capture.set_camera_parameters()
+                self.capture.set_camera_parameters(payload, display=True)
             else:
                 logger.warning(f"不支援 {ctrl_type} 硬體設定")
+
+        elif cmd == "no_tray_setting":
+            reset_type = payload.get("no_tray")
+            pass
 
         else:
             logger.warning(f"UNKNOWN_CMD: {cmd}")
@@ -629,7 +590,7 @@ class StreamManager:
     def init_camera(self):
         if self.cfg.runtime.camera.device == 'hik':
             logger.info(f"使用工業相機 (HIK)...")
-            self.capture = HikCamera(self.cfg.runtime.camera.source, self.cfg)
+            self.capture = HikCamera(self.cfg.runtime.camera.source, self.cfg, self.bus)
         elif self.cfg.runtime.camera.device == 'aravis':
             ctrl_dict = self.cfg.camera_params['aravis']
             features_str = " ".join([f"{k}={v}" for k, v in ctrl_dict.items()])

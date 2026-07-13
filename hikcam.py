@@ -7,9 +7,18 @@ from ctypes import *
 import cv2
 from loguru import logger
 import numpy as np
+import traceback
 import ctypes
+import time
+import yaml
+import threading
+from pathlib import Path
 from config import Config
 from mmr_engine import Rotated_RTMDET
+from config import _load_yaml
+from mqtt_bus import MqttBus
+
+
 
 # 兼容不同操作系统加载 动态库
 currentsystem = platform.system()
@@ -193,7 +202,7 @@ class HikCamera:
     # Mono8 的像素格式碼（用於判斷是否為黑白相機）
     PIXEL_TYPE_MONO8 = 17301505
 
-    def __init__(self, device_index, cfg: Config):
+    def __init__(self, device_index, cfg: Config, mqtt: MqttBus):
         """
         :param device_index: 要開啟的裝置在列舉結果中的索引
         :param cfg: Config 物件，內含 runtime.camera.source 與 camera_params 等設定
@@ -207,6 +216,7 @@ class HikCamera:
 
         self.cam = MvCamera()
         self.cfg = cfg
+        self.cfg_path = Path("tasks") / 'ocr' / "config.yaml"
         self._is_sdk_initialized = False
         self._is_open = False
         self._is_grabbing = False
@@ -214,6 +224,9 @@ class HikCamera:
         self.dst_buffer_size = None
         self.dst_buffer = None
         self.dst_ptr = None
+
+        # mqtt
+        self.mqtt = mqtt
 
         device_count = HikCamera.list_available_devices()
         if self.cfg.runtime.camera.source >= device_count:
@@ -224,6 +237,18 @@ class HikCamera:
         except Exception:
             self.release()
             raise
+
+        # --- parameter update
+        self._config_dirty = False
+        self._config_last_update = 0.0
+        self._config_lock = threading.Lock()
+        self.save_delay = 5.0
+
+        self._config_save_thread = threading.Thread(
+            target=self._config_save_worker,
+            daemon=True
+        )
+        self._config_save_thread.start()
 
     # ---------------- 列舉裝置（不需要知道 HikDeviceManager 也能用） ----------------
     @classmethod
@@ -299,7 +324,7 @@ class HikCamera:
             raise RuntimeError("set trigger mode fail! ret[0x%x]" % ret)
 
         # 設定相機參數
-        self.set_camera_parameters()
+        self.set_camera_parameters(display=True)
 
         # 開始取流；失敗時同樣要關裝置 + 銷毀 handle 再丟例外
         ret = self.cam.MV_CC_StartGrabbing()
@@ -327,18 +352,30 @@ class HikCamera:
 
         return self
 
-    def set_camera_parameters(self, params):
+    def set_camera_parameters(self, msg=None, display=True):
+        """ 如果是透過指令的話, 一次只會有一個參數 """
         # command or config
-        if params is None:
+        if msg is None:
             logger.info('=' * 25 + ' Set Camera Parameter by [config]' + '=' * 25)
-            for k, v in list(params.items()):
-                typ = self.cfg.camera_params[k]['type']
-                params['type'] = v
+            params = self.cfg.camera_params['hik']
         else:
             logger.info('=' * 25 + ' Set Camera Parameter by [command]' + '=' * 25)
-            params = self.cfg.camera_params['hik']
+            name = msg['control']
+            info = self.cfg.camera_params['hik'].get(name)
+            if info is None:
+                logger.error(f'camera parameter [{name}] is not in the settable list !')
+                return
+            params = {f'{name}': info}
+            params[name]['value'] = msg['value']
+            logger.debug(f'new camera parameter: {params}')
+
+        from_cmd = msg is not None
+        logger.debug(f'from command: {from_cmd}')
 
         # set
+        # 記錄每個參數是否設定成功，失敗的參數不能拿去觸發存 config 流程
+        set_success = {}
+
         for name, info in params.items():
             value = info['value']
             typ = info['type']
@@ -356,12 +393,104 @@ class HikCamera:
             else:
                 raise ValueError(f'invalid camera parameter type: {typ}')
 
+            set_success[name] = (ret == 0)
+
             if ret == 0:
                 logger.success(f'Set [{name}] to {value} !')
             else:
-                logger.warning(f'Set camera parameter [{name}] failed !')
+                logger.warning(f'Set camera parameter [{name}] failed ! ret[0x{ret:x}]')
 
         logger.info('=' * 60)
+
+        # 印出所有相機參數和有效的範圍值
+        if display:
+            self.display_camera_parameters()
+
+        if from_cmd:
+            if set_success.get(msg['control']):
+                self._update_camera_config(msg['control'], msg['value'])
+            else:
+                logger.warning(
+                    f"參數 [{msg['control']}] 設定失敗，不觸發存 config 流程，"
+                    f"config.yaml 維持原本的值"
+                )
+        self.mqtt.publish_system({'type': 'CAMERA_PARAMS_DONE'})
+
+    def display_camera_parameters(self, params=None):
+        """
+        顯示相機參數的目前值與有效範圍（min/max/step，或 enum 的候選值列表）。
+
+        :param params: 要查詢的參數字典，格式同 cfg.camera_params['hik']
+                        （key=參數名, value=dict 含 'type'）。
+                        若為 None，預設查詢 self.cfg.camera_params['hik'] 裡的所有參數。
+        :return: dict，key=參數名，value=查到的資訊 dict（查詢失敗則為 None）
+        """
+        if not self._is_open:
+            logger.warning("camera is not open, cannot query parameter range!")
+            return {}
+
+        if params is None:
+            params = self.cfg.camera_params['hik']
+
+        result = {}
+
+        logger.info('=' * 25 + ' Dump Camera Parameter Range ' + '=' * 25)
+
+        for name, info in params.items():
+            typ = info['type']
+
+            if typ == 'float':
+                val = MVCC_FLOATVALUE()
+                ret = self.cam.MV_CC_GetFloatValue(name, val)
+                if ret == 0:
+                    data = {'cur': val.fCurValue, 'min': val.fMin, 'max': val.fMax}
+                    logger.info(f"[{name}] cur={data['cur']}, min={data['min']}, max={data['max']}")
+                else:
+                    data = None
+                    logger.warning(f"cannot read parameter [{name}], ret[0x{ret:x}]")
+
+            elif typ == 'int':
+                val = MVCC_INTVALUE_EX()
+                ret = self.cam.MV_CC_GetIntValueEx(name, val)
+                if ret == 0:
+                    data = {'cur': val.nCurValue, 'min': val.nMin, 'max': val.nMax, 'step': val.nInc}
+                    logger.info(
+                        f"[{name}] cur={data['cur']}, min={data['min']}, "
+                        f"max={data['max']}, step={data['step']}"
+                    )
+                else:
+                    data = None
+                    logger.warning(f"cannot read parameter [{name}], ret[0x{ret:x}]")
+
+            elif typ == 'bool':
+                val = c_bool()
+                ret = self.cam.MV_CC_GetBoolValue(name, val)
+                if ret == 0:
+                    data = {'cur': val.value}
+                    logger.info(f"[{name}] cur={data['cur']}")
+                else:
+                    data = None
+                    logger.warning(f"cannot read parameter [{name}], ret[0x{ret:x}]")
+
+            elif typ in ('enum', 'string'):
+                val = MVCC_ENUMVALUE()
+                ret = self.cam.MV_CC_GetEnumValue(name, val)
+                if ret == 0:
+                    supported = list(val.nSupportValue[:val.nSupportedNum])
+                    data = {'cur': val.nCurValue, 'supported': supported}
+                    logger.info(f"[{name}] cur={data['cur']}, supported={data['supported']}")
+                else:
+                    data = None
+                    logger.warning(f"cannot read parameter [{name}], ret[0x{ret:x}]")
+
+            else:
+                data = None
+                logger.warning(f"unknown parameter type [{typ}] for [{name}], skip")
+
+            result[name] = data
+
+        logger.info('=' * 78)
+        return result
 
     # ---------------- 取像 ----------------
     def read(self):
@@ -396,11 +525,11 @@ class HikCamera:
                 logger.error(f'frame size is different from setting ! real frame size: {w, h}')
                 return False, None
 
-            logger.debug(f'stOutFrame.stFrameInfo.nWidth: {width}')
-            logger.debug(f'stOutFrame.stFrameInfo.nHeight: {height}')
-            logger.debug(f'stOutFrame.stFrameInfo.enPixelType: {pixel_type}')
-            logger.debug(f'stOutFrame.stFrameInfo.nFrameLen: {frame_len}')
-            logger.debug(f'stOutFrame.stFrameInfo.nFrameNum: {frame_id}')
+            logger.trace(f'stOutFrame.stFrameInfo.nWidth: {width}')
+            logger.trace(f'stOutFrame.stFrameInfo.nHeight: {height}')
+            logger.trace(f'stOutFrame.stFrameInfo.enPixelType: {pixel_type}')
+            logger.trace(f'stOutFrame.stFrameInfo.nFrameLen: {frame_len}')
+            logger.trace(f'stOutFrame.stFrameInfo.nFrameNum: {frame_id}')
 
             stConvertParam = MV_CC_PIXEL_CONVERT_PARAM()
             memset(byref(stConvertParam), 0, sizeof(stConvertParam))
@@ -488,6 +617,70 @@ class HikCamera:
             self._is_sdk_initialized = False
         logger.success('release the camera !')
 
+    def _update_camera_config(self, key: str, value) -> None:
+        """
+        更新 config.yaml 文件中的 camera 參數
+        """
+        param_rules = self.cfg.camera_params['hik']
+        if key not in param_rules:
+            logger.warning(f"參數 '{key}' 不在允許修改，已略過")
+            return False
+
+        rule = param_rules[key]
+        valid_value = value
+        try:
+            if rule["type"] == 'string':
+                valid_value = str(value).strip()
+                if valid_value not in rule["allowed"]:
+                    logger.warning(f"參數 '{key}' 的值 '{valid_value}' 不合法，允許的值: {rule['allowed']}")
+                    return
+            elif rule["type"] == 'float':
+                valid_value = float(value)
+                if valid_value < rule["min"] or valid_value > rule["max"]:
+                    logger.warning(f"參數 '{key}' 的值 '{valid_value}' 超出範圍 ({rule['min']} ~ {rule['max']})")
+                    return
+        except ValueError:
+            logger.error(f"參數 '{key}' 的數值型態錯誤 (無法轉換為 {rule['type'].__name__})")
+
+        with self._config_lock:
+            self._config_dirty = True
+            self._config_last_update = time.time()
+            logger.warning(f'camera config is updated, new config will be saved in {self.save_delay} (s) !')
+
+        rule['value'] = value
+        logger.info(f"[MEMORY UPDATE] the camera parameter [{key}]'s value to {value} !")
+        logger.debug(f'new camera config: {self.cfg.camera_params["hik"]}')
+
+    def _config_save_worker(self):
+        logger.success('start config update thread!')
+
+        while self._is_open:
+            try:
+                need_save = False
+
+                with self._config_lock:
+                    if (
+                        self._config_dirty
+                        and time.time() - self._config_last_update >= self.save_delay
+                    ):
+                        self._config_dirty = False
+                        need_save = True
+
+                if need_save:
+                    self._save_camera_config()
+
+                time.sleep(0.1)
+            except:
+                logger.error(traceback.format_exc())
+
+    def _save_camera_config(self):
+        tmp_path = self.cfg_path.with_stem('tmp_' + self.cfg_path.stem)
+        data = _load_yaml(self.cfg_path)
+        data['camera_params']['hik'] = self.cfg.camera_params['hik']
+        with open(tmp_path, 'w', encoding='utf-8') as f:
+            yaml.safe_dump(data, f, indent=4, allow_unicode=True, sort_keys=False)
+        os.replace(tmp_path, self.cfg_path)
+        logger.success(f"[FILE UPDATE] saved the {self.cfg_path} !")
 
 # ---------------------------------------------------------------------------
 # main：互動式選擇裝置，開啟、取一張圖、存檔

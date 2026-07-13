@@ -67,6 +67,7 @@ class StabilityCfg:
     k_container_fail: int
     k_container_new: int
     tray_missing_frame: int
+    sticker_missing_frame: int
 
 @dataclass
 class ClassInfo:
@@ -102,7 +103,8 @@ class Config:
     menus_ticket: List[str]
     menus_sticker: List[str]
     menus_mapping: List[MappingCasesCfg]
-
+    # "tray": 原本綁 tray 盤的狀態機; "single": 單一訂單、不需要 tray 盤的狀態機
+    mode: str = "tray"
 
 # ---------- Configuration Loader ----------
 
@@ -221,8 +223,16 @@ def load_config(config_path: str) -> Config:
             n_settle_frame=int(st["n_settle_frame"]),
             k_container_fail=int(st["k_container_fail"]),
             k_container_new=int(st["k_container_new"]),
-            tray_missing_frame=int(st["tray_missing_frame"])
+            tray_missing_frame=int(st["tray_missing_frame"]),
+            sticker_missing_frame=int(st["sticker_missing_frame"])
         )
+
+        # Mode: 決定要啟用哪一種狀態機 ("tray" | "single")
+        # 舊的 config.yaml 沒有這個欄位也沒關係，預設當作 "tray"，行為完全不變。
+        mode = str(base.get("mode", "tray")).strip().lower()
+        if mode not in ("tray", "single"):
+            logger.warning(f"設定檔 mode 值不合法: '{mode}'，退回預設值 'tray'")
+            mode = "tray"
 
         # Camera
         ca = base["camera_params"]
@@ -244,7 +254,8 @@ def load_config(config_path: str) -> Config:
             classes=classes,
             menus_ticket=menus_ticket,
             menus_sticker=menus_sticker,
-            menus_mapping=mapping_cases
+            menus_mapping=mapping_cases,
+            mode=mode,
         )
 
     except KeyError as e:

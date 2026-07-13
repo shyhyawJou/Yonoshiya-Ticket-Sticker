@@ -10,7 +10,10 @@ import pyclipper
 import threading
 import queue
 import concurrent.futures
+from datetime import datetime
 
+# 1. 取得當下時間，並格式化成字串 (例如: 20260702_105541)
+current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
 from AI import PaddleOCR_Det, PaddleOCR_Cls, PaddleOCR_Rec
 
 def draw_det_bboxes(frame_crop, dt_boxes, save_path="det_debug.jpg"):
@@ -552,7 +555,8 @@ class TextSystemDLA:
 
             # DLA 推論
             flat_output = self.rec_model.run(norm_img)
-            preds = flat_output.reshape(1, 40, 4401)
+            # preds = flat_output.reshape(1, 40, 4401)
+            preds = flat_output.reshape(1, 40, -1)
 
             preds_idx = preds.argmax(axis=2)
             preds_prob = preds.max(axis=2)
@@ -562,6 +566,23 @@ class TextSystemDLA:
         et3 = time.time()
         return rec_res, et3 - st3
 
+    def _check_boxes_need_rotate_90(self, dt_boxes, ratio_thresh=1.4, vertical_ratio=0.2):
+        """
+        檢查文字框是否被誤判為直式框，代表整張圖被轉成 90 或 270 度。
+        用「比例」而非「絕對數量」判斷，這樣框數很少（例如貼紙只有 1 個框）也能適用。
+        """
+        if len(dt_boxes) == 0:
+            return False
+
+        vertical_count = 0
+        for box in dt_boxes:
+            box = np.array(box, dtype=np.float32)
+            rect_width = np.linalg.norm(box[0] - box[1])
+            rect_height = np.linalg.norm(box[0] - box[3])
+            if rect_width > 0 and (rect_height / rect_width) >= ratio_thresh:
+                vertical_count += 1
+
+        return (vertical_count / len(dt_boxes)) >= vertical_ratio
 
     # ========================= #
     # Main Pipeline             #
@@ -572,14 +593,24 @@ class TextSystemDLA:
  
         ori_im = image_input.copy()
         img_to_detect = ori_im
+        is_rotated_90 = False
 
         # 1. Detection
         dt_boxes, elapse1 = self.run_det(img_to_detect)
         # logger.info(f"dt_boxes num: {len(dt_boxes)}, elapsed: {elapse1:.3f}s")
 
         if len(dt_boxes) == 0:
-            return [], [], False, time.time() - st
-  
+            return [], [], False, is_rotated_90, time.time() - st
+
+        # 1.5 檢查是否整張圖被轉成 90 / 270 度（大量直式文字框）
+        if self._check_boxes_need_rotate_90(dt_boxes):
+            ori_im = cv2.rotate(ori_im, cv2.ROTATE_90_CLOCKWISE)
+            is_rotated_90 = True
+
+            dt_boxes, elapse1 = self.run_det(ori_im)
+            if len(dt_boxes) == 0:
+                return [], [], False, is_rotated_90, time.time() - st
+
         # 2. 裁剪文字區域
         img_crop_list = []
         dt_boxes = self.sorted_boxes(dt_boxes)
@@ -590,7 +621,7 @@ class TextSystemDLA:
 
         # 3. 方向分類
         img_crop_list, cls_res, flip_count, elapse2 = self.run_cls(img_crop_list)
-        is_flip = flip_count > 4
+        is_flip = flip_count / len(img_crop_list) > 0.5 # 改用比例判斷
         # logger.info(f"cls_res num: {len(cls_res)}, elapsed: {elapse2:.3f}s")
 
         # 4. 若偵測到翻轉，旋轉影像 180 度後重新執行偵測與識別
@@ -600,7 +631,7 @@ class TextSystemDLA:
             dt_boxes, _ = self.run_det(rotated_im)
 
             if len(dt_boxes) == 0:
-                return [], [], is_flip, time.time() - st
+                return [], [], is_flip, is_rotated_90, time.time() - st
 
             img_crop_list = []
             dt_boxes = self.sorted_boxes(dt_boxes)
@@ -617,7 +648,7 @@ class TextSystemDLA:
 
         et = time.time()
 
-        return rec_res, dt_boxes, is_flip, et - st
+        return rec_res, dt_boxes, is_flip, is_rotated_90, et - st
 
 
 class StandaloneRecDLA:
@@ -769,7 +800,8 @@ class StandaloneRecDLA:
         # self._save_debug_image(norm_img[0], f"dt_crop_resize_{self.count}.jpg")
         
         flat_output = self.rec_model.run(norm_img)
-        preds = flat_output.reshape(1, 40, 4401)
+        # preds = flat_output.reshape(1, 40, 4401)
+        preds = flat_output.reshape(1, 40, -1)
 
         allowed_indices = [0] + list(range(17, 26))
         allowed_preds = preds[0][:, allowed_indices]
@@ -786,8 +818,8 @@ class StandaloneRecDLA:
         return decode_out
 
     def predict_quantity(self, frame_crop: np.ndarray, cx: float, cy: float, h: float, w: float, is_flip: bool):
-        half_h = int(h / 2)
-        half_w = int(w / 2 * 0.6)
+        half_h = int(h / 2 * 1.1)
+        half_w = int(w / 2 * 1.0)
         cx = int(cx) + 10  # 往右偏移
         cy = int(cy)
 
@@ -803,7 +835,9 @@ class StandaloneRecDLA:
 
         # 存 debug 圖
         try:
-            debug_path = f"debug_qty_{self.count}.jpg"
+            debug_dir_path = f"debug_imgs/crop_quantity_{current_time}"
+            debug_path = os.path.join(debug_dir_path, f"debug_qty_{self.count}.jpg")
+            # os.makedirs(debug_dir_path, exist_ok=True)
             # cv2.imwrite(debug_path, debug_crop)
             print(f"[predict_quantity] 已存 crop 圖 → {debug_path}")
         except Exception as e:
@@ -812,7 +846,8 @@ class StandaloneRecDLA:
         norm_img = self._resize_norm_img(debug_crop)
 
         flat_output = self.rec_model.run(norm_img)
-        preds = flat_output.reshape(1, 40, 4401)
+        # preds = flat_output.reshape(1, 40, 4401)
+        preds = flat_output.reshape(1, 40, -1)
 
         allowed_indices = [0] + list(range(17, 26))
         allowed_preds = preds[0][:, allowed_indices]
@@ -891,7 +926,11 @@ class AsyncOCR:
                 M_inv = metadata['M_inv']
                 
                 # --- 執行 OCR ---
-                rec_res, dt_boxes, is_flip, time_cost = self.ocr_sys.predict(frame_crop)
+                rec_res, dt_boxes, is_flip, is_rotated_90, time_cost = self.ocr_sys.predict(frame_crop)
+                # 若被判定為 90/270 度誤轉，先把來源圖轉正 90 度
+                if is_rotated_90:
+                    frame_crop = cv2.rotate(frame_crop, cv2.ROTATE_90_CLOCKWISE)
+                    is_rotated_90 = False
 
                 # 若 OCR 內部偵測到翻轉，將來源 frame_crop 也一併旋轉
                 if is_flip:
