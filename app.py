@@ -618,7 +618,8 @@ class StreamManager:
         elif cmd == "hardware_ctrl":
             ctrl_type = payload.get("type")
             if ctrl_type == "camera":
-                threading.Thread(target=self.reload_camera, args=(payload,), daemon=True).start()
+                #threading.Thread(target=self.reload_camera, args=(payload,), daemon=True).start()
+                self.capture.set_camera_parameters()
             else:
                 logger.warning(f"不支援 {ctrl_type} 硬體設定")
 

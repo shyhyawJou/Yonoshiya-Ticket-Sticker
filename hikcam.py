@@ -327,9 +327,18 @@ class HikCamera:
 
         return self
 
-    def set_camera_parameters(self):
-        logger.info('=' * 25 + ' Set Camera Parameter ' + '=' * 25)
-        params = self.cfg.camera_params['hik']
+    def set_camera_parameters(self, params):
+        # command or config
+        if params is None:
+            logger.info('=' * 25 + ' Set Camera Parameter by [config]' + '=' * 25)
+            for k, v in list(params.items()):
+                typ = self.cfg.camera_params[k]['type']
+                params['type'] = v
+        else:
+            logger.info('=' * 25 + ' Set Camera Parameter by [command]' + '=' * 25)
+            params = self.cfg.camera_params['hik']
+
+        # set
         for name, info in params.items():
             value = info['value']
             typ = info['type']
