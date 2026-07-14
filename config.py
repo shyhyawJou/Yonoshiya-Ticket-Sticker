@@ -38,6 +38,7 @@ class CameraCfg:
 class StreamCfg:
     """Output Stream Configuration"""
     port: int
+    stream_size: list
 
 @dataclass
 class RuntimeCfg:
@@ -198,7 +199,7 @@ def load_config(config_path: str) -> Config:
                 height=camera["height"],
                 device=camera["device"]
             ),
-            stream=StreamCfg(port=int(stream["port"]))
+            stream=StreamCfg(port=int(stream["port"]), stream_size=stream["stream_size"])
         )
 
         # Thresholds

@@ -22,6 +22,7 @@ runtime:
     device: 'hik' # hik | aravis
   stream:
     port: 9527
+    stream_size: [1280, 960]
 thresholds:
   ai_conf: 0.5
   ai_iou: 0.4
@@ -58,6 +59,7 @@ camera_params:
             type: 'string'
         ExposureAuto:
             value: 'Off'
+            default: 'Off'
             type: 'string' 
             allowed:
                 - 'Continuous'
@@ -65,11 +67,13 @@ camera_params:
                 - 'Off'
         ExposureTime: 
             value: 75000.0
+            default: 75000.0
             type: 'float' 
             max: 500000
             min: 20
         GainAuto:
             value: 'Off'
+            default: 'Off'
             type: 'string' 
             allowed:
                 - 'Continuous'
@@ -77,6 +81,7 @@ camera_params:
                 - 'Off'
         Gain:
             value: 6.0
+            default: 6.0
             type: 'float' 
             max: 23.981199264526367
             min: 0.0

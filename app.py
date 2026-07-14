@@ -72,8 +72,13 @@ class StreamManager:
 
         # --- init streamer ---
         self.stream_mode = "detect"
-        self.stream_size = (1280, 960)   
-        self.streamer = Mjpeg_Streamer(route='/meal', quality=40)
+        self.stream_size = self.cfg.runtime.stream.stream_size
+        self.streamer = Mjpeg_Streamer(
+            route='/meal', 
+            port=self.cfg.runtime.stream.port, 
+            size=self.stream_size, 
+            quality=40
+        )
         self.streamer.start()
 
         logger.info(f"StreamManager v{ver} 初始化成功!")
@@ -324,7 +329,7 @@ class StreamManager:
                 if self.camera_alone:
                     try:
                         frame = self.frame_queue.get(block=True, timeout=1.0)
-                        # self.tmp_frame = frame.copy()
+                        self.tmp_frame = frame.copy()
                     except queue.Empty:
                         continue
                 else:   
@@ -483,109 +488,116 @@ class StreamManager:
     def _handle_cmd(self, cmd: str, payload: dict) -> None:
         logger.info(f"收到 MQTT 指令: '{cmd}', 內容: {payload}")
         
-        if cmd == "plot_setting":
-            if "box" in payload:
-                val = payload["box"]
-                self.show_box = str(val).lower() == 'true'
-                logger.info(f"設定 show_box: {self.show_box} 成功")
-            elif "fps" in payload:
-                val = payload["fps"]
-                self.show_fps = str(val).lower() == 'true'
-                logger.info(f"設定 show_box: {self.show_fps} 成功")
-            else:
-                logger.warning(f"不支援 {payload} 畫圖設定")
+        try:
+            if cmd == "plot_setting":
+                if "box" in payload:
+                    val = payload["box"]
+                    self.show_box = str(val).lower() == 'true'
+                    logger.info(f"設定 show_box: {self.show_box} 成功")
+                elif "fps" in payload:
+                    val = payload["fps"]
+                    self.show_fps = str(val).lower() == 'true'
+                    logger.info(f"設定 show_box: {self.show_fps} 成功")
+                else:
+                    logger.warning(f"不支援 {payload} 畫圖設定")
 
-        elif cmd == "mode_setting":
-            new_mode = payload.get("mode")
-            if new_mode not in ("tray", "single"):
-                logger.warning(f"[MODE] 不支援的 mode: '{new_mode}'，僅接受 'tray' 或 'single'")
-                return
-
-            if new_mode == self.cfg.mode:
-                logger.info(f"[MODE] 目前已經是 '{new_mode}' 模式，略過切換")
-                return
-
-            logger.info(f"[MODE] 切換模式: '{self.cfg.mode}' -> '{new_mode}'，重建狀態機...")
-            with self.data_lock:
-                old_mode = self.cfg.mode
-                try:
-                    self.cfg.mode = new_mode
-                    # 重新 new 一份 LogicEngine：舊的 tracker/state machine（連同
-                    # 裡面所有 trays 狀態）直接被丟棄，不需要額外做清空動作。
-                    self.logic = LogicEngine(
-                        cfg=self.cfg,
-                        bus=self.bus,
-                        mmr=self.mmr,
-                        rec_path=self.cfg.runtime.model.ocr_rec,
-                        dict_path=self.cfg.runtime.model.text
-                    )
-                except Exception as e:
-                    logger.error(f"[MODE] 切換模式失敗，退回 '{old_mode}': {e}")
-                    self.cfg.mode = old_mode
+            elif cmd == "mode_setting":
+                new_mode = payload.get("mode")
+                if new_mode not in ("tray", "single"):
+                    logger.warning(f"[MODE] 不支援的 mode: '{new_mode}'，僅接受 'tray' 或 'single'")
                     return
 
-                # 舊模式殘留的 OCR 結果/畫面暫存資料一併清掉，避免對到錯的 tray_id
-                self.ocr_data = None
-                while not self.ocr_result_queue.empty():
+                if new_mode == self.cfg.mode:
+                    logger.info(f"[MODE] 目前已經是 '{new_mode}' 模式，略過切換")
+                    return
+
+                logger.info(f"[MODE] 切換模式: '{self.cfg.mode}' -> '{new_mode}'，重建狀態機...")
+                with self.data_lock:
+                    old_mode = self.cfg.mode
                     try:
-                        self.ocr_result_queue.get_nowait()
-                    except Exception:
-                        break
-
-            logger.info(f"[MODE] 已切換為 '{new_mode}' 模式")
-            self.bus.publish_system({
-                "ts": _now(),
-                "type": "MODE_CHANGED",
-                "msg": {"mode": new_mode}
-            })
-                
-        elif cmd == "capture":
-            self._trigger_capture = True
-            logger.info("CAPTURE done.")
-       
-        elif cmd == "reset":
-            reset_type = payload.get("type")
-            tray_id = payload.get("tray_id")
-
-            # 用原始畫面 (未經錄影壓縮) 存檔，檔名含日期時間避免覆蓋
-            # if hasattr(self, "tmp_frame") and self.tmp_frame is not None:
-            #     self._save_frame(self.tmp_frame, "reset_capture")
-            # else:
-            #     logger.warning("[RESET] tmp_frame 尚未就緒，略過截圖")
-
-            logger.info(f"[RESET] 收到重置指令 (type: '{reset_type}')...")
-            with self.data_lock:
-                if reset_type == "a":
-                    if not tray_id:
-                        logger.warning("[RESET] 缺少 tray_id，略過")
+                        self.cfg.mode = new_mode
+                        # 重新 new 一份 LogicEngine：舊的 tracker/state machine（連同
+                        # 裡面所有 trays 狀態）直接被丟棄，不需要額外做清空動作。
+                        self.logic = LogicEngine(
+                            cfg=self.cfg,
+                            bus=self.bus,
+                            mmr=self.mmr,
+                            rec_path=self.cfg.runtime.model.ocr_rec,
+                            dict_path=self.cfg.runtime.model.text
+                        )
+                    except Exception as e:
+                        logger.error(f"[MODE] 切換模式失敗，退回 '{old_mode}': {e}")
+                        self.cfg.mode = old_mode
                         return
-                    self.logic.reset(tray_id=tray_id)
-                elif reset_type == "b":
-                    if not tray_id:
-                        logger.warning("[RESET] 缺少 tray_id，略過")
-                        return
-                    self.logic.reset_tray_states(tray_id=tray_id)
-                elif reset_type == "all":
-                    self.logic.reset_all()
-                while not self.ocr_result_queue.empty():
-                    try:
-                        self.ocr_result_queue.get_nowait()
-                    except Exception:
-                        break
 
-        elif cmd == "hardware_ctrl":
-            ctrl_type = payload.get("type")
-            if ctrl_type == "camera":
-                self.capture.set_camera_parameters(payload, display=True)
+                    # 舊模式殘留的 OCR 結果/畫面暫存資料一併清掉，避免對到錯的 tray_id
+                    self.ocr_data = None
+                    while not self.ocr_result_queue.empty():
+                        try:
+                            self.ocr_result_queue.get_nowait()
+                        except Exception:
+                            break
+
+                logger.info(f"[MODE] 已切換為 '{new_mode}' 模式")
+                self.bus.publish_system({
+                    "ts": _now(),
+                    "type": "MODE_CHANGED",
+                    "msg": {"mode": new_mode}
+                })
+                    
+            elif cmd == "capture":
+                self._trigger_capture = True
+                logger.info("CAPTURE done.")
+        
+            elif cmd == "reset":
+                reset_type = payload.get("type")
+                tray_id = payload.get("tray_id")
+
+                # 用原始畫面 (未經錄影壓縮) 存檔，檔名含日期時間避免覆蓋
+                if hasattr(self, "tmp_frame") and self.tmp_frame is not None:
+                    self._save_frame(self.tmp_frame, "reset_capture")
+                else:
+                    logger.warning("[RESET] tmp_frame 尚未就緒，略過截圖")
+
+                logger.info(f"[RESET] 收到重置指令 (type: '{reset_type}')...")
+                with self.data_lock:
+                    if reset_type == "a":
+                        if not tray_id:
+                            logger.warning("[RESET] 缺少 tray_id，略過")
+                            return
+                        self.logic.reset(tray_id=tray_id)
+                    elif reset_type == "b":
+                        if not tray_id:
+                            logger.warning("[RESET] 缺少 tray_id，略過")
+                            return
+                        self.logic.reset_tray_states(tray_id=tray_id)
+                    elif reset_type == "all":
+                        self.logic.reset_all()
+                    while not self.ocr_result_queue.empty():
+                        try:
+                            self.ocr_result_queue.get_nowait()
+                        except Exception:
+                            break
+
+            elif cmd == "hardware_ctrl":
+                ctrl_type = payload.get("type")
+                ctrl = payload.get('control')
+                if ctrl_type == "camera":
+                    if ctrl == 'reset_parameter':
+                        self.capture.reset_camera_parameters()
+                    else:
+                        self.capture.set_camera_parameters(payload, True)
+                else:
+                    logger.warning(f"不支援 {ctrl_type} 硬體設定")
+
+            elif cmd == "no_tray_setting":
+                reset_type = payload.get("no_tray")
+                pass
+
             else:
-                logger.warning(f"不支援 {ctrl_type} 硬體設定")
-
-        elif cmd == "no_tray_setting":
-            reset_type = payload.get("no_tray")
-            pass
-
-        else:
-            logger.warning(f"UNKNOWN_CMD: {cmd}")
+                logger.warning(f"UNKNOWN_CMD: {cmd}")
+        except:
+            logger.error(traceback.format_exc())
 
     def init_camera(self):
         if self.cfg.runtime.camera.device == 'hik':

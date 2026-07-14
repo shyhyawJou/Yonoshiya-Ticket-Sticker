@@ -9,9 +9,11 @@ from loguru import logger
 import numpy as np
 import traceback
 import ctypes
+import re
 import time
 import yaml
 import threading
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from config import Config
 from mmr_engine import Rotated_RTMDET
@@ -236,6 +238,7 @@ class HikCamera:
             self.open()
         except Exception:
             self.release()
+            logger.error(traceback.format_exc())
             raise
 
         # --- parameter update
@@ -325,6 +328,7 @@ class HikCamera:
 
         # 設定相機參數
         self.set_camera_parameters(display=True)
+        self.list_all_camera_parameters()
 
         # 開始取流；失敗時同樣要關裝置 + 銷毀 handle 再丟例外
         ret = self.cam.MV_CC_StartGrabbing()
@@ -352,14 +356,14 @@ class HikCamera:
 
         return self
 
-    def set_camera_parameters(self, msg=None, display=True):
+    def set_camera_parameters(self, params=None, display=True):
         """ 如果是透過指令的話, 一次只會有一個參數 """
+        from_cmd = params is not None
+        
         # command or config
-        if msg is None:
-            logger.info('=' * 25 + ' Set Camera Parameter by [config]' + '=' * 25)
-            params = self.cfg.camera_params['hik']
-        else:
+        if from_cmd:
             logger.info('=' * 25 + ' Set Camera Parameter by [command]' + '=' * 25)
+            msg = params
             name = msg['control']
             info = self.cfg.camera_params['hik'].get(name)
             if info is None:
@@ -368,9 +372,9 @@ class HikCamera:
             params = {f'{name}': info}
             params[name]['value'] = msg['value']
             logger.debug(f'new camera parameter: {params}')
-
-        from_cmd = msg is not None
-        logger.debug(f'from command: {from_cmd}')
+        else:
+            logger.info('=' * 25 + ' Set Camera Parameter by [config]' + '=' * 25)
+            params = self.cfg.camera_params['hik']
 
         # set
         # 記錄每個參數是否設定成功，失敗的參數不能拿去觸發存 config 流程
@@ -416,6 +420,20 @@ class HikCamera:
                 )
         self.mqtt.publish_system({'type': 'CAMERA_PARAMS_DONE'})
 
+    def reset_camera_parameters(self):
+        data = _load_yaml(self.cfg_path)
+        need_updates = []
+        for name, info in data['camera_params']['hik'].items():
+            default = info.get('default')
+            if default:
+                info['value'] = default
+                need_updates.append({'control': name, 'value': default})
+
+        self.cfg.camera_params['hik'] = data['camera_params']['hik']
+        
+        for params in need_updates:
+            self.set_camera_parameters(params, True)
+
     def display_camera_parameters(self, params=None):
         """
         顯示相機參數的目前值與有效範圍（min/max/step，或 enum 的候選值列表）。
@@ -434,7 +452,7 @@ class HikCamera:
 
         result = {}
 
-        logger.info('=' * 25 + ' Dump Camera Parameter Range ' + '=' * 25)
+        logger.info('=' * 25 + f' Camera Parameter Range ' + '=' * 25)
 
         for name, info in params.items():
             typ = info['type']
@@ -491,6 +509,134 @@ class HikCamera:
 
         logger.info('=' * 78)
         return result
+
+    def list_all_camera_parameters(self, xml_path='./camera_features.xml'):
+        """
+        列出相機所有可用參數（非僅 config 中列出的）。
+
+        做法：
+        1. 用 MV_CC_FeatureSave 匯出目前參數快照（注意：這其實是海康的
+        GenApi persistence 純文字檔，不是完整 XML feature tree，
+        只包含「參數名稱 + 目前值」，不含型別/範圍資訊）。
+        2. 從檔案解析出參數名稱清單。
+        3. 對每個名稱逐一嘗試 Get*Value API 探測型別。
+        4. 複用 display_camera_parameters 查詢完整的 cur/min/max/step 等資訊。
+        """
+        if not self._is_open:
+            logger.warning("camera is not open, cannot query parameter range!")
+            return {}
+
+        ret = self.cam.MV_CC_FeatureSave(xml_path)
+        if ret != 0:
+            logger.warning(f"cannot dump camera feature snapshot, ret[0x{ret:x}]")
+            return {}
+
+        names = self._parse_param_names(xml_path)
+        logger.info(f"found {len(names)} candidate parameter names")
+
+        if not names:
+            logger.warning("no parameter name parsed, check file format manually")
+            return {}
+
+        params = {}
+        for name in names:
+            typ = self._probe_param_type(name)
+            if typ:
+                params[name] = {'type': typ}
+            else:
+                logger.warning(f"cannot resolve type for parameter [{name}], skip")
+
+        logger.info(f"resolved {len(params)} / {len(names)} parameters with known type")
+
+        return self.display_camera_parameters(params)
+
+    def _parse_param_names(self, path):
+        """從 GenApi persistence 純文字檔解析出參數名稱清單（去除註解與空行）。"""
+        names = []
+        with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                # 假設格式："ParamName"    Value  或  ParamName   Value
+                # 若實際格式不同，請依 sample lines 調整這個 regex
+                m = re.match(r'^"?([A-Za-z_][A-Za-z0-9_]*)"?\s', line)
+                if m:
+                    names.append(m.group(1))
+        return sorted(set(names))
+
+    def _probe_param_type(self, name):
+        """依序嘗試 bool / int / float / enum 的 Get 方法，回傳第一個成功的型別。"""
+        val = c_bool()
+        if self.cam.MV_CC_GetBoolValue(name, val) == 0:
+            return 'bool'
+
+        val = MVCC_INTVALUE_EX()
+        if self.cam.MV_CC_GetIntValueEx(name, val) == 0:
+            return 'int'
+
+        val = MVCC_FLOATVALUE()
+        if self.cam.MV_CC_GetFloatValue(name, val) == 0:
+            return 'float'
+
+        val = MVCC_ENUMVALUE()
+        if self.cam.MV_CC_GetEnumValue(name, val) == 0:
+            return 'enum'
+
+        return None
+
+    def _update_camera_config(self, key: str, value) -> None:
+        """
+        更新 config.yaml 文件中的 camera 參數
+        """
+        param_rules = self.cfg.camera_params['hik']
+        if key not in param_rules:
+            logger.warning(f"參數 '{key}' 不在允許修改，已略過")
+            return False
+
+        rule = param_rules[key]
+        valid_value = value
+        try:
+            if rule["type"] == 'string':
+                valid_value = str(value).strip()
+                if valid_value not in rule["allowed"]:
+                    logger.warning(f"參數 '{key}' 的值 '{valid_value}' 不合法，允許的值: {rule['allowed']}")
+                    return
+            elif rule["type"] == 'float':
+                valid_value = float(value)
+                if valid_value < rule["min"] or valid_value > rule["max"]:
+                    logger.warning(f"參數 '{key}' 的值 '{valid_value}' 超出範圍 ({rule['min']} ~ {rule['max']})")
+                    return
+        except ValueError:
+            logger.error(f"參數 '{key}' 的數值型態錯誤 (無法轉換為 {rule['type'].__name__})")
+
+        self._set_save_config_flag()
+
+        rule['value'] = value
+        logger.info(f"[MEMORY UPDATE] the camera parameter [{key}]'s value to {value} !")
+        logger.debug(f'new camera config: {self.cfg.camera_params["hik"]}')
+
+    def _config_save_worker(self):
+        logger.success('start config update thread!')
+
+        while self._is_open:
+            try:
+                need_save = False
+
+                with self._config_lock:
+                    if (
+                        self._config_dirty
+                        and time.time() - self._config_last_update >= self.save_delay
+                    ):
+                        self._config_dirty = False
+                        need_save = True
+
+                if need_save:
+                    self._save_camera_config()
+
+                time.sleep(0.1)
+            except:
+                logger.error(traceback.format_exc())
 
     # ---------------- 取像 ----------------
     def read(self):
@@ -617,61 +763,11 @@ class HikCamera:
             self._is_sdk_initialized = False
         logger.success('release the camera !')
 
-    def _update_camera_config(self, key: str, value) -> None:
-        """
-        更新 config.yaml 文件中的 camera 參數
-        """
-        param_rules = self.cfg.camera_params['hik']
-        if key not in param_rules:
-            logger.warning(f"參數 '{key}' 不在允許修改，已略過")
-            return False
-
-        rule = param_rules[key]
-        valid_value = value
-        try:
-            if rule["type"] == 'string':
-                valid_value = str(value).strip()
-                if valid_value not in rule["allowed"]:
-                    logger.warning(f"參數 '{key}' 的值 '{valid_value}' 不合法，允許的值: {rule['allowed']}")
-                    return
-            elif rule["type"] == 'float':
-                valid_value = float(value)
-                if valid_value < rule["min"] or valid_value > rule["max"]:
-                    logger.warning(f"參數 '{key}' 的值 '{valid_value}' 超出範圍 ({rule['min']} ~ {rule['max']})")
-                    return
-        except ValueError:
-            logger.error(f"參數 '{key}' 的數值型態錯誤 (無法轉換為 {rule['type'].__name__})")
-
+    def _set_save_config_flag(self):
         with self._config_lock:
             self._config_dirty = True
             self._config_last_update = time.time()
             logger.warning(f'camera config is updated, new config will be saved in {self.save_delay} (s) !')
-
-        rule['value'] = value
-        logger.info(f"[MEMORY UPDATE] the camera parameter [{key}]'s value to {value} !")
-        logger.debug(f'new camera config: {self.cfg.camera_params["hik"]}')
-
-    def _config_save_worker(self):
-        logger.success('start config update thread!')
-
-        while self._is_open:
-            try:
-                need_save = False
-
-                with self._config_lock:
-                    if (
-                        self._config_dirty
-                        and time.time() - self._config_last_update >= self.save_delay
-                    ):
-                        self._config_dirty = False
-                        need_save = True
-
-                if need_save:
-                    self._save_camera_config()
-
-                time.sleep(0.1)
-            except:
-                logger.error(traceback.format_exc())
 
     def _save_camera_config(self):
         tmp_path = self.cfg_path.with_stem('tmp_' + self.cfg_path.stem)

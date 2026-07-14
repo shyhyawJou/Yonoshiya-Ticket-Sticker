@@ -127,7 +127,8 @@ class Mjpeg_Streamer:
 
         self.server_thread = threading.Thread(target=run_server, daemon=True)
         self.server_thread.start()
-        logger.success(f"[*] MJPEG Streamer started at http://{self.host}:{self.port}{self.route}")
+        logger.success(f"[*] MJPEG Streamer started at http://{self.host}:{self.port}{self.route}, "
+                       f"stream wh: {self.stream_size}")
 
     def stop(self):
         """釋放資源"""
