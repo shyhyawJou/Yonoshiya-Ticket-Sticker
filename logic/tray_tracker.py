@@ -37,6 +37,7 @@ class TrayTracker:
         k_container_new: int,
         roi_shrink: float,
         sticker_missing_frame: int,
+        k_sticker_new: int = 3,  # 需連續幾幀確認才建立 STABLE_CONFIRM_CLASSES 這幾類貼紙
     ):
         self.bus = bus
         self.iou_assign = iou_assign
@@ -46,6 +47,14 @@ class TrayTracker:
         self.K_new = k_container_new
         self.roi_shrink = roi_shrink
         self.sticker_missing_frame = sticker_missing_frame
+        self.K_sticker_new = k_sticker_new
+
+        # 需要「連續多幀確認」才建立的 sticker 類別，其餘類別偵測一幀就建立
+        self.STABLE_CONFIRM_CLASSES = {
+            "sesame_front", "sesame_back",
+            "wafusauce_front", "wafusauce_back",
+            "cream_front", "cream_back",
+        }
 
         self.trays: Dict[str, Tray] = {}
         self.tray_candidates: List[dict] = []
@@ -84,6 +93,7 @@ class TrayTracker:
         tray.checked_items = []
         tray.ticket = None
         tray.stickers = []
+        tray.pending_stickers = []  # 軟重置一併清空候選中的貼紙，避免殘留舊資料
         logger.info(f"[RESET-B] 已重置餐盤 {tray_id} 狀態")
 
     def remove_tray(self, tray_id: str, ts_utc: str) -> bool:
@@ -193,6 +203,9 @@ class TrayTracker:
         """
         2-1. 更新每個 tray 的 ticket 追蹤與穩定度
         2-2. 更新每個 tray 的 sticker 追蹤與穩定度
+             - STABLE_CONFIRM_CLASSES 這幾類：需連續 K_sticker_new 幀偵測到
+               同類別、位置相近的候選，才正式建立進 tray.stickers
+             - 其餘類別：維持原本行為，偵測一幀就建立
         """
         for tray_id, tray in self.trays.items():
 
@@ -221,6 +234,7 @@ class TrayTracker:
             tray_stickers = [d for d in sticker_dets if is_center_in_polygon(get_polygon_centroid(d.xyxy), tray.rect)]
             matched_sticker_indices = set()
             newly_created_indices = set()  # 本幀剛建立的 entry，不該被視為「消失」
+            matched_pending_indices = set()  # 本幀有被匹配到的候選（連續多幀確認用）
 
             for d in tray_stickers:
                 s_rect = d.xyxy
@@ -229,6 +243,8 @@ class TrayTracker:
 
                 for idx, ts in enumerate(tray.stickers):
                     if idx in matched_sticker_indices:
+                        continue
+                    if ts.cls_name != d.cls_name:
                         continue
                     val = iou_poly_poly(s_rect, ts.bbox)
                     if val > best_iou:
@@ -239,9 +255,57 @@ class TrayTracker:
                     tray.stickers[best_idx].bbox = s_rect
                     tray.stickers[best_idx].xywhr = s_xywhr
                     matched_sticker_indices.add(best_idx)
+                    continue
+
+                ##################################################################
+                # 需要「連續多幀確認」的類別：先進候選區累積幀數，門檻到才正式建立
+                if d.cls_name in self.STABLE_CONFIRM_CLASSES:
+                    matched_pending_idx = -1
+                    best_pending_iou = 0.0
+
+                    for pidx, pending in enumerate(tray.pending_stickers):
+                        if pidx in matched_pending_indices:
+                            continue
+                        if pending['cls_name'] != d.cls_name:
+                            continue
+                        val = iou_poly_poly(s_rect, pending['bbox'])
+                        if val > best_pending_iou and val > 0.1:
+                            best_pending_iou, matched_pending_idx = val, pidx
+
+                    if matched_pending_idx != -1:
+                        pending = tray.pending_stickers[matched_pending_idx]
+                        pending['bbox'] = s_rect
+                        pending['xywhr'] = s_xywhr
+                        pending['count'] += 1
+                        matched_pending_indices.add(matched_pending_idx)
+                        logger.error(pending)
+
+                        if pending['count'] >= self.K_sticker_new:
+                            tray.stickers.append(TrackedItem(bbox=s_rect, xywhr=s_xywhr, cls_name=pending['cls_name']))
+                            newly_created_indices.add(len(tray.stickers) - 1)
+                    else:
+                        tray.pending_stickers.append({
+                            'bbox': s_rect,
+                            'xywhr': s_xywhr,
+                            'cls_name': d.cls_name,
+                            'count': 1,
+                        })
+                        matched_pending_indices.add(len(tray.pending_stickers) - 1)
                 else:
-                    tray.stickers.append(TrackedItem(bbox=s_rect, xywhr=s_xywhr))
+                    # 其他類別：維持原本行為，偵測一幀就建立
+                    tray.stickers.append(TrackedItem(bbox=s_rect, xywhr=s_xywhr, cls_name=d.cls_name))
                     newly_created_indices.add(len(tray.stickers) - 1)
+                ##################################################################
+
+            # 本幀沒被匹配到的候選：直接淘汰（中斷即重新計數）
+            tray.pending_stickers = [
+                p for i, p in enumerate(tray.pending_stickers) if i in matched_pending_indices
+            ]
+
+            # 已升級為正式 sticker 的候選，需從 pending_stickers 移除
+            tray.pending_stickers = [
+                p for p in tray.pending_stickers if p['count'] < self.K_sticker_new
+            ]
 
             # 這一幀有被偵測到的貼紙（含既有匹配到的、含剛建立的）：消失計數歸零
             # 沒被偵測到的：
@@ -257,7 +321,7 @@ class TrayTracker:
                 if idx in detected_indices:
                     ts.missing_count = 0
                     # 如果原本被判消失又出現了（例如短暫遮擋），可以救回來
-                    ts.is_missing = False 
+                    ts.is_missing = False
                     ts.has_notified_missing = False
                     continue
 
@@ -265,7 +329,7 @@ class TrayTracker:
                     ts.stable_frames = 0
                 if not ts.is_ocr_busy:
                     ts.missing_count += 1
-                
+
                 # 門檻到了，標記為消失，交由 StateMachine 處理業務與發送 MQTT
                 if ts.missing_count > self.sticker_missing_frame:
                     ts.is_missing = True
@@ -273,6 +337,6 @@ class TrayTracker:
             # 【優化重點】：只移除「已經通知過前端消失」的鬼魂紀錄
             # 沒過期的、或是「剛過期但 StateMachine 還沒發通知」的都要保留
             tray.stickers = [
-                ts for ts in tray.stickers 
+                ts for ts in tray.stickers
                 if not (ts.is_missing and ts.has_notified_missing)
             ]

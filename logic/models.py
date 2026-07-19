@@ -35,7 +35,7 @@ class TrackedItem:
     is_missing: bool = False
     has_notified_missing: bool = False # <--- 新增：避免重複發送 MQTT
     missing_count: int = 0     # 連續沒被偵測到的幀數，過期後 TrayTracker 會將其從 tray.stickers 移除
-
+    cls_name: str = None
 
 @dataclass
 class Tray:
@@ -54,3 +54,5 @@ class Tray:
 
     ticket: Optional[TrackedItem] = None
     stickers: List[TrackedItem] = field(default_factory=list)
+
+    pending_stickers: List[dict] = field(default_factory=list)

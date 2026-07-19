@@ -9,11 +9,12 @@ from typing import List, Tuple
 # ---------------------------
 
 class Rotated_RTMDET:
-    def __init__(self, 
-                 path: str, 
-                 classes: List[str], 
-                 conf_thresh=0.5, 
-                 iou_thresh=0.35) -> None:
+    def __init__(self,
+                 path: str,
+                 classes: List[str],
+                 conf_thresh=0.5,
+                 iou_thresh=0.35,
+                 partial_agnostic_ids: Tuple[int, ...] = (3, 4, 5, 6, 7, 8)) -> None:
 
         self.model = RTMDET(path)
         self.input_wh = [448, 448]
@@ -53,6 +54,7 @@ class Rotated_RTMDET:
         self.iou_thresh = float(iou_thresh)
         self.strides = [8, 16, 32]
         self.agnostic_nms = False
+        self.partial_agnostic_ids = np.array(partial_agnostic_ids, dtype=np.float32) if partial_agnostic_ids else None
         self.grids = self._make_grids()
         self._warmup()
 
@@ -92,7 +94,8 @@ class Rotated_RTMDET:
                                       self.iou_thresh,
                                       agnostic=self.agnostic_nms,
                                       max_det=300,
-                                      nc=self.nc)[0]
+                                      nc=self.nc,
+                                      partial_agnostic_ids=self.partial_agnostic_ids)[0]
         rboxes = np.concatenate([y[:, :4], y[:, -1:]], axis=-1)
         rboxes[:, :4] = self._scale_boxes(self.input_wh[::-1], rboxes[:, :4], origin_shape, xywh=True)
         obb = np.concatenate([rboxes, y[:, 4:6]], axis=-1)  # xywhr, conf, cls
@@ -247,9 +250,10 @@ class Rotated_RTMDET:
         iou_thres=0.45,
         agnostic=True,
         max_det=300,
-        nc=0,  
+        nc=0,
         max_nms=30000,
-        max_wh=7680
+        max_wh=7680,
+        partial_agnostic_ids=None,
     ):
         if isinstance(prediction, (list, tuple)):  
             prediction = prediction[0]  
@@ -294,11 +298,18 @@ class Rotated_RTMDET:
             if n > max_nms:  
                 x = x[np.argsort(-x[:, 4])[:max_nms]]  
 
-            c = x[:, 5:6] * (0 if agnostic else max_wh)  
-            scores = x[:, 4]  
-            boxes = np.concatenate((x[:, :2] + c, x[:, 2:4], x[:, -1:]), axis=-1) 
+            # --- 決定用來做「位移」的 class id（partial-agnostic 的核心）---
+            group_ids = x[:, 5].copy()
+            if partial_agnostic_ids is not None:
+                mask = np.isin(group_ids, partial_agnostic_ids)
+                if mask.any():
+                    group_ids[mask] = partial_agnostic_ids[0]  # 統一成同一個代表 id
+
+            c = group_ids[:, None] * (0 if agnostic else max_wh)
+            scores = x[:, 4]
+            boxes = np.concatenate((x[:, :2] + c, x[:, 2:4], x[:, -1:]), axis=-1)
             i = self._nms_rotated(boxes, scores, iou_thres)
-            i = i[:max_det]  
+            i = i[:max_det]
             output[xi] = x[i]
 
         return output

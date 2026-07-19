@@ -200,6 +200,15 @@ class LogicEngine:
                 ticket_dets.append(d)
             elif d.cls_name == "order_sticker":
                 sticker_dets.append(d)
+            elif d.cls_name in {
+                "sesame_front",
+                "sesame_back",
+                "wafusauce_front",
+                "wafusauce_back",
+                "cream_front",
+                "cream_back",
+            }:
+                sticker_dets.append(d)
 
         self.tracker.update_tray_positions(tray_dets, ts_utc)
         self.tracker.update_ticket_and_stickers(ticket_dets, sticker_dets)
@@ -210,7 +219,7 @@ class LogicEngine:
         # 在位置剛更新完、生成任務前，立刻找出有沒有剛消失的貼紙。
         # 它會幫你發送 -1 給前端，把狀態從 COMPLETED 退回 WAITING_STICKERS，
         # 並將貼紙標記為 has_notified_missing = True，讓 tracker 下一幀可以乾淨移除。
-        self.state_machine.handle_missing_items(self.trays)
+        #self.state_machine.handle_missing_items(self.trays)
 
         tasks = self.state_machine.generate_tasks(self.trays)
 

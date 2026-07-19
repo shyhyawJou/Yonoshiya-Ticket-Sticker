@@ -74,7 +74,8 @@ class TrayStateMachine:
                         "tray_id": tray.id,
                         "type": "ticket",
                         "bbox": tray.ticket.bbox,
-                        "xywhr": tray.ticket.xywhr
+                        "xywhr": tray.ticket.xywhr,
+                        "cls_name": tray.ticket.cls_name 
                     })
 
             elif tray.state == TrayState.WAITING_STICKERS:
@@ -84,7 +85,8 @@ class TrayStateMachine:
                             "tray_id": tray.id,
                             "type": "sticker",
                             "bbox": ts.bbox,
-                            "xywhr": ts.xywhr
+                            "xywhr": ts.xywhr,
+                            "cls_name": ts.cls_name
                         })
                         break
 

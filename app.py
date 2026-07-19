@@ -24,6 +24,7 @@ from hikcam import HikCamera
 from logic_engine import LogicEngine
 from video import Video
 from streamer import Mjpeg_Streamer
+from logic.tray_tracker import Tray
 
 
 def _now():
@@ -257,53 +258,66 @@ class StreamManager:
                     transformed_pts = cv2.transform(pts, M_inv)
                     transformed_pts = transformed_pts.reshape(4, 2).astype(int)
                     cv2.polylines(vis_frame, [transformed_pts], isClosed=True, color=(0, 255, 0), thickness=2)
+        
+        # plot cheched stickers
+        for sticker in self.logic.trays[tray_id].stickers:
+            if sticker.is_checked:
+                bbox = np.array(sticker.bbox).astype(int)
+                xy = np.array(sticker.xywhr[:2]).astype(int)
+                cv2.polylines(vis_frame, bbox.reshape(-1, 4, 2), True, (0, 255, 0), 2)
+                cv2.putText(vis_frame, 'OK', xy + [-50, 30], cv2.FONT_HERSHEY_SIMPLEX, 
+                            3, (0, 255, 0), 7)
+        
         return vis_frame
 
     def _camera_worker(self):
         """
         獨立的相機取像執行緒 (Producer)
         """
-        self.init_camera()
-        logger.info("Camera Worker 啟動")
+        try:
+            self.init_camera()
+            logger.info("Camera Worker 啟動")
 
-        consecutive_errors = 0
-        MAX_RETRIES = 30 
+            consecutive_errors = 0
+            MAX_RETRIES = 30 
 
-        while self._running and self.capture is not None and self.capture.isOpened():
-            try:
-                ok, frame = self.capture.read()
-                if not ok:
-                    consecutive_errors += 1
-                    if consecutive_errors > MAX_RETRIES:
-                        logger.error("相機連續讀取失敗次數過多，已斷線")
-                        self._running = False  
-                        break
-                    
+            while self._running and self.capture is not None and self.capture.isOpened():
+                try:
+                    ok, frame = self.capture.read()
+                    if not ok:
+                        consecutive_errors += 1
+                        if consecutive_errors > MAX_RETRIES:
+                            logger.error("相機連續讀取失敗次數過多，已斷線")
+                            self._running = False  
+                            break
+                        
+                        time.sleep(0.1) 
+                        continue
+
+                    # frame = cv2.cvtColor(frame, cv2.COLOR_BayerBG2BGR_VNG)
+                    consecutive_errors = 0
+
+                    if self.frame_queue.full():
+                        try:
+                            self.frame_queue.get_nowait()
+                        except queue.Empty:
+                            pass
+
+                    self.frame_queue.put(frame)
+                    if self.camera_alone:     
+                        record_frame = cv2.resize(frame, self.video_record_size)
+                        self.video_recorder.write_frame(record_frame)
+                    time.sleep(0.03)
+
+                except Exception as e:
+                    #logger.error(f"Camera worker error: {e}")
+                    logger.error(f"Camera worker error: {traceback.format_exc()}")
                     time.sleep(0.1) 
-                    continue
-
-                # frame = cv2.cvtColor(frame, cv2.COLOR_BayerBG2BGR_VNG)
-                consecutive_errors = 0
-
-                if self.frame_queue.full():
-                    try:
-                        self.frame_queue.get_nowait()
-                    except queue.Empty:
-                        pass
-
-                self.frame_queue.put(frame)
-                if self.camera_alone:     
-                    record_frame = cv2.resize(frame, self.video_record_size)
-                    self.video_recorder.write_frame(record_frame)
-                time.sleep(0.03)
-
-            except Exception as e:
-                #logger.error(f"Camera worker error: {e}")
-                logger.error(f"Camera worker error: {traceback.format_exc()}")
-                time.sleep(0.1)
-        
-        self.capture.release()
-        logger.info("Camera Worker 結束")
+        except:
+            logger.error(f"Camera worker error: {traceback.format_exc()}")
+        finally:
+            self.capture.release()
+            logger.info("Camera Worker 結束")
 
     def stream_frames(self) -> None:
         """Main loop"""
@@ -398,6 +412,7 @@ class StreamManager:
                             "type": task["type"],
                             "M_inv": M_inv,
                             "bbox": task["bbox"],
+                            "cls_name": task['cls_name']
                         }
 
                         self.ocr.request_ocr(frame_crop=warped_img, metadata=metadata)

@@ -932,6 +932,18 @@ class AsyncOCR:
                     frame_crop = cv2.rotate(frame_crop, cv2.ROTATE_90_CLOCKWISE)
                     is_rotated_90 = False
 
+                #################################################################
+                if metadata['cls_name'] in {"sesame_front", "sesame_back"}:
+                    for i in range(len(rec_res)):
+                        rec_res[i] = ('ごまドレッシング', 1.0)
+                elif metadata['cls_name'] in {"wafusauce_front", "wafusauce_back"}:
+                    for i in range(len(rec_res)):
+                        rec_res[i] = ('和風ドレッング', 1.0)
+                elif metadata['cls_name'] in {"cream_front", "cream_back"}:
+                    for i in range(len(rec_res)):
+                        rec_res[i] = ('マヨネーズ', 1.0)
+                #################################################################
+
                 # 若 OCR 內部偵測到翻轉，將來源 frame_crop 也一併旋轉
                 if is_flip:
                     is_flip = False
