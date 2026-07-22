@@ -75,7 +75,7 @@ class StreamManager:
         self.stream_mode = "detect"
         self.stream_size = self.cfg.runtime.stream.stream_size
         self.streamer = Mjpeg_Streamer(
-            route='/meal', 
+            route='/ai_stream', 
             port=self.cfg.runtime.stream.port, 
             size=self.stream_size, 
             quality=40
@@ -516,49 +516,8 @@ class StreamManager:
                     logger.warning(f"不支援 {payload} 畫圖設定")
 
             elif cmd == "mode_setting":
-                new_mode = payload.get("mode")
-                if new_mode not in ("tray", "single"):
-                    logger.warning(f"[MODE] 不支援的 mode: '{new_mode}'，僅接受 'tray' 或 'single'")
-                    return
+                pass
 
-                if new_mode == self.cfg.mode:
-                    logger.info(f"[MODE] 目前已經是 '{new_mode}' 模式，略過切換")
-                    return
-
-                logger.info(f"[MODE] 切換模式: '{self.cfg.mode}' -> '{new_mode}'，重建狀態機...")
-                with self.data_lock:
-                    old_mode = self.cfg.mode
-                    try:
-                        self.cfg.mode = new_mode
-                        # 重新 new 一份 LogicEngine：舊的 tracker/state machine（連同
-                        # 裡面所有 trays 狀態）直接被丟棄，不需要額外做清空動作。
-                        self.logic = LogicEngine(
-                            cfg=self.cfg,
-                            bus=self.bus,
-                            mmr=self.mmr,
-                            rec_path=self.cfg.runtime.model.ocr_rec,
-                            dict_path=self.cfg.runtime.model.text
-                        )
-                    except Exception as e:
-                        logger.error(f"[MODE] 切換模式失敗，退回 '{old_mode}': {e}")
-                        self.cfg.mode = old_mode
-                        return
-
-                    # 舊模式殘留的 OCR 結果/畫面暫存資料一併清掉，避免對到錯的 tray_id
-                    self.ocr_data = None
-                    while not self.ocr_result_queue.empty():
-                        try:
-                            self.ocr_result_queue.get_nowait()
-                        except Exception:
-                            break
-
-                logger.info(f"[MODE] 已切換為 '{new_mode}' 模式")
-                self.bus.publish_system({
-                    "ts": _now(),
-                    "type": "MODE_CHANGED",
-                    "msg": {"mode": new_mode}
-                })
-                    
             elif cmd == "capture":
                 self._trigger_capture = True
                 logger.info("CAPTURE done.")
@@ -605,8 +564,51 @@ class StreamManager:
                     logger.warning(f"不支援 {ctrl_type} 硬體設定")
 
             elif cmd == "no_tray_setting":
-                reset_type = payload.get("no_tray")
-                pass
+                no_tray = payload.get("no_tray")
+                new_mode = 'single' if no_tray else 'tray'
+
+                if new_mode not in ("tray", "single"):
+                    logger.error(f"[MODE] 不支援的 mode: '{new_mode}'，僅接受 'tray' 或 'single'")
+                    return
+
+                if new_mode == self.cfg.mode:
+                    logger.warning(f"[MODE] 目前已經是 '{new_mode}' 模式，略過切換")
+                    return
+
+                logger.info(f"[MODE] 切換模式: '{self.cfg.mode}' -> '{new_mode}'，重建狀態機...")
+                old_mode = self.cfg.mode
+                try:
+                    self.cfg.mode = new_mode
+                    # 重新 new 一份 LogicEngine：舊的 tracker/state machine（連同
+                    # 裡面所有 trays 狀態）直接被丟棄，不需要額外做清空動作。
+                    self.logic = LogicEngine(
+                        cfg=self.cfg,
+                        bus=self.bus,
+                        mmr=self.mmr,
+                        rec_path=self.cfg.runtime.model.ocr_rec,
+                        dict_path=self.cfg.runtime.model.text
+                    )
+                except Exception as e:
+                    logger.error(f"[MODE] 切換模式失敗，退回 '{old_mode}': {e}")
+                    self.cfg.mode = old_mode
+                    return
+
+                    # 舊模式殘留的 OCR 結果/畫面暫存資料一併清掉，避免對到錯的 tray_id
+                with self.data_lock:
+                    self.ocr_data = None
+
+                while not self.ocr_result_queue.empty():
+                    try:
+                        self.ocr_result_queue.get_nowait()
+                    except Exception:
+                        break
+
+                logger.success(f"[MODE] 已切換為 '{new_mode}' 模式")
+                #self.bus.publish_system({
+                #    "ts": _now(),
+                #    "type": "MODE_CHANGED",
+                #    "msg": {"mode": new_mode}
+                #})
 
             else:
                 logger.warning(f"UNKNOWN_CMD: {cmd}")

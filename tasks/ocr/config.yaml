@@ -1,5 +1,4 @@
-# mode: "tray"（原本綁 tray 盤的狀態機） | "single"（單一訂單、不需要 tray 盤）
-mode: tray
+mode: single
 includes:
     classes: classes.yaml
     menus_mapping: menus_mapping.yaml
@@ -10,7 +9,7 @@ mqtt:
     session: v1
 runtime:
     model:
-        object_det: ./object_9cls_v01_00.dla
+        object_det: ./mmr_10cls_v01_00.dla #./object_9cls_v01_00.dla
         ocr_det: ./yoshi_det_v01_01.dla
         ocr_cls: ./cls_v2.dla
         ocr_rec: ./yoshi_rec_v01_03.dla

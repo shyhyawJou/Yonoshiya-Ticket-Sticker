@@ -213,8 +213,7 @@ class LogicEngine:
                 "cream_front",
                 "cream_back",
             }:
-                #sticker_dets.append(d)
-                pass
+                sticker_dets.append(d)
 
         self.tracker.update_tray_positions(tray_dets, ts_utc)
         self.tracker.update_ticket_and_stickers(ticket_dets, sticker_dets)
