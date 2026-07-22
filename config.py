@@ -69,6 +69,7 @@ class StabilityCfg:
     k_container_new: int
     tray_missing_frame: int
     sticker_missing_frame: int
+    ticket_leave_frame: int
 
 @dataclass
 class ClassInfo:
@@ -215,7 +216,7 @@ def load_config(config_path: str) -> Config:
             roi_strink=float(pl["roi_strink"]),
             iou_assign=float(pl["iou_assign"]),
             iou_candidate = float(pl["iou_candidate"]),
-            drift_iou_thresh=float(pl["drift_iou_thresh"])
+            drift_iou_thresh=float(pl["drift_iou_thresh"]),
         )
 
         # Stability
@@ -225,7 +226,8 @@ def load_config(config_path: str) -> Config:
             k_container_fail=int(st["k_container_fail"]),
             k_container_new=int(st["k_container_new"]),
             tray_missing_frame=int(st["tray_missing_frame"]),
-            sticker_missing_frame=int(st["sticker_missing_frame"])
+            sticker_missing_frame=int(st["sticker_missing_frame"]),
+            ticket_leave_frame=int(st["ticket_leave_frame"]),
         )
 
         # Mode: 決定要啟用哪一種狀態機 ("tray" | "single")

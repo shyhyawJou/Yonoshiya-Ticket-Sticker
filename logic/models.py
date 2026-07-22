@@ -44,6 +44,7 @@ class Tray:
     xywhr: ObbXYWHR
     ticket_crop: np.ndarray
     state: TrayState = TrayState.WAITING_TICKET
+    order_number: int = None
     start_time_str: str = ''
 
     missing_count: int = 0

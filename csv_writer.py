@@ -8,6 +8,8 @@ import time
 from datetime import datetime  
 from loguru import logger
 
+
+
 class CsvWriter:
     def __init__(self, log_dir: str):
 
@@ -64,6 +66,7 @@ class CsvWriter:
                             row_to_write[k] = val
                             
                     writer.writerow(row_to_write)
+                    logger.success(f'寫入一筆資料到 {current_filename}')
                     
                 self.queue.task_done()
             except Exception as e:

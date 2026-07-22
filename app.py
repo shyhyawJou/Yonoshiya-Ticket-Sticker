@@ -220,7 +220,6 @@ class StreamManager:
 
         return frame
 
-
     def _draw_overlay(self, frame):
         """
         將 OCR 結果畫在 frame 上

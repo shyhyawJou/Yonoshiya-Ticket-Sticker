@@ -37,7 +37,8 @@ stability:
   k_container_new: 15
   tray_missing_frame: 15
   sticker_missing_frame: 15
-camera_params:
+  ticket_leave_frame: 30
+camera_params: 
     aravis:
         GainAuto: 'Off'
         Gain: 5.0
@@ -54,6 +55,14 @@ camera_params:
         AcquisitionFrameRate: 
             value: 15.0
             type: 'float'
+        BalanceWhiteAuto:
+            value: 'Continuous'
+            default: 'Continuous'
+            type: 'string' 
+            allowed:
+                - 'Continuous'
+                - 'Once'
+                - 'Off'
         ExposureMode:
             value: 'Timed'
             type: 'string'

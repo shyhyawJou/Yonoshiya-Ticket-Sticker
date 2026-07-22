@@ -27,6 +27,8 @@ from logic.geometry import PolygonXYXY, iou_poly_poly
 from logic.models import Tray, TrayState
 from logic.order_parser import OrderParser
 from logic.sticker_matcher import StickerMatcher
+from logic.single_order_tracker import SINGLE_ORDER_ID
+
 
 
 class TrayStateMachine:
@@ -102,6 +104,7 @@ class TrayStateMachine:
         rec_res: list,
         is_flip: bool,
         task_bbox: PolygonXYXY,
+        last_order_number: str = None,
     ):
         """
         1. 呼叫 OrderParser / StickerMatcher 處理 OCR 結果
@@ -115,7 +118,7 @@ class TrayStateMachine:
         print(f"OCR res : {rec_res}")
 
         if item_type == "ticket" and tray.state == TrayState.CHECKING_TICKET:
-            self._apply_ticket_result(tray, tray_id, frame_crop, dt_boxes, rec_res, is_flip)
+            self._apply_ticket_result(tray, tray_id, frame_crop, dt_boxes, rec_res, is_flip, last_order_number)
 
         elif item_type == "sticker" and tray.state == TrayState.CHECKING_STICKERS:
             self._apply_sticker_result(tray, tray_id, dt_boxes, rec_res, is_flip, task_bbox)
@@ -123,12 +126,19 @@ class TrayStateMachine:
     # ------------------------------------------------------------
     # 內部細節
     # ------------------------------------------------------------
-    def _apply_ticket_result(self, tray: Tray, tray_id: str, frame_crop, dt_boxes, rec_res, is_flip):
+    def _apply_ticket_result(self, tray: Tray, tray_id: str, frame_crop, dt_boxes, rec_res, is_flip, last_order_number: str = None):
         if tray.ticket:
             tray.ticket.is_ocr_busy = False
 
-        parsed_items, oreder_number = self.order_parser.parse(frame_crop, dt_boxes, rec_res, is_flip)
+        parsed_items, order_number = self.order_parser.parse(frame_crop, dt_boxes, rec_res, is_flip)
 
+        #if order_number is not None and tray_id == SINGLE_ORDER_ID and order_number == last_order_number:
+        #    logger.warning(f"[重複訂單] tray={tray_id} 編號 {order_number} 與上一筆相同，忽略此次鎖定")
+        #    if tray.ticket:
+        #        tray.ticket.stable_frames = 0
+        #    tray.state = TrayState.WAITING_TICKET
+        #    return
+        
         if parsed_items:
             expanded_expected_items = []
             expected_items_list = []
@@ -146,13 +156,14 @@ class TrayStateMachine:
             tray.expected_items = expanded_expected_items
             tray.state = TrayState.WAITING_STICKERS
             tray.ticket_crop = frame_crop
-            oreder_number = "000" if oreder_number is None else oreder_number
+            order_number = "000" if order_number is None else order_number
+            tray.order_number = order_number
 
             self.bus.publish_det_status({
                 "tray_id": tray_id,
                 "status": "TICKET_READY",
                 "expected_items": expected_items_list,
-                "order_number": oreder_number
+                "order_number": order_number
             })
         else:
             if tray.ticket:

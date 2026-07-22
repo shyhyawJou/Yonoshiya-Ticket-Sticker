@@ -110,6 +110,8 @@ class LogicEngine:
         self.iou_candidate = cfg.placement.iou_candidate
         self.drift_iou_thresh = cfg.placement.drift_iou_thresh
 
+        self.ticket_leave_frame = int(cfg.stability.ticket_leave_frame)
+
         # === mode 切換：決定 trays 字典由哪個 tracker 擁有與維護 ===
         # "tray"   -> TrayTracker：偵測/追蹤 tray 盤位置，可同時存在多筆訂單
         # "single" -> SingleOrderTracker：不追蹤 tray 盤，畫面預設只跑一筆訂單
@@ -124,6 +126,7 @@ class LogicEngine:
                 tray_missing_frame=self.tray_missing_frame,
                 frame_width=cfg.runtime.camera.width,
                 frame_height=cfg.runtime.camera.height,
+                ticket_leave_frame=self.ticket_leave_frame,
             )
             logger.info("LogicEngine 啟動於 [single] 模式：單一訂單，不追蹤 tray 盤")
         else:
@@ -149,6 +152,8 @@ class LogicEngine:
         )
 
         self.csv = CsvWriter(log_dir="/mnt/reserved/csv_uploaded")
+
+        self.last_order_number: Dict[str, Optional[str]] = {}
 
     # ------------------------------------------------------------
     # 對外相容 API：trays 字典實際上由 TrayTracker 持有
@@ -243,7 +248,8 @@ class LogicEngine:
         3. 發布 mqtt 訊息
         """
         self.state_machine.apply_ocr_result(
-            self.trays, tray_id, item_type, frame_crop, dt_boxes, rec_res, is_flip, task_bbox
+            self.trays, tray_id, item_type, frame_crop, dt_boxes, rec_res, is_flip, task_bbox,
+            last_order_number=self.last_order_number.get(tray_id),
         )
 
         # === single 模式專屬修正 ===
@@ -273,6 +279,10 @@ class LogicEngine:
             if tray.missing_count > self.tray_missing_frame:
                 trays_to_remove.append(tray_id)
 
+                # 記住這筆訂單的編號，供下次重新鎖定時比對是否為同一張舊單
+                if tray.order_number:
+                    self.last_order_number[tray_id] = tray.order_number
+                    
                 final_tray_capture_b64 = ""
                 ticket_capture_b64 = ""
 
@@ -294,6 +304,7 @@ class LogicEngine:
 
                 log_payload = {
                     "tray_id": tray_id,
+                    "order_number": tray.order_number,
                     "start_time": tray.start_time_str,
                     "end_time": ts_utc,
                     "expected_item": expected_list,
