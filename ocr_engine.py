@@ -583,11 +583,95 @@ class TextSystemDLA:
                 vertical_count += 1
 
         return (vertical_count / len(dt_boxes)) >= vertical_ratio
+    
+    def _get_box_dims(self, box):
+        """
+        計算四邊形 bbox 的寬高與字體大小估計值(short_side)。
+        此計算方式只依賴 box 四個頂點的邊長關係,與整張圖片目前是否
+        已經轉正(90/270)無關 —— 不論文字是橫排還是直排,
+        short_side 恆代表「字體粗細/大小」這個維度。
+
+        box: shape (4, 2), 依序為 [左上, 右上, 右下, 左下]
+        """
+        p0, p1, p2, p3 = box
+        top = np.linalg.norm(p1 - p0)
+        bottom = np.linalg.norm(p2 - p3)
+        left = np.linalg.norm(p3 - p0)
+        right = np.linalg.norm(p2 - p1)
+
+        width = (top + bottom) / 2.0     # 文字排列方向長度
+        height = (left + right) / 2.0    # 垂直於排列方向的長度(字體大小)
+        short_side = min(width, height)
+        long_side = max(width, height)
+        return width, height, short_side, long_side
+
+    def _filter_sticker_boxes(self, dt_boxes, height_ratio_threshold=0.75, min_keep=1):
+        """
+        Sticker 專用過濾:去除字體明顯較小的描述性文字 bbox,
+        只保留代表「菜單名稱/編號」的大字 bbox。
+
+        放置時機建議:det 完成(含 90/270 校正後的 det)之後、
+        cls 方向分類之前 —— 這樣可以避免大量小字 bbox 干擾
+        cls 的翻轉比例判斷(is_flip),進而避免後續 y 軸最小值
+        判斷時取錯資訊。
+
+        Args:
+            dt_boxes: np.ndarray, shape (N, 4, 2)
+            height_ratio_threshold: 保留門檻比例,預設 0.75
+                (實務上描述小字大約只有主標題的 0.5~0.7 倍高度,
+                設 0.75 可以在保留同高度的「名稱+編號」的同時濾掉小字。
+                這個值目測而來,建議之後用實際 sticker 樣本統計調整)
+            min_keep: 最少保留幾個 box,避免過濾後一個都不剩
+
+        Returns:
+            np.ndarray, shape (M, 4, 2), M <= N
+        """
+        if dt_boxes is None or len(dt_boxes) <= 2:
+            # box 數量太少(通常就是名稱+編號兩框),不需要過濾避免誤殺
+            return dt_boxes
+
+        short_sides = np.array([
+            self._get_box_dims(box)[2] for box in dt_boxes
+        ])
+
+        max_short_side = short_sides.max()
+        if max_short_side <= 0:
+            return dt_boxes
+
+        keep_mask = short_sides >= (max_short_side * height_ratio_threshold)
+
+        if keep_mask.sum() < min_keep:
+            top_idx = np.argsort(-short_sides)[:min_keep]
+            keep_mask[:] = False
+            keep_mask[top_idx] = True
+
+        filtered_boxes = dt_boxes[keep_mask]
+
+        logger.warning(
+            f"[OCR_ENGINE] filter dt_boxes: {len(dt_boxes)} -> {len(filtered_boxes)} "
+            f"[OCR_ENGINE] (max_short_side={max_short_side:.1f}, threshold={height_ratio_threshold})"
+        )
+        return filtered_boxes
+    
+    def _postprocess_and_crop(self, img, dt_boxes, obj_type):
+        """
+        共用邏輯: sticker 過濾 -> 排序 -> 裁切
+        (det 呼叫時機在 predict 裡不同分支不一樣，所以不包在這個 helper 裡)
+        """
+        if obj_type == "sticker":
+            dt_boxes = self._filter_sticker_boxes(dt_boxes)
+
+        dt_boxes = self.sorted_boxes(dt_boxes)
+        img_crop_list = [
+            self.get_rotate_crop_image(img, box.astype(np.float32))
+            for box in dt_boxes
+        ]
+        return dt_boxes, img_crop_list
 
     # ========================= #
     # Main Pipeline             #
     # ========================= #
-    def predict(self, image_input):
+    def predict(self, image_input, obj_type="unknown"):
         """主要預測流程"""
         st = time.time()
  
@@ -611,13 +695,8 @@ class TextSystemDLA:
             if len(dt_boxes) == 0:
                 return [], [], False, is_rotated_90, time.time() - st
 
-        # 2. 裁剪文字區域
-        img_crop_list = []
-        dt_boxes = self.sorted_boxes(dt_boxes)
-        for box in dt_boxes:
-            tmp_box = box.astype(np.float32)
-            img_crop = self.get_rotate_crop_image(ori_im, tmp_box)
-            img_crop_list.append(img_crop)
+        # 2. sticker 過濾 + 排序 + 裁剪 (共用邏輯)
+        dt_boxes, img_crop_list = self._postprocess_and_crop(ori_im, dt_boxes, obj_type)
 
         # 3. 方向分類
         img_crop_list, cls_res, flip_count, elapse2 = self.run_cls(img_crop_list)
@@ -633,12 +712,8 @@ class TextSystemDLA:
             if len(dt_boxes) == 0:
                 return [], [], is_flip, is_rotated_90, time.time() - st
 
-            img_crop_list = []
-            dt_boxes = self.sorted_boxes(dt_boxes)
-            for box in dt_boxes:
-                tmp_box = box.astype(np.float32)
-                img_crop = self.get_rotate_crop_image(rotated_im, tmp_box)
-                img_crop_list.append(img_crop)
+            # 180 度重新 det 後,同樣需要再過濾一次 sticker,理由相同
+            dt_boxes, img_crop_list = self._postprocess_and_crop(rotated_im, dt_boxes, obj_type)
 
             img_crop_list, cls_res, _, _ = self.run_cls(img_crop_list)
 
@@ -926,7 +1001,7 @@ class AsyncOCR:
                 M_inv = metadata['M_inv']
                 
                 # --- 執行 OCR ---
-                rec_res, dt_boxes, is_flip, is_rotated_90, time_cost = self.ocr_sys.predict(frame_crop)
+                rec_res, dt_boxes, is_flip, is_rotated_90, time_cost = self.ocr_sys.predict(frame_crop, obj_type=metadata['type'])
                 # 若被判定為 90/270 度誤轉，先把來源圖轉正 90 度
                 if is_rotated_90:
                     frame_crop = cv2.rotate(frame_crop, cv2.ROTATE_90_CLOCKWISE)
