@@ -1,4 +1,4 @@
-mode: single
+mode: preset_roi
 includes:
     classes: classes.yaml
     menus_mapping: menus_mapping.yaml
@@ -9,10 +9,10 @@ mqtt:
     session: v1
 runtime:
     model:
-        object_det: ./mmr_10cls_v01_00.dla #./object_9cls_v01_00.dla
-        ocr_det: ./yoshi_det_v01_01.dla
+        object_det: ./mmr_10cls_v01_00.dla
+        ocr_det: ./yoshi_det_v01_02.dla
         ocr_cls: ./cls_v2.dla
-        ocr_rec: ./yoshi_rec_v01_03.dla
+        ocr_rec: ./yoshi_rec_v01_04.dla
         text: ./japan_dict.txt
     camera:
         source: 0
@@ -68,7 +68,7 @@ camera_params:
             value: Timed
             type: string
         ExposureAuto:
-            value: 'Off'
+            value: Continuous
             default: 'Off'
             type: string
             allowed:
@@ -76,7 +76,7 @@ camera_params:
             - Once
             - 'Off'
         ExposureTime:
-            value: 75000.0
+            value: 50000.0
             default: 75000.0
             type: float
             max: 500000
@@ -90,8 +90,32 @@ camera_params:
             - Once
             - 'Off'
         Gain:
-            value: 6.0
+            value: 5.0
             default: 6.0
             type: float
             max: 23.981199264526367
             min: 0.0
+preset_roi:
+    ticket_roi:
+        points:
+            - [500, 1000]
+            - [1600, 1000]
+            - [1600, 2500]
+            - [500, 2500]
+        color: [0, 255, 255]   # BGR,黃色,前端 overlay 用
+
+    # 之後要用到辨識物件 ROI 時再打開:
+    # object_roi:
+    #     points:
+    #         - [x1, y1]
+    #         - [x2, y2]
+    #         - [x3, y3]
+    #         - [x4, y4]
+
+    # 之後要用到打包完成 ROI 時再打開:
+    # packing_roi:
+    #     points:
+    #         - [x1, y1]
+    #         - [x2, y2]
+    #         - [x3, y3]
+    #         - [x4, y4]

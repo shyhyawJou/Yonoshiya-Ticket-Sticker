@@ -33,9 +33,17 @@ class TrackedItem:
     is_ocr_busy: bool = False  # 標記這個物件是否正在跑 OCR
     is_checked: bool = False   # 標記這個貼紙是否已經核對成功，避免重複辨識
     is_missing: bool = False
+    is_wrong_item: bool = False
     has_notified_missing: bool = False # <--- 新增：避免重複發送 MQTT
     missing_count: int = 0     # 連續沒被偵測到的幀數，過期後 TrayTracker 會將其從 tray.stickers 移除
     cls_name: str = None
+    last_wrong_notify_ts: float = 0.0    # 心跳用:上次通知前端的實際時間戳
+
+    # --- 內容置換偵測用 ---
+    geo_stable_frames: int = 0        # 連續「幾何完全靜止」的幀數,比 stable_frames 門檻更嚴格
+    content_ref_image: Optional[np.ndarray] = None  # 凍結時的正規化參考影像(灰階、已減去自身平均亮度)
+    content_check_counter: int = 0    # 距離上次做內容比對過了幾幀(每 K 幀比一次,省運算)
+    content_mismatch_streak: int = 0  # 連續判定「內容不符」的次數(需連續達標才觸發重置)
 
 @dataclass
 class Tray:

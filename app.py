@@ -75,7 +75,7 @@ class StreamManager:
         self.stream_mode = "detect"
         self.stream_size = self.cfg.runtime.stream.stream_size
         self.streamer = Mjpeg_Streamer(
-            route='/ai_stream', 
+            route='/meal', 
             port=self.cfg.runtime.stream.port, 
             size=self.stream_size, 
             quality=40
@@ -220,11 +220,43 @@ class StreamManager:
 
         return frame
 
+    def _draw_preset_roi(self, frame):
+        """
+        preset_roi 模式下,把設定檔裡定義的 ROI 區域畫到畫面上,
+        方便現場除錯/調整 ROI 座標時直接對照。
+        跟 OCR overlay 分開,因為 ROI 是「設定檔畫出來的靜態框」,
+        不管當下有沒有 OCR 任務在跑都應該持續顯示。
+        """
+        if self.cfg.mode != "preset_roi" or self.cfg.preset_roi is None:
+            return frame
+
+        roi_entries = [
+            self.cfg.preset_roi.ticket_roi,
+            self.cfg.preset_roi.object_roi,
+            self.cfg.preset_roi.packing_roi,
+        ]
+
+        for roi in roi_entries:
+            if roi is None:
+                continue
+
+            pts = np.array(roi.points, dtype=np.int32).reshape(-1, 1, 2)
+            color = tuple(roi.color) if roi.color else (0, 255, 255)  # 預設黃色(BGR)
+
+            cv2.polylines(frame, [pts], isClosed=True, color=color, thickness=3)
+
+            label_pos = tuple(pts[0][0] + np.array([10, -10]))
+            cv2.putText(frame, roi.name, label_pos, cv2.FONT_HERSHEY_SIMPLEX,
+                        1.5, color, 3)
+
+        return frame
+
     def _draw_overlay(self, frame):
         """
         將 OCR 結果畫在 frame 上
         """
-        vis_frame = frame 
+        vis_frame = frame
+        vis_frame = self._draw_preset_roi(vis_frame)
 
         current_data = None
         with self.data_lock:
@@ -401,10 +433,13 @@ class StreamManager:
 
                         warped_dir = Path(self.video_recorder.today_dir) / "ocr_cut"
                         warped_dir.mkdir(parents=True, exist_ok=True)
+                        fullframe_dir = Path(self.video_recorder.today_dir) / "full_screen"
+                        fullframe_dir.mkdir(parents=True, exist_ok=True)
                         _t = time.time()
                         _ts = time.strftime("%Y%m%d_%H%M%S", time.localtime(_t))
                         _ms = int(_t * 1000) % 1000
-                        cv2.imwrite(str(warped_dir / f"{_ts}_{_ms:03d}.jpg"), warped_img)
+                        cv2.imwrite(str(warped_dir / f"{_ts}_{_ms:03d}.jpg"), warped_img) # 存裁減圖
+                        cv2.imwrite(str(fullframe_dir / f"{_ts}_{_ms:03d}.jpg"), self.tmp_frame) # 存完整圖
                         
                         metadata = {
                             "tray_id": task["tray_id"],
@@ -528,7 +563,8 @@ class StreamManager:
 
                 # 用原始畫面 (未經錄影壓縮) 存檔，檔名含日期時間避免覆蓋
                 if hasattr(self, "tmp_frame") and self.tmp_frame is not None:
-                    self._save_frame(self.tmp_frame, "reset_capture")
+                    pass
+                    # self._save_frame(self.tmp_frame, "reset_capture")
                 else:
                     logger.warning("[RESET] tmp_frame 尚未就緒，略過截圖")
 
@@ -565,10 +601,10 @@ class StreamManager:
 
             elif cmd == "no_tray_setting":
                 no_tray = payload.get("no_tray")
-                new_mode = 'single' if no_tray else 'tray'
+                new_mode = 'preset_roi' if no_tray else 'tray'
 
-                if new_mode not in ("tray", "single"):
-                    logger.error(f"[MODE] 不支援的 mode: '{new_mode}'，僅接受 'tray' 或 'single'")
+                if new_mode not in ("tray", "single", "preset_roi"):
+                    logger.error(f"[MODE] 不支援的 mode: '{new_mode}'，僅接受 'tray' 或 'single' 或 'preset_roi'")
                     return
 
                 if new_mode == self.cfg.mode:

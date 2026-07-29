@@ -6,6 +6,7 @@ import time
 from collections import Counter
 
 import numpy as np
+import cv2
 from loguru import logger
 
 from schema import Detection
@@ -25,9 +26,10 @@ from logic.sticker_matcher import StickerMatcher
 
 # === Step 3 重構：tray 資料結構 / 追蹤 / 狀態機 ===
 from logic.models import Tray, TrayState, TrackedItem  # noqa: F401  (對外相容：舊呼叫端可能 import 這些名稱)
-from logic.image_utils import encode_image_base64
+from logic.image_utils import encode_image_base64, preprocess_for_diff, compute_change_ratio
 from logic.tray_tracker import TrayTracker
 from logic.single_order_tracker import SingleOrderTracker
+from logic.preset_roi_tracker import PresetRoiTracker
 from logic.tray_state_machine import TrayStateMachine
 
 
@@ -110,6 +112,14 @@ class LogicEngine:
         self.iou_candidate = cfg.placement.iou_candidate
         self.drift_iou_thresh = cfg.placement.drift_iou_thresh
 
+        #### 為了檢察物件是否有堆疊所設立的參數
+        self.content_guard_min_freeze_frames = int(getattr(cfg.stability, "content_guard_min_freeze_frames", 10))
+        self.content_guard_check_interval = int(getattr(cfg.stability, "content_guard_check_interval", 8))
+        self.content_guard_change_ratio_thresh = float(getattr(cfg.stability, "content_guard_change_ratio_thresh", 0.15))
+        self.content_guard_pixel_diff_thresh = float(getattr(cfg.stability, "content_guard_pixel_diff_thresh", 20.0))
+        self.content_guard_confirm_count = int(getattr(cfg.stability, "content_guard_confirm_count", 3))
+        ####
+
         self.ticket_leave_frame = int(cfg.stability.ticket_leave_frame)
 
         # === mode 切換：決定 trays 字典由哪個 tracker 擁有與維護 ===
@@ -129,6 +139,17 @@ class LogicEngine:
                 ticket_leave_frame=self.ticket_leave_frame,
             )
             logger.info("LogicEngine 啟動於 [single] 模式：單一訂單，不追蹤 tray 盤")
+        elif self.mode == "preset_roi":
+            self.tracker = PresetRoiTracker(
+                bus=bus,
+                sticker_missing_frame=self.sticker_missing_frame,
+                tray_missing_frame=self.tray_missing_frame,
+                frame_width=cfg.runtime.camera.width,
+                frame_height=cfg.runtime.camera.height,
+                ticket_leave_frame=self.ticket_leave_frame,
+                ticket_roi_polygon=cfg.preset_roi.ticket_roi.to_polygon_xyxy(),
+            )
+            logger.info("LogicEngine 啟動於 [preset_roi] 模式：單一訂單，依 ticket 是否在預設 ROI 內判斷生命週期")
         else:
             self.tracker = TrayTracker(
                 bus=bus,
@@ -214,6 +235,7 @@ class LogicEngine:
                 "cream_back",
             }:
                 sticker_dets.append(d)
+                # pass
 
         self.tracker.update_tray_positions(tray_dets, ts_utc)
         self.tracker.update_ticket_and_stickers(ticket_dets, sticker_dets)
@@ -225,8 +247,11 @@ class LogicEngine:
         # 它會幫你發送 -1 給前端，把狀態從 COMPLETED 退回 WAITING_STICKERS，
         # 並將貼紙標記為 has_notified_missing = True，讓 tracker 下一幀可以乾淨移除。
         #self.state_machine.handle_missing_items(self.trays)
-
-        tasks = self.state_machine.generate_tasks(self.trays)
+        # self._monitor_checked_stickers(frame) # 新增:偵測已核對貼紙是否被內容置換 ()
+        self.state_machine.resolve_known_class_items(self.trays)  # 醬料包:直接比對,不進 OCR
+        self.state_machine.resolve_wrong_item_removal(self.trays)
+        self.state_machine.heartbeat_wrong_items(self.trays)
+        tasks = self.state_machine.generate_tasks(self.trays) # 一般貼紙:才需要送 OCR
 
         self._finalize_missing_trays(frame, ts_utc)
 
@@ -263,7 +288,7 @@ class LogicEngine:
         # 鎖定」，前端就收不到訊號、卡在等待單據。
         # 這裡把它清成 None，讓下一次偵測穩定時視為重新鎖定，
         # 自然重新觸發 NEW_TRAY_DETECTED。
-        if self.mode == "single" and item_type == "ticket":
+        if self.mode in ("single", "preset_roi") and item_type == "ticket":
             tray = self.trays.get(tray_id)
             if tray is not None and tray.ticket is not None and tray.state == TrayState.WAITING_TICKET:
                 tray.ticket = None
@@ -317,3 +342,49 @@ class LogicEngine:
 
         for tid in trays_to_remove:
             self.remove_tray(tid, ts_utc)
+
+    def _monitor_checked_stickers(self, frame: np.ndarray) -> None:
+        for tray_id, tray in self.trays.items():
+            for ts in tray.stickers:
+                if not ts.is_checked or ts.is_ocr_busy:
+                    continue
+
+                if ts.geo_stable_frames < self.content_guard_min_freeze_frames:
+                    ts.content_ref_image = None
+                    ts.content_check_counter = 0
+                    ts.content_mismatch_streak = 0
+                    continue
+
+                cx, cy, w, h, r = ts.xywhr
+                if w < 5 or h < 5:
+                    continue
+
+                if ts.content_ref_image is None:
+                    warped_img, _ = self.mmr.crop_by_angle(frame, cx, cy, w, h, r)
+                    ts.content_ref_image = preprocess_for_diff(warped_img)
+                    ts.content_check_counter = 0
+                    ts.content_mismatch_streak = 0
+                    # cv2.imwrite("ori_crop_img_0.jpg", ts.content_ref_image)
+                    continue
+
+                ts.content_check_counter += 1
+                if ts.content_check_counter < self.content_guard_check_interval:
+                    continue
+                ts.content_check_counter = 0
+
+                warped_img, _ = self.mmr.crop_by_angle(frame, cx, cy, w, h, r)
+                current_processed = preprocess_for_diff(warped_img)
+                change_ratio = compute_change_ratio(
+                    ts.content_ref_image, current_processed,
+                    pixel_diff_thresh=self.content_guard_pixel_diff_thresh
+                )
+                # cv2.imwrite("curr_crop_img_1.jpg", current_processed)
+                logger.error(f"[logic engine] change_ratio: {change_ratio:.3f}, thresh: {self.content_guard_change_ratio_thresh}")
+
+                if change_ratio > self.content_guard_change_ratio_thresh:
+                    ts.content_mismatch_streak += 1
+                else:
+                    ts.content_mismatch_streak = 0
+
+                if ts.content_mismatch_streak >= self.content_guard_confirm_count:
+                    self.state_machine.reopen_sticker_for_recheck(tray, tray_id, ts)

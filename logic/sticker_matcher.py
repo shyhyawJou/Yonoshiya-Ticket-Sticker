@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import copy
 from typing import List, Optional, Tuple
-
+from collections import Counter
 from loguru import logger
 
 from logic.text_utils import FuzzyMatcher, normalize_text
@@ -88,3 +88,13 @@ class StickerMatcher:
 
         logger.warning(f"[餐點確認失敗]: OCR -> '{last_text}'")
         return None, "UNRECOGNIZED"
+
+    def match_known_item(self, item_name: str, expected_items: List[str], checked_items: List[str]):
+        """
+        身份已由分類器直接給定(不需要 OCR 文字比對)時的比對邏輯。
+        回傳 (item_name, match_status),status 為 "MATCHED" 或 "WRONG_ITEM"。
+        """
+        remaining = Counter(expected_items) - Counter(checked_items)
+        if remaining.get(item_name, 0) > 0:
+            return item_name, "MATCHED"
+        return item_name, "WRONG_ITEM"

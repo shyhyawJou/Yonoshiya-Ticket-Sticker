@@ -653,6 +653,51 @@ class TextSystemDLA:
         )
         return filtered_boxes
     
+    def _remove_table_lines(self, img):
+        """
+        針對 ticket 類型,偵測表格中的長直線/橫線格線並塗白,
+        避免格線被誤判成文字(例如跟 '1' 混淆)。
+        只作用在傳入的 img 副本上,不會影響外部的 ori_im。
+        """
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img.copy()
+
+        binary = cv2.adaptiveThreshold(
+            gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
+            cv2.THRESH_BINARY_INV, 15, 10
+        )
+
+        h, w = gray.shape[:2]
+
+        # 水平線: kernel 寬度跟圖寬成比例,只留下夠長的橫線
+        horizontal_kernel = cv2.getStructuringElement(
+            cv2.MORPH_RECT, (max(w // 20, 15), 1)
+        )
+        horizontal_lines = cv2.morphologyEx(
+            binary, cv2.MORPH_OPEN, horizontal_kernel, iterations=1
+        )
+
+        # 垂直線: kernel 高度跟圖高成比例
+        vertical_kernel = cv2.getStructuringElement(
+            cv2.MORPH_RECT, (1, max(h // 20, 15))
+        )
+        vertical_lines = cv2.morphologyEx(
+            binary, cv2.MORPH_OPEN, vertical_kernel, iterations=1
+        )
+
+        lines_mask = cv2.bitwise_or(horizontal_lines, vertical_lines)
+
+        # 膨脹一點,確保線條邊緣殘影也被蓋住
+        dilate_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        lines_mask = cv2.dilate(lines_mask, dilate_kernel, iterations=1)
+
+        result = img.copy()
+        if result.ndim == 3:
+            result[lines_mask > 0] = (255, 255, 255)
+        else:
+            result[lines_mask > 0] = 255
+
+        return result
+
     def _postprocess_and_crop(self, img, dt_boxes, obj_type):
         """
         共用邏輯: sticker 過濾 -> 排序 -> 裁切
@@ -660,6 +705,9 @@ class TextSystemDLA:
         """
         if obj_type == "sticker":
             dt_boxes = self._filter_sticker_boxes(dt_boxes)
+        # if obj_type == "ticket":
+        #     img = self._remove_table_lines(img)  # 只塗白,不動 box 座標
+        #     cv2.imwrite("wihteeee.jpg", img)
 
         dt_boxes = self.sorted_boxes(dt_boxes)
         img_crop_list = [
@@ -999,7 +1047,7 @@ class AsyncOCR:
                 input_data = self.input_queue.get(timeout=0.1)   
                 frame_crop, metadata = input_data
                 M_inv = metadata['M_inv']
-                
+
                 # --- 執行 OCR ---
                 rec_res, dt_boxes, is_flip, is_rotated_90, time_cost = self.ocr_sys.predict(frame_crop, obj_type=metadata['type'])
                 # 若被判定為 90/270 度誤轉，先把來源圖轉正 90 度

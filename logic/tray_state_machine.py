@@ -21,6 +21,7 @@ from collections import Counter
 from typing import Dict, List
 
 import numpy as np
+import time
 from loguru import logger
 
 from logic.geometry import PolygonXYXY, iou_poly_poly
@@ -28,6 +29,7 @@ from logic.models import Tray, TrayState
 from logic.order_parser import OrderParser
 from logic.sticker_matcher import StickerMatcher
 from logic.single_order_tracker import SINGLE_ORDER_ID
+from logic.known_class_items import is_known_class_item, resolve_item_name
 
 
 
@@ -39,12 +41,14 @@ class TrayStateMachine:
         sticker_matcher: StickerMatcher,
         special_cases: Dict[str, List[str]],
         n_settle_frame: int,
+        wrong_item_margin: int = 10,   # 新增
     ):
         self.bus = bus
         self.order_parser = order_parser
         self.sticker_matcher = sticker_matcher
         self.special_cases = special_cases
         self.N = n_settle_frame
+        self.wrong_item_margin = wrong_item_margin
 
     def set_ocr_busy(self, trays: Dict[str, Tray], tray_id: str, item_type: str, bbox: PolygonXYXY):
         """由呼叫端確認已將任務送給 OCR 後呼叫，正式鎖定狀態"""
@@ -82,6 +86,8 @@ class TrayStateMachine:
 
             elif tray.state == TrayState.WAITING_STICKERS:
                 for ts in tray.stickers:
+                    if is_known_class_item(ts.cls_name):
+                        continue  # 醬料包不需要 OCR,交給 resolve_known_class_items 處理
                     if ts.stable_frames >= self.N and not ts.is_checked and not ts.is_ocr_busy:
                         tasks.append({
                             "tray_id": tray.id,
@@ -93,7 +99,7 @@ class TrayStateMachine:
                         break
 
         return tasks
-
+    
     def apply_ocr_result(
         self,
         trays: Dict[str, Tray],
@@ -115,7 +121,7 @@ class TrayStateMachine:
             return
 
         tray = trays[tray_id]
-        print(f"OCR res : {rec_res}")
+        logger.info(f"[tray state machine] OCR res : \n {rec_res} \n")
 
         if item_type == "ticket" and tray.state == TrayState.CHECKING_TICKET:
             self._apply_ticket_result(tray, tray_id, frame_crop, dt_boxes, rec_res, is_flip, last_order_number)
@@ -170,6 +176,7 @@ class TrayStateMachine:
                 tray.ticket.stable_frames = 0
             tray.state = TrayState.WAITING_TICKET
 
+
     def _apply_sticker_result(self, tray: Tray, tray_id: str, dt_boxes, rec_res, is_flip, task_bbox):
         matched_item = None
         match_status = "UNRECOGNIZED"
@@ -179,29 +186,43 @@ class TrayStateMachine:
                 rec_res, dt_boxes, is_flip, tray.expected_items, tray.checked_items
             )
 
+        target_ts = None
         for ts in tray.stickers:
             if iou_poly_poly(ts.bbox, task_bbox) > 0.1:
                 ts.is_ocr_busy = False
-                
-                if match_status == "MATCHED":
-                    ts.is_checked = True
-                    ts.item_name = matched_item
-                else:
-                    ts.stable_frames = 0
+                target_ts = ts
                 break
+
+        self._settle_sticker_match(tray, tray_id, target_ts, matched_item, match_status)
+
+    def _settle_sticker_match(self, tray: Tray, tray_id: str, ts, matched_item, match_status):
+        """
+        比對結果的共用收尾:不管身份是 OCR 得來或分類器直讀得來,
+        「核對成功/失敗後該做什麼」都是同一套業務邏輯。
+        """
+        if ts is not None:
+            if match_status == "MATCHED":
+                ts.is_checked = True
+                ts.item_name = matched_item
+            else:
+                ts.stable_frames = 0
+                if match_status == "WRONG_ITEM":
+                    ts.is_wrong_item = True
+                    ts.item_name = matched_item
+                    ts.last_wrong_notify_ts = time.time()
 
         if match_status == "MATCHED":
             tray.checked_items.append(matched_item)
             check_counts = Counter(tray.checked_items)
             items_list = [{item: count} for item, count in check_counts.items()]
-
             self.bus.publish_det_status({
                 "tray_id": tray_id,
                 "status": "ITEM_CHECKED",
                 "items": items_list
             })
 
-            if len(tray.checked_items) == len(tray.expected_items):
+            has_unresolved_wrong_item = any(t.is_wrong_item for t in tray.stickers)
+            if len(tray.checked_items) == len(tray.expected_items) and not has_unresolved_wrong_item:
                 tray.state = TrayState.COMPLETED
                 self.bus.publish_det_status({
                     "tray_id": tray_id,
@@ -218,7 +239,107 @@ class TrayStateMachine:
 
         if tray.state != TrayState.COMPLETED:
             tray.state = TrayState.WAITING_STICKERS
-        
+
+    def reopen_sticker_for_recheck(self, tray: Tray, tray_id: str, ts) -> None:
+        """
+        貼紙已核對過,但像素內容比對確認已被替換(例如被疊上新餐點)。
+        清空核對狀態、扣回原本記帳的品項,讓它重新走一次穩定度累積,
+        交給既有的 generate_tasks 重新送 OCR——處理方式跟「全新貼紙
+        出現」完全一樣,不需要另外寫一套辨識流程。
+        """
+        if ts.is_checked and ts.item_name and ts.item_name in tray.checked_items:
+            tray.checked_items.remove(ts.item_name)
+            ### 暫時不發送減少
+            # check_counts = Counter(tray.checked_items)
+            # items_list = [{item: count} for item, count in check_counts.items()]
+            # self.bus.publish_det_status({
+            #     "tray_id": tray_id,
+            #     "status": "ITEM_CHECKED",
+            #     "items": [{ts.item_name: -1}]
+            # })
+
+        ts.is_checked = False
+        ts.item_name = None
+        ts.stable_frames = 0
+        ts.content_ref_image = None
+        ts.content_check_counter = 0
+        ts.content_mismatch_streak = 0
+
+        if tray.state == TrayState.COMPLETED:
+            tray.state = TrayState.WAITING_STICKERS
+
+        logger.info(f"[內容變更偵測] tray={tray_id} 貼紙內容疑似已被替換或物件堆疊,重新排入辨識佇列")
+    
+    def resolve_known_class_items(self, trays: Dict[str, Tray]) -> None:
+        """
+        處理「類別即身份」的品項(醬料包等):穩定度到門檻後直接跟訂單比對,
+        不經過 PaddleOCR,避免不必要的 OCR 呼叫與畫面閃爍。
+
+        WRONG_ITEM 使用比一般門檻更高的穩定度(self.N + margin),因為
+        誤發 WRONG_ITEM 警訊的代價(前端跳出不必要的警示)遠高於晚一點
+        才判定成功的代價;而 mmrotate 分類抖動造成的誤判通常撐不過這個
+        延長門檻,會在達標前就因為 missing_count 超標被 tracker 清掉。
+        """
+        for tray_id, tray in trays.items():
+            if tray.state != TrayState.WAITING_STICKERS:
+                continue
+
+            for ts in tray.stickers:
+                item_name = resolve_item_name(ts.cls_name)
+                if item_name is None or ts.is_checked:
+                    continue
+
+                remaining = Counter(tray.expected_items) - Counter(tray.checked_items)
+                will_match = remaining.get(item_name, 0) > 0
+                required_frames = self.N if will_match else (self.N + self.wrong_item_margin)
+
+                if item_name is None or ts.is_checked:
+                    continue
+                if ts.stable_frames < required_frames:
+                    continue
+
+                matched_item, match_status = self.sticker_matcher.match_known_item(
+                    item_name, tray.expected_items, tray.checked_items
+                )
+
+                self._settle_sticker_match(tray, tray_id, ts, matched_item, match_status) 
+
+    def resolve_wrong_item_removal(self, trays: Dict[str, Tray]) -> None:
+        """
+        每幀檢查:被標記為 WRONG_ITEM 的貼紙,一旦被 tracker 確認「真的離開」
+        (is_missing=True),就解除警示狀態,並重新檢查該 tray 是否可以轉為 COMPLETED
+        ——因為湊滿核對數量的當下,可能正好被這個尚未移除的警示卡住過。
+        """
+        for tray_id, tray in trays.items():
+            resolved_any = False
+            for ts in tray.stickers:
+                if ts.is_wrong_item and ts.is_missing and not ts.has_notified_missing:
+                    ts.has_notified_missing = True  # 讓 tracker 下一幀清掉這筆幽靈紀錄
+                    resolved_any = True
+                    # self.bus.publish_det_status({
+                    #     "tray_id": tray_id,
+                    #     "status": "WRONG_ITEM_RESOLVED",
+                    #     "items": [],
+                    # })
+                    logger.info(f"[錯誤菜單已移除] tray={tray_id}")
+
+            if not resolved_any:
+                continue
+
+            has_unresolved_wrong_item = any(t.is_wrong_item and not t.has_notified_missing for t in tray.stickers)
+            if (tray.state == TrayState.WAITING_STICKERS
+                    and tray.expected_items
+                    and len(tray.checked_items) == len(tray.expected_items)
+                    and not has_unresolved_wrong_item):
+                tray.state = TrayState.COMPLETED
+                check_counts = Counter(tray.checked_items)
+                items_list = [{item: count} for item, count in check_counts.items()]
+                self.bus.publish_det_status({
+                    "tray_id": tray_id,
+                    "status": "TRAY_COMPLETED",
+                    "items": items_list
+                })
+
     def handle_missing_items(self, trays: Dict[str, Tray]) -> None:
         """
         每幀呼叫：檢查是否有貼紙確認消失，發送資訊給前端，並將對應已核對品項扣除
@@ -261,3 +382,26 @@ class TrayStateMachine:
                     # 既然餐點少拿了，狀態要從 COMPLETED 退回 WAITING_STICKERS
                     if tray.state == TrayState.COMPLETED:
                         tray.state = TrayState.WAITING_STICKERS
+
+    def heartbeat_wrong_items(self, trays: Dict[str, Tray], heartbeat_interval: float = 1.5) -> None:
+        """
+        每幀呼叫:對於目前處於 WRONG_ITEM 警示中、且尚未被判定為真的離開
+        (is_missing)的貼紙,以實際時間為準定期重發通知,不受判定週期
+        (stable_frames 重新累積)影響,確保前端不會因為判定間隔過長
+        而誤判成「已經沒有了」。
+        """
+        now = time.time()
+        for tray_id, tray in trays.items():
+            for ts in tray.stickers:
+                if not ts.is_wrong_item or ts.is_missing:
+                    continue
+                if now - ts.last_wrong_notify_ts < heartbeat_interval:
+                    continue
+
+                item_name = ts.item_name or resolve_item_name(ts.cls_name) or "unknown"
+                self.bus.publish_det_status({
+                    "tray_id": tray_id,
+                    "status": "WRONG_ITEM_DETECTED",
+                    "items": [{item_name: 1}]
+                })
+                ts.last_wrong_notify_ts = now

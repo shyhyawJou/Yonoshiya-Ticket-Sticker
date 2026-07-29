@@ -71,3 +71,13 @@ def shrink_rect(r: PolygonXYXY, factor: float) -> PolygonXYXY:
     scale = 1.0 - factor
     shrunk_pts = centroid + (pts - centroid) * scale
     return tuple(shrunk_pts.flatten())
+
+def is_geometrically_frozen(old_bbox, new_bbox, freeze_iou_thresh: float = 0.97) -> bool:
+    """
+    判斷同一個追蹤物件,這一幀是否幾乎完全沒有位移/旋轉。
+    比一般用來維持身份延續的 IoU 門檻(通常 0.1~0.7)嚴格得多,
+    專門用來當作「可以開始信任像素內容比對」的前提條件。
+    """
+    if old_bbox is None:
+        return False
+    return iou_poly_poly(new_bbox, old_bbox) >= freeze_iou_thresh

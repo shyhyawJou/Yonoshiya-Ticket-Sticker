@@ -25,6 +25,7 @@ class OrderParser:
         self.menus_with_digits = menus_with_digits
         self.fuzzy_matcher = fuzzy_matcher
         self.rec_pred = rec_pred
+        self.abc = 0
 
     def parse(
         self,

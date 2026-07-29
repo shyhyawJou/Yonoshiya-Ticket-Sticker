@@ -21,9 +21,10 @@ from __future__ import annotations
 from typing import Dict, List
 
 from loguru import logger
-
-from logic.geometry import get_polygon_centroid, is_center_in_polygon, iou_poly_poly, shrink_rect
+from logic.geometry import get_polygon_centroid, is_center_in_polygon, iou_poly_poly, shrink_rect, is_geometrically_frozen
 from logic.models import Tray, TrackedItem
+from logic.known_class_items import STABLE_CONFIRM_CLASSES
+from logic.sticker_pending_buffer import StickerPendingBuffer
 
 
 class TrayTracker:
@@ -50,12 +51,8 @@ class TrayTracker:
         self.K_sticker_new = k_sticker_new
 
         # 需要「連續多幀確認」才建立的 sticker 類別，其餘類別偵測一幀就建立
-        self.STABLE_CONFIRM_CLASSES = {
-            "sesame_front", "sesame_back",
-            "wafusauce_front", "wafusauce_back",
-            "cream_front", "cream_back",
-        }
-
+        self.STABLE_CONFIRM_CLASSES = STABLE_CONFIRM_CLASSES
+        self.pending_buffer = StickerPendingBuffer(k_new=self.K_sticker_new)
         self.trays: Dict[str, Tray] = {}
         self.tray_candidates: List[dict] = []
         self.tray_id_counter: int = 0
@@ -251,61 +248,32 @@ class TrayTracker:
                         best_iou, best_idx = val, idx
 
                 if best_idx != -1 and best_iou > 0.1:
-                    tray.stickers[best_idx].stable_frames += 1
-                    tray.stickers[best_idx].bbox = s_rect
-                    tray.stickers[best_idx].xywhr = s_xywhr
+                    ts_obj = tray.stickers[best_idx]
+                    if is_geometrically_frozen(ts_obj.bbox, s_rect):
+                        ts_obj.geo_stable_frames += 1
+                    else:
+                        ts_obj.geo_stable_frames = 0
+                    ts_obj.stable_frames += 1
+                    ts_obj.bbox = s_rect
+                    ts_obj.xywhr = s_xywhr
                     matched_sticker_indices.add(best_idx)
                     continue
 
-                ##################################################################
-                # 需要「連續多幀確認」的類別：先進候選區累積幀數，門檻到才正式建立
                 if d.cls_name in self.STABLE_CONFIRM_CLASSES:
-                    matched_pending_idx = -1
-                    best_pending_iou = 0.0
-
-                    for pidx, pending in enumerate(tray.pending_stickers):
-                        if pidx in matched_pending_indices:
-                            continue
-                        if pending['cls_name'] != d.cls_name:
-                            continue
-                        val = iou_poly_poly(s_rect, pending['bbox'])
-                        if val > best_pending_iou and val > 0.1:
-                            best_pending_iou, matched_pending_idx = val, pidx
-
-                    if matched_pending_idx != -1:
-                        pending = tray.pending_stickers[matched_pending_idx]
-                        pending['bbox'] = s_rect
-                        pending['xywhr'] = s_xywhr
-                        pending['count'] += 1
-                        matched_pending_indices.add(matched_pending_idx)
-                        logger.error(pending)
-
-                        if pending['count'] >= self.K_sticker_new:
-                            tray.stickers.append(TrackedItem(bbox=s_rect, xywhr=s_xywhr, cls_name=pending['cls_name']))
-                            newly_created_indices.add(len(tray.stickers) - 1)
-                    else:
-                        tray.pending_stickers.append({
-                            'bbox': s_rect,
-                            'xywhr': s_xywhr,
-                            'cls_name': d.cls_name,
-                            'count': 1,
-                        })
-                        matched_pending_indices.add(len(tray.pending_stickers) - 1)
+                    upgrade = self.pending_buffer.update(
+                        tray.pending_stickers, s_rect, s_xywhr, d.cls_name, matched_pending_indices
+                    )
+                    if upgrade is not None:
+                        tray.stickers.append(TrackedItem(
+                            bbox=upgrade['bbox'], xywhr=upgrade['xywhr'], cls_name=upgrade['cls_name']
+                        ))
+                        newly_created_indices.add(len(tray.stickers) - 1)
                 else:
-                    # 其他類別：維持原本行為，偵測一幀就建立
                     tray.stickers.append(TrackedItem(bbox=s_rect, xywhr=s_xywhr, cls_name=d.cls_name))
                     newly_created_indices.add(len(tray.stickers) - 1)
-                ##################################################################
 
-            # 本幀沒被匹配到的候選：直接淘汰（中斷即重新計數）
-            tray.pending_stickers = [
-                p for i, p in enumerate(tray.pending_stickers) if i in matched_pending_indices
-            ]
-
-            # 已升級為正式 sticker 的候選，需從 pending_stickers 移除
-            tray.pending_stickers = [
-                p for p in tray.pending_stickers if p['count'] < self.K_sticker_new
-            ]
+            # 本幀沒被匹配到的候選：直接淘汰（中斷即重新計數, 已升級為正式 sticker 的候選，需從 pending_stickers 移除
+            tray.pending_stickers = self.pending_buffer.prune(tray.pending_stickers, matched_pending_indices)
 
             # 這一幀有被偵測到的貼紙（含既有匹配到的、含剛建立的）：消失計數歸零
             # 沒被偵測到的：
@@ -329,6 +297,7 @@ class TrayTracker:
                     ts.stable_frames = 0
                 if not ts.is_ocr_busy:
                     ts.missing_count += 1
+                    ts.geo_stable_frames = 0
 
                 # 門檻到了，標記為消失，交由 StateMachine 處理業務與發送 MQTT
                 if ts.missing_count > self.sticker_missing_frame:
