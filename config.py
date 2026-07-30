@@ -136,6 +136,7 @@ class Config:
     placement: PlacementCfg
     stability: StabilityCfg
     camera_params: CameraParmCfg
+    bright_ctrl: dict
     classes: List[ClassInfo]
     menus_ticket: List[str]
     menus_sticker: List[str]
@@ -298,6 +299,7 @@ def load_config(config_path: str) -> Config:
             raise ValueError("mode 設為 'preset_roi' 時，設定檔必須提供 'preset_roi.ticket_roi'")
         # Camera
         ca = base["camera_params"]
+        bright_ctrl = base["birghtness_controller"]
         #camera_params = CameraParmCfg(
         #    GainAuto = str(ca["GainAuto"]),
         #    Gain = float(ca["Gain"]),
@@ -318,6 +320,7 @@ def load_config(config_path: str) -> Config:
             menus_sticker=menus_sticker,
             menus_mapping=mapping_cases,
             mode=mode,
+            bright_ctrl=bright_ctrl,
             preset_roi=preset_roi_cfg,
         )
 

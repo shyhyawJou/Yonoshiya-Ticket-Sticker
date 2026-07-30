@@ -253,6 +253,16 @@ class HikCamera:
         )
         self._config_save_thread.start()
 
+        # 亮度調節器
+        #self.bright_ctrl = HikBrightnessController(
+        #    self, 
+        #    target_fps=cfg.camera_params['hik']['AcquisitionFrameRate']['value'],
+        #    exposure_min_us=cfg.camera_params['hik']['ExposureTime']['min'],
+        #    gain_min_db=cfg.camera_params['hik']['Gain']['min'],
+        #    gain_max_db=cfg.camera_params['hik']['Gain']['max'],
+        #    **cfg.bright_ctrl
+        #)
+
     # ---------------- 列舉裝置（不需要知道 HikDeviceManager 也能用） ----------------
     @classmethod
     def list_available_devices(cls):
@@ -327,6 +337,7 @@ class HikCamera:
             raise RuntimeError("set trigger mode fail! ret[0x%x]" % ret)
 
         # 設定相機參數
+        #br = int(HikBrightnessController.set_golden(self.cfg.bright_ctrl['golden_img']))
         self.set_camera_parameters(display=True)
         self.list_all_camera_parameters()
 
@@ -610,7 +621,7 @@ class HikCamera:
         except ValueError:
             logger.error(f"參數 '{key}' 的數值型態錯誤 (無法轉換為 {rule['type'].__name__})")
 
-        self._set_save_config_flag()
+        self.set_save_config_flag()
 
         rule['value'] = value
         logger.info(f"[MEMORY UPDATE] the camera parameter [{key}]'s value to {value} !")
@@ -700,6 +711,10 @@ class HikCamera:
 
             img_out = np.frombuffer(self.dst_buffer, dtype=np.uint8).copy()
             img_out = img_out.reshape(height, width, 3)
+            #img_out = equalize(img_out)
+
+            # 亮度調節
+            #self.bright_ctrl.step(img_out)
 
         finally:
             ret = self.cam.MV_CC_FreeImageBuffer(stOutFrame)
@@ -763,7 +778,7 @@ class HikCamera:
             self._is_sdk_initialized = False
         logger.success('release the camera !')
 
-    def _set_save_config_flag(self):
+    def set_save_config_flag(self):
         with self._config_lock:
             self._config_dirty = True
             self._config_last_update = time.time()
@@ -777,6 +792,286 @@ class HikCamera:
             yaml.safe_dump(data, f, indent=4, allow_unicode=True, sort_keys=False)
         os.replace(tmp_path, self.cfg_path)
         logger.success(f"[FILE UPDATE] saved the {self.cfg_path} !")
+
+
+# -- coding: utf-8 --
+
+"""
+HikBrightnessController
+=====================
+持續追蹤模式的亮度校正器：透過調整海康相機的 ExposureTime / Gain，
+讓待測畫面的亮度逼近 golden 圖，並保證曝光時間不會超過「目標 FPS 所允許的上限」。
+
+使用前提：
+    - ExposureAuto / GainAuto 必須設為 "Off"，交由本 class 手動控制。
+      (Once 會自動收斂一次後跳回 Off，Continuous 會一直自動調整，
+       兩者都會跟本 class 的閉迴路邏輯互搶控制權，故一律不用。)
+    - 沿用 HikCamera 既有的 MV_CC_GetFloatValue / MV_CC_SetFloatValue /
+      MV_CC_SetEnumValueByString API 慣例，直接複用同一個已開啟的 cam handle。
+"""
+
+
+class HikBrightnessController:
+    def __init__(self, hik_camera: HikCamera, golden_img, roi=None, target_fps=30.0,
+                 exposure_min_us=100.0, exposure_safety_margin=0.85,
+                 gain_min_db=0.0, gain_max_db=20.0,
+                 tolerance=3.0, max_step_ratio=2.0,
+                 overexposed_guard=0.3, underexposed_guard=0.3,
+                 check_interval=10,
+                 crtl_interval=1
+    ):
+        """
+        :param hik_camera: 已經 open() 完成的 HikCamera 實例 (借用它的 self.cam 與 self.read())
+        :param golden_img: golden sample
+        :param roi: (x1, y1, x2, y2)，None 代表用全畫面計算亮度統計
+        :param target_fps: 你要求的最低可接受 FPS，用來反推曝光時間上限
+        :param exposure_min_us: 曝光時間下限 (us)，避免調到相機支援範圍以下
+        :param exposure_safety_margin: 曝光時間上限 = frame_period * 這個比例，
+               預留給 readout / 傳輸等額外開銷，避免曝光頂滿導致實際 FPS 掉到目標值以下
+        :param gain_min_db / gain_max_db: gain 可調範圍 (dB)，超過上限雜訊會太明顯，依相機實測調整
+        :param tolerance: 平均亮度誤差在這個範圍內視為已收斂，不再調整
+        :param max_step_ratio: 單次調整的最大倍率，避免比例回饋一次跳太多造成震盪
+        :param overexposed_guard / underexposed_guard: 過曝/死黑像素比例超過這個門檻，
+               就停止往那個方向繼續調整 (防呆，避免對著已經飽和的畫面持續硬調)
+        :param check_interval: 最短觸發檢查亮度是否符合的間隔
+        :param crtl_interval: 最短觸發調整的間隔
+        """
+        self.hc = hik_camera
+        self.cam = hik_camera.cam
+        self.roi = roi
+
+        self.exposure_min_us = exposure_min_us
+        self.max_exposure_us = self._compute_max_exposure_us(target_fps, exposure_safety_margin)
+        self.gain_min_db = gain_min_db
+        self.gain_max_db = gain_max_db
+
+        self.tolerance = tolerance
+        self.max_step_ratio = max_step_ratio
+        self.overexposed_guard = overexposed_guard
+        self.underexposed_guard = underexposed_guard
+        self.check_interval = check_interval
+        self.crtl_interval = crtl_interval
+
+        self.last_check_time = time.time()
+        self.last_ctrl_time = time.time()
+        self.target_mean = None
+        self.golden_stats = None
+        self._converged = None  # None: 尚未跑過 step()，True/False: 上一次 step() 的收斂狀態
+
+        #self._configure_manual_mode()
+        self._set_golden(golden_img)
+
+        logger.success(
+            f'初始化完成: 目標亮度: {self.target_mean}'
+            #f'exposure range=[{self.exposure_min_us}, {self.max_exposure_us:.1f}] us, '
+            #f'gain range=[{self.gain_min_db}, {self.gain_max_db}] dB'
+        )
+
+    # ---------------- 曝光評價 ----------------
+    @staticmethod
+    def evaluate_exposure(img, roi=None):
+        t0 = time.time()
+        if img.ndim == 3 and img.shape[2] == 3:
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            if roi is not None:
+                x1, y1, x2, y2 = roi
+                gray = gray[y1:y2, x1:x2]
+        else:
+            gray = img
+
+        total_pixels = gray.size
+        t1 = time.time()
+        logger.info(f'[evaluate exposure] {t1 - t0:.3f} (s)')
+        return {
+            'mean': float(gray.mean()),
+            'std': float(gray.std()),
+            'overexposed_ratio': float(np.sum(gray >= 250) / total_pixels),
+            'underexposed_ratio': float(np.sum(gray <= 5) / total_pixels),
+        }
+
+    # ---------------- 設定 golden 目標 ----------------
+    @staticmethod
+    def set_golden(path):
+        golden_img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+        golden_stats = HikBrightnessController.evaluate_exposure(golden_img)
+        target_mean = int(round(golden_stats['mean']))
+        logger.success(f'根據 golden image: {path}, 目標亮度值 = {target_mean}')
+        return target_mean
+    
+    def _set_golden(self, path):
+        golden_img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+        self.golden_stats = self.evaluate_exposure(golden_img)
+        self.target_mean = self.golden_stats['mean']
+        self.set_brightness()
+
+    # ---------------- 初始化：關掉相機自己的自動曝光/增益 ----------------
+    def _configure_manual_mode(self):
+        """
+        ExposureAuto / GainAuto 一律設 Off，交給本 class 手動控制。
+        Once 只會自動調一次後跳回 Off、且過程中完全不受我們控制；
+        Continuous 會持續自己調整，兩者都會跟這裡的閉迴路演算法互搶控制權。
+        """
+        for name in ('ExposureAuto', 'GainAuto'):
+            ret = self.cam.MV_CC_SetEnumValueByString(name, 'Off')
+            if ret != 0:
+                logger.warning(f'Set [{name}] to Off failed! ret[0x{ret:x}]')
+            else:
+                logger.success(f'Set [{name}] to Off (manual control)')
+
+    # ---------------- FPS -> 曝光時間上限 ----------------
+    @staticmethod
+    def _compute_max_exposure_us(target_fps, safety_margin):
+        """
+        曝光時間直接吃掉每一幀的時間預算，frame_period >= exposure_time + overhead。
+        safety_margin 抓一點餘裕給 readout/傳輸/觸發延遲，避免曝光頂滿導致
+        實際 FPS 掉到 target_fps 以下。
+        """
+        frame_period_us = 1000000.0 / target_fps
+        return frame_period_us * safety_margin
+
+    # ---------------- 曝光/增益 get/set (符合海康 API) ----------------
+    def get_exposure_us(self):
+        val = MVCC_FLOATVALUE()
+        ret = self.cam.MV_CC_GetFloatValue("ExposureTime", val)
+        if ret != 0:
+            raise RuntimeError(f'Get ExposureTime failed! ret[0x{ret:x}]')
+        return val.fCurValue
+
+    def set_exposure_us(self, value):
+        value = float(np.clip(value, self.exposure_min_us, self.max_exposure_us))
+        ret = self.cam.MV_CC_SetFloatValue("ExposureTime", value)
+        if ret != 0:
+            logger.warning(f'Set ExposureTime to {value:.1f} failed! ret[0x{ret:x}]')
+        else:
+            logger.info(f'Set ExposureTime = {value:.1f} us')
+            self.hc.set_save_config_flag()
+        return value
+
+    def get_gain_db(self):
+        val = MVCC_FLOATVALUE()
+        ret = self.cam.MV_CC_GetFloatValue("Gain", val)
+        if ret != 0:
+            raise RuntimeError(f'Get Gain failed! ret[0x{ret:x}]')
+        return val.fCurValue
+
+    def set_gain_db(self, value):
+        value = float(np.clip(value, self.gain_min_db, self.gain_max_db))
+        ret = self.cam.MV_CC_SetFloatValue("Gain", value)
+        if ret != 0:
+            logger.warning(f'Set Gain to {value:.2f} failed! ret[0x{ret:x}]')
+        else:
+            logger.info(f'Set Gain = {value:.2f} dB')
+            self.hc.set_save_config_flag()
+        return value
+
+    def get_brightness(self):
+        val = MVCC_FLOATVALUE()
+        ret = self.cam.MV_CC_GetIntValue("Brightness", val)
+        if ret != 0:
+            raise RuntimeError(f'Get Brightness failed! ret[0x{ret:x}]')
+        return val.fCurValue
+
+    def set_brightness(self):
+        value = int(self.target_mean)
+        cur = self.get_brightness()
+        if cur == value:
+            logger.warning(f'亮度值已經是 {value}, 所以不進行調整 !')
+            return
+        
+        ret = self.cam.MV_CC_SetIntValue("Brightness", value)
+        if ret != 0:
+            logger.warning(f'Set ExposureTime to {value:.1f} failed! ret[0x{ret:x}]')
+        else:
+            logger.info(f'Set ExposureTime = {value:.1f} us')
+            self.hc.set_save_config_flag()
+        return value
+
+    # ---------------- 持續追蹤：每次呼叫最多調整一次 ----------------
+    def step(self, frame):
+        """
+        單次呼叫：評估目前亮度、若偏離 target 超過 tolerance 就調整一次 exposure/gain。
+        設計成不內建迴圈，讓你自己的主 while True 每 frame (或每 N frame) 呼叫一次，
+        才不會卡住偵測流程；要收斂通常需要連續呼叫個幾次 step()。
+
+        :param frame: 若已經有現成的 frame (例如主迴圈剛 read() 完)，可直接傳入避免重複取像；
+                      傳 None 則自己呼叫 self.hc.read() 取一張。
+        :return: 這次評估的 exposure stats dict，若取像失敗回傳 None
+        """
+        if self.target_mean is None:
+            raise RuntimeError('尚未設定 golden 圖，請先呼叫 set_golden()')
+
+        stats = self.evaluate_exposure(frame, self.roi)
+        current_mean = stats['mean']
+        error = self.target_mean - current_mean
+
+        if abs(error) <= self.tolerance:
+            self._converged = True
+            logger.trace(f'亮度已收斂: mean={current_mean:.2f} target={self.target_mean:.2f}')
+            return stats
+
+        self._converged = False
+
+        # 飽和防呆：已經大量過曝/死黑就別再往那個方向硬調，避免無效調整或震盪
+        if self.overexposed_guard and error > 0 and stats['overexposed_ratio'] > self.overexposed_guard:
+            logger.warning('目前畫面已大量過曝，暫停繼續增加亮度')
+            return stats
+        if self.underexposed_guard and error < 0 and stats['underexposed_ratio'] > self.underexposed_guard:
+            logger.warning('目前畫面已大量死黑，暫停繼續降低亮度')
+            return stats
+
+        exposure = self.get_exposure_us()
+        gain = self.get_gain_db()
+
+        # 比例回饋：亮度在未飽和區間內大致跟 exposure * gain_linear 成正比
+        ratio = self.target_mean / max(current_mean, 1e-3)
+        ratio = float(np.clip(ratio, 1.0 / self.max_step_ratio, self.max_step_ratio))
+
+        if exposure < self.max_exposure_us or ratio < 1.0:
+            # 優先動 exposure (訊噪比較好)：還沒頂到 FPS 上限，或現在要調暗 (調暗不受 FPS 限制)
+            new_exposure = float(np.clip(exposure * ratio, self.exposure_min_us, self.max_exposure_us))
+
+            if new_exposure == exposure and ratio > 1.0:
+                # exposure 已頂到上限但還想調亮，改動 gain (最後手段，雜訊較大)
+                new_gain = gain + 20 * np.log10(ratio)
+                self.set_gain_db(new_gain)
+            else:
+                self.set_exposure_us(new_exposure)
+        else:
+            # exposure 已在上限，全交給 gain
+            new_gain = gain + 20 * np.log10(ratio)
+            self.set_gain_db(new_gain)
+
+        logger.info(
+            f'調整前 mean={current_mean:.2f} target={self.target_mean:.2f} '
+            f'error={error:.2f} -> exposure={self.get_exposure_us():.1f}us '
+            f'gain={self.get_gain_db():.2f}dB'
+        )
+
+        #self._flush()
+
+        return stats
+
+    @property
+    def is_converged(self):
+        """
+        上一次 step() 呼叫是否已在 tolerance 內收斂。
+        尚未呼叫過 step() 之前回傳 None。
+        """
+        return self._converged
+
+    def _flush(self):
+        for _ in range(self.flush_frames):
+            self.hc.read()
+
+
+def equalize(img):
+    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    l_eq = clahe.apply(l)
+    lab_eq = cv2.merge([l_eq, a, b])
+    result = cv2.cvtColor(lab_eq, cv2.COLOR_LAB2BGR)
+    return result
 
 # ---------------------------------------------------------------------------
 # main：互動式選擇裝置，開啟、取一張圖、存檔

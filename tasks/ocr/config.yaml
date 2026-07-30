@@ -68,8 +68,8 @@ camera_params:
             value: Timed
             type: string
         ExposureAuto:
-            value: Continuous
-            default: 'Off'
+            value: 'Continuous'
+            default: 'Continuous'
             type: string
             allowed:
             - Continuous
@@ -82,8 +82,8 @@ camera_params:
             max: 500000
             min: 20
         GainAuto:
-            value: 'Off'
-            default: 'Off'
+            value: 'Continuous'
+            default: 'Continuous'
             type: string
             allowed:
             - Continuous
@@ -95,6 +95,25 @@ camera_params:
             type: float
             max: 23.981199264526367
             min: 0.0
+        GammaEnable:
+            value: true
+            type: bool
+        Brightness:
+            value: 80
+            default: 80
+            type: int
+            max: 255
+            min: 0
+birghtness_controller:
+    golden_img: tasks/ocr/golden_brightness.png 
+    roi: null 
+    exposure_safety_margin: 0.85
+    tolerance: 3.0
+    max_step_ratio: 2.0
+    overexposed_guard: null
+    underexposed_guard: null
+    check_interval: 1
+    crtl_interval: 0.5
 preset_roi:
     ticket_roi:
         points:
