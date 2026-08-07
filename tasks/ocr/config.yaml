@@ -104,6 +104,12 @@ camera_params:
             type: int
             max: 255
             min: 0
+        ReverseX:
+            value: false
+            type: bool
+        ReverseY:
+            value: false
+            type: bool
 birghtness_controller:
     golden_img: tasks/ocr/golden_brightness.png 
     roi: null 
@@ -117,10 +123,10 @@ birghtness_controller:
 preset_roi:
     ticket_roi:
         points:
-            - [500, 1000]
-            - [1600, 1000]
-            - [1600, 2500]
-            - [500, 2500]
+            - [500, 1400]
+            - [1600, 1400]
+            - [1600, 2800]
+            - [500, 2800]
         color: [0, 255, 255]   # BGR,黃色,前端 overlay 用
 
     # 之後要用到辨識物件 ROI 時再打開:
