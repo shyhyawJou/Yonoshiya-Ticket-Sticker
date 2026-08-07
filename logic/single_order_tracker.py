@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 from loguru import logger
