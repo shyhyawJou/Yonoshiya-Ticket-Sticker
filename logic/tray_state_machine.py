@@ -62,6 +62,12 @@ class TrayStateMachine:
                 tray.ticket.is_ocr_busy = True
                 tray.state = TrayState.CHECKING_TICKET
 
+        elif item_type == "ticket_extra":
+            for et in tray.extra_tickets:
+                if iou_poly_poly(et.bbox, bbox) > 0.1 and not et.is_ticket_merged:
+                    et.is_ocr_busy = True
+                    break
+
         elif item_type == "sticker" and tray.state == TrayState.WAITING_STICKERS:
             for ts in tray.stickers:
                 if iou_poly_poly(ts.bbox, bbox) > 0.1:
@@ -97,6 +103,16 @@ class TrayStateMachine:
                             "cls_name": ts.cls_name
                         })
                         break
+            # 候選(第二張)ticket：不管目前狀態是 WAITING_STICKERS / CHECKING_STICKERS / COMPLETED
+            # 都要繼續看有沒有穩定夠帧、還沒處理過的候選，送去 OCR 判斷單號
+            if tray.state in (TrayState.WAITING_STICKERS, TrayState.CHECKING_STICKERS, TrayState.COMPLETED):
+                for et in tray.extra_tickets:
+                    if et.stable_frames >= self.N and not et.is_ocr_busy and not et.is_ticket_merged:
+                        tasks.append({
+                            "tray_id": tray.id, "type": "ticket_extra",
+                            "bbox": et.bbox, "xywhr": et.xywhr, "cls_name": et.cls_name,
+                        })
+                        break
 
         return tasks
     
@@ -126,56 +142,95 @@ class TrayStateMachine:
         if item_type == "ticket" and tray.state == TrayState.CHECKING_TICKET:
             self._apply_ticket_result(tray, tray_id, frame_crop, dt_boxes, rec_res, is_flip, last_order_number)
 
+        elif item_type == "ticket_extra":
+            self._apply_extra_ticket_result(tray, tray_id, frame_crop, dt_boxes, rec_res, is_flip, task_bbox)
+
         elif item_type == "sticker" and tray.state == TrayState.CHECKING_STICKERS:
             self._apply_sticker_result(tray, tray_id, dt_boxes, rec_res, is_flip, task_bbox)
 
     # ------------------------------------------------------------
     # 內部細節
     # ------------------------------------------------------------
-    def _apply_ticket_result(self, tray: Tray, tray_id: str, frame_crop, dt_boxes, rec_res, is_flip, last_order_number: str = None):
+    def _expand_parsed_items(self, parsed_items):
+        """把 OrderParser 解析出的品項，展開 special_cases（套餐拆子品項）。"""
+        expanded_expected_items = []
+        expected_items_list = []
+        for item_name, item_num in parsed_items:
+            if item_name in self.special_cases:
+                for sub_item in self.special_cases[item_name]:
+                    expanded_expected_items.extend([sub_item] * item_num)
+                    expected_items_list.append({sub_item: item_num})
+            else:
+                expanded_expected_items.extend([item_name] * item_num)
+                expected_items_list.append({item_name: item_num})
+        return expanded_expected_items, expected_items_list
+
+    def _apply_ticket_result(self, tray, tray_id, frame_crop, dt_boxes, rec_res, is_flip, last_order_number=None):
         if tray.ticket:
             tray.ticket.is_ocr_busy = False
 
         parsed_items, order_number = self.order_parser.parse(frame_crop, dt_boxes, rec_res, is_flip)
 
-        #if order_number is not None and tray_id == SINGLE_ORDER_ID and order_number == last_order_number:
-        #    logger.warning(f"[重複訂單] tray={tray_id} 編號 {order_number} 與上一筆相同，忽略此次鎖定")
-        #    if tray.ticket:
-        #        tray.ticket.stable_frames = 0
-        #    tray.state = TrayState.WAITING_TICKET
-        #    return
-        
         if parsed_items:
-            expanded_expected_items = []
-            expected_items_list = []
-
-            for item_name, item_num in parsed_items:
-                if item_name in self.special_cases:
-                    sub_items = self.special_cases[item_name]
-                    for sub_item in sub_items:
-                        expanded_expected_items.extend([sub_item] * item_num)
-                        expected_items_list.append({sub_item: item_num})
-                else:
-                    expanded_expected_items.extend([item_name] * item_num)
-                    expected_items_list.append({item_name: item_num})
+            expanded_expected_items, expected_items_list = self._expand_parsed_items(parsed_items)
 
             tray.expected_items = expanded_expected_items
+            tray.expected_items_display = expected_items_list 
             tray.state = TrayState.WAITING_STICKERS
             tray.ticket_crop = frame_crop
             order_number = "000" if order_number is None else order_number
             tray.order_number = order_number
 
+            # # 這裡要用複製(list(...))，不能直接指到同一個 list 物件，
+            # 否則之後 tray.expected_items_display.extend(...) 會連帶
+            # 污染 tray.ticket.contributed_display，造成扣除時範圍算錯
+            tray.ticket.contributed_display = list(expected_items_list)
+            tray.ticket.is_ticket_merged = True
+
             self.bus.publish_det_status({
-                "tray_id": tray_id,
-                "status": "TICKET_READY",
-                "expected_items": expected_items_list,
-                "order_number": order_number
+                "tray_id": tray_id, "status": "TICKET_READY",
+                "expected_items": expected_items_list, "order_number": order_number,
             })
         else:
             if tray.ticket:
                 tray.ticket.stable_frames = 0
             tray.state = TrayState.WAITING_TICKET
 
+    def _apply_extra_ticket_result(self, tray, tray_id, frame_crop, dt_boxes, rec_res, is_flip, task_bbox):
+        target = None
+        for et in tray.extra_tickets:
+            if iou_poly_poly(et.bbox, task_bbox) > 0.1:
+                et.is_ocr_busy = False
+                target = et
+                break
+        if target is None:
+            return
+
+        parsed_items, order_number = self.order_parser.parse(frame_crop, dt_boxes, rec_res, is_flip)
+
+        if order_number is None or order_number != tray.order_number:
+            logger.warning(f"[tray_state_machine] 第二張 ticket 單號 {order_number} 與目前訂單 {tray.order_number} 不同，忽略合併")
+            tray.extra_tickets.remove(target)  # 直接淘汰，避免每幀重送 OCR
+            return
+
+        expanded_expected_items, expected_items_list = self._expand_parsed_items(parsed_items)
+        tray.expected_items.extend(expanded_expected_items) # ex: ["菜單名"]
+        tray.expected_items_display.extend(expected_items_list) # ex: [{"菜單名": 數量}]
+        target.contributed_display = expected_items_list
+
+        target.is_ticket_merged = True  # 保留在 extra_tickets 裡，供之後「主 ticket 消失頂替」使用
+
+        if tray.state == TrayState.COMPLETED:
+            tray.state = TrayState.WAITING_STICKERS  # 加了新品項，不再算完成
+
+        logger.info(f"[tray_state_machine] ticket 單號 {order_number} 品項追加合併完成, 並發送資訊: {tray.expected_items_display}")
+        # 直接複用 TICKET_READY，整包覆寫 expected_items，前端不用新增事件處理
+        self.bus.publish_det_status({
+            "tray_id": tray_id,
+            "status": "TICKET_READY",
+            "expected_items": tray.expected_items_display,
+            "order_number": tray.order_number,
+        })
 
     def _apply_sticker_result(self, tray: Tray, tray_id: str, dt_boxes, rec_res, is_flip, task_bbox):
         matched_item = None
@@ -321,7 +376,7 @@ class TrayStateMachine:
                     #     "status": "WRONG_ITEM_RESOLVED",
                     #     "items": [],
                     # })
-                    logger.info(f"[錯誤菜單已移除] tray={tray_id}")
+                    logger.info(f"[tray_state_machine] 錯誤菜單已移除 tray={tray_id}")
 
             if not resolved_any:
                 continue
@@ -370,7 +425,7 @@ class TrayStateMachine:
                     if item_name in tray.checked_items:
                         tray.checked_items.remove(item_name)
                     
-                    logger.info(f"[貼紙消失] tray={tray_id}, 品項={item_name} 離開，通知前端扣減")
+                    logger.info(f"[tray_state_machine] 貼紙消失 tray={tray_id}, 品項={item_name} 離開，通知前端扣減")
                     
                     # 發送 MQTT 給前端：塞入你說的數量 -1
                     self.bus.publish_det_status({
@@ -405,3 +460,76 @@ class TrayStateMachine:
                     "items": [{item_name: 1}]
                 })
                 ts.last_wrong_notify_ts = now
+    
+    def resolve_missing_extra_tickets(self, trays: Dict[str, Tray]) -> None:
+        """
+        每幀檢查:候選(第二張)ticket 一旦被 tracker 判定「真的離開」(is_missing=True)
+        且尚未通知過:
+        - 如果它之前合併成功過(is_ticket_merged=True)，代表當初已經把品項
+            加進 tray.expected_items / expected_items_display，現在紙離開了
+            就要把當初加進去的那份扣回來——避免「隱藏菜單」：這張紙下次又被
+            放回來重新穩定、重新 OCR，會被當成全新候選重新走一次合併流程，
+            不會因為殘留的舊資料造成無限疊加。
+        - 扣除後重新發送一次 TICKET_READY，讓前端畫面同步移除這批品項。
+        - 標記 has_notified_missing=True，讓 tracker 下一幀清掉這筆候選。
+        """
+        for tray_id, tray in trays.items():
+            for et in tray.extra_tickets:
+                if not et.is_missing or et.has_notified_missing:
+                    continue
+
+                et.has_notified_missing = True  # 讓 tracker 下一幀清掉這筆候選
+
+                if not et.is_ticket_merged or not et.contributed_display:
+                    continue  # 從沒合併成功過，沒有品項要扣
+
+                # 把「這張候選當初貢獻的顯示清單」現場展開回攤平清單
+                contributed_flat = []
+                for d in et.contributed_display:
+                    for item_name, count in d.items():
+                        contributed_flat.extend([item_name] * count)
+
+                # 攤平清單：用 Counter 精準扣除這張紙當初貢獻的數量，
+                # 避免誤扣其他張紙貢獻的同名品項
+                removed_counter = Counter(contributed_flat)
+                new_expected_items = []
+                for item in tray.expected_items:
+                    if removed_counter.get(item, 0) > 0:
+                        removed_counter[item] -= 1
+                        continue
+                    new_expected_items.append(item)
+                tray.expected_items = new_expected_items
+
+                # 顯示清單：用物件身份(id)精準移除當初 append 進去的那幾筆 dict，
+                # 不影響其他來源（同名但不同來源的品項不會被誤刪）
+                contributed_ids = {id(d) for d in et.contributed_display}
+                tray.expected_items_display = [
+                    d for d in tray.expected_items_display if id(d) not in contributed_ids
+                ]
+
+                logger.warning(
+                    f"[tray_state_machine] tray={tray_id} 候選 ticket 離開，"
+                    f"扣回當初合併的品項: {et.contributed_display}"
+                )
+
+                self.bus.publish_det_status({
+                    "tray_id": tray_id,
+                    "status": "TICKET_READY",
+                    "expected_items": tray.expected_items_display,
+                    "order_number": tray.order_number,
+                })
+
+                # 扣除後可能剛好湊滿核對數量，補一次 COMPLETED 判斷
+                has_unresolved_wrong_item = any(t.is_wrong_item for t in tray.stickers)
+                if (tray.expected_items
+                        and tray.state != TrayState.COMPLETED
+                        and len(tray.checked_items) == len(tray.expected_items)
+                        and not has_unresolved_wrong_item):
+                    tray.state = TrayState.COMPLETED
+                    check_counts = Counter(tray.checked_items)
+                    items_list = [{item: count} for item, count in check_counts.items()]
+                    self.bus.publish_det_status({
+                        "tray_id": tray_id,
+                        "status": "TRAY_COMPLETED",
+                        "items": items_list
+                    })

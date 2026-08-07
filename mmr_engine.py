@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 from AI import RTMDET
-from schema import Detection  
+from utils.schema import Detection  
 from typing import List, Tuple
 
 # ---------------------------

@@ -8,10 +8,10 @@ import ctypes
 
 from ctypes import *
 
-from PixelType_header import *
-from CameraParams_const import *
-from CameraParams_header import *
-from MvErrorDefine_const import *
+from stream_vision.PixelType_header import *
+from stream_vision.CameraParams_const import *
+from stream_vision.CameraParams_header import *
+from stream_vision.MvErrorDefine_const import *
 
 
 # 根据平台设置调用约定

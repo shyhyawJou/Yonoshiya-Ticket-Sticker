@@ -18,7 +18,7 @@ from pathlib import Path
 from config import Config
 from mmr_engine import Rotated_RTMDET
 from config import _load_yaml
-from mqtt_bus import MqttBus
+from utils.mqtt_bus import MqttBus
 
 
 
@@ -30,7 +30,7 @@ else:
     sys.path.append(os.path.join("..", "..", "MvImport"))
 
 try:
-    from MvCameraControl_class import *
+    from stream_vision.MvCameraControl_class import *
 except Exception as e:
     logger.warning(f'{e}')
 

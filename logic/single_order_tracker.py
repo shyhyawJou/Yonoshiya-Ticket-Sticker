@@ -6,7 +6,7 @@ from typing import Dict, List
 import numpy as np
 from loguru import logger
 
-from logic.geometry import iou_poly_poly, is_geometrically_frozen
+from logic.geometry import iou_poly_poly, is_geometrically_frozen, is_center_in_polygon, PolygonXYXY, get_polygon_centroid
 from logic.models import Tray, TrackedItem, TrayState
 from logic.known_class_items import STABLE_CONFIRM_CLASSES
 from logic.sticker_pending_buffer import StickerPendingBuffer
@@ -25,6 +25,7 @@ class SingleOrderTracker:
         ticket_leave_frame: int,
         tray_id: str = SINGLE_ORDER_ID,
         k_sticker_new: int = 3,  # 需連續幾幀確認才建立 STABLE_CONFIRM_CLASSES 這幾類貼紙
+        ticket_exclude_roi_polygon: Optional[PolygonXYXY] = None,
     ):
         self.bus = bus
         self.sticker_missing_frame = sticker_missing_frame
@@ -34,6 +35,7 @@ class SingleOrderTracker:
         self.tray_id = tray_id
 
         self.ticket_leave_frame = ticket_leave_frame
+        self.ticket_exclude_roi_polygon = ticket_exclude_roi_polygon
 
         self.trays: Dict[str, Tray] = {}
         self._create_tray()
@@ -85,8 +87,10 @@ class SingleOrderTracker:
         tray.missing_count = 0
         tray.drift_count = 0
         tray.expected_items = []
+        tray.expected_items_display = []
         tray.checked_items = []
         tray.ticket = None
+        tray.extra_tickets = []
         tray.stickers = []
         tray.order_number = None  # 避免舊訂單編號殘留到下一筆
         logger.info("[RESET-B][single_order] 已重置訂單狀態")
@@ -133,7 +137,16 @@ class SingleOrderTracker:
         (貼紙不受限制、ticket_leave_frame 判斷離開...等),不需要
         另外複製一份幾乎相同的程式碼。
         """
-        return ticket_dets
+        if self.ticket_exclude_roi_polygon is None:
+            return ticket_dets
+
+        # 如果 ticket 在 ROI 之外才做辨識
+        return [
+            d for d in ticket_dets
+            if not is_center_in_polygon(
+                get_polygon_centroid(d.xyxy), self.ticket_exclude_roi_polygon
+            )
+        ]
 
     # ------------------------------------------------------------
     # 每幀更新
@@ -147,27 +160,86 @@ class SingleOrderTracker:
         tray = self.trays[self.tray_id]
         ticket_dets = self._filter_ticket_dets(ticket_dets)
         # --- ticket ---
-        if ticket_dets:
-            if len(ticket_dets) > 1:
-                logger.warning(f"[single_order] 同時偵測到 {len(ticket_dets)} 張 ticket，僅採用第一張")
+        primary_seen_this_frame = False
+        matched_extra_tickets = set()  # 存放本幀有被偵測配到的 extra_ticket 物件 id
 
-            t_rect = ticket_dets[0].xyxy
-            t_xywhr = ticket_dets[0].xywhr
+        for d in ticket_dets:
+            t_rect = d.xyxy
+            t_xywhr = d.xywhr
+
+            if tray.ticket is not None and iou_poly_poly(t_rect, tray.ticket.bbox) > 0.4:
+                tray.ticket.stable_frames += 1
+                tray.ticket.bbox = t_rect
+                tray.ticket.xywhr = t_xywhr
+                tray.ticket.missing_count = 0
+                primary_seen_this_frame = True
+                continue
+
+            best_iou, best_et = 0.0, None
+            for et in tray.extra_tickets:
+                if id(et) in matched_extra_tickets:
+                    continue
+                val = iou_poly_poly(t_rect, et.bbox)
+                if val > best_iou:
+                    best_iou, best_et = val, et
+
+            if best_et is not None and best_iou > 0.4:
+                best_et.stable_frames += 1
+                best_et.bbox = t_rect
+                best_et.xywhr = t_xywhr
+                best_et.missing_count = 0
+                matched_extra_tickets.add(id(best_et))
+                continue
+
             if tray.ticket is None:
                 tray.ticket = TrackedItem(bbox=t_rect, xywhr=t_xywhr)
                 self._publish_new_order_detected()
+                primary_seen_this_frame = True
             else:
-                if iou_poly_poly(t_rect, tray.ticket.bbox) > 0.7:
-                    tray.ticket.stable_frames += 1
-                    tray.ticket.bbox = t_rect
-                    tray.ticket.xywhr = t_xywhr
-                else:
-                    tray.ticket = TrackedItem(bbox=t_rect, xywhr=t_xywhr)
-            tray.ticket.missing_count = 0
-        else:
-            if tray.ticket and not tray.ticket.is_ocr_busy:
+                new_et = TrackedItem(bbox=t_rect, xywhr=t_xywhr)
+                tray.extra_tickets.append(new_et)
+                matched_extra_tickets.add(id(new_et))
+                logger.info("[single_order] 偵測到疑似第二張同單號訂單，開始追蹤穩定度")
+
+        # --- 主 ticket 本幀沒看到：嘗試用「已確認同單號」且「本幀有出現」的候選頂替 ---
+        if tray.ticket is not None and not primary_seen_this_frame:
+            promote_candidate = next(
+                (et for et in tray.extra_tickets if et.is_ticket_merged and id(et) in matched_extra_tickets),
+                None
+            )
+            if promote_candidate is not None:
+                logger.info("[single_order] 主 ticket 消失，改以已確認同單號的第二張 ticket 接手追蹤")
+                old_primary = tray.ticket
+                tray.extra_tickets.remove(promote_candidate)
+                tray.ticket = promote_candidate
+                # 把被頂替下來的舊主 ticket 降級，繼續當作候選追蹤,
+                # 而不是直接丟棄——它當初貢獻的品項(打底那份)還留在
+                # tray.expected_items 裡，必須繼續追蹤它的存在感，
+                # 之後才能:
+                #   1) 真的消失時，正確扣回這份貢獻
+                #   2) 重新出現時，被辨識成「已處理過」而不會重新送 OCR、重複疊加
+                if old_primary.contributed_display:
+                    old_primary.is_ticket_merged = True
+                    tray.extra_tickets.append(old_primary)
+
+            elif not tray.ticket.is_ocr_busy:
                 tray.ticket.stable_frames = 0
                 tray.ticket.missing_count += 1
+
+        # --- 其餘候選 ticket 本幀沒被匹配到 ---
+        for et in tray.extra_tickets:
+            if id(et) in matched_extra_tickets:
+                continue
+            if not et.is_ocr_busy:
+                et.stable_frames = 0
+                et.missing_count += 1
+            if et.missing_count > self.sticker_missing_frame:
+                et.is_missing = True   # 標記「真的離開」
+
+        tray.extra_tickets = [
+            et for et in tray.extra_tickets
+            if not (et.is_missing and et.has_notified_missing)   # 兩段式收尾
+        ]
 
         # --- stickers（邏輯不變，省略） ---
         matched_sticker_indices = set()

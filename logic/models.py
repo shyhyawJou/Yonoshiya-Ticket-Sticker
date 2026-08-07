@@ -33,11 +33,13 @@ class TrackedItem:
     is_ocr_busy: bool = False  # 標記這個物件是否正在跑 OCR
     is_checked: bool = False   # 標記這個貼紙是否已經核對成功，避免重複辨識
     is_missing: bool = False
+    is_ticket_merged: bool = False   # 專給 ticket 候選用，標記「已經 OCR 過並處理完畢」，避免重複送 OCR
     is_wrong_item: bool = False
     has_notified_missing: bool = False # <--- 新增：避免重複發送 MQTT
     missing_count: int = 0     # 連續沒被偵測到的幀數，過期後 TrayTracker 會將其從 tray.stickers 移除
     cls_name: str = None
     last_wrong_notify_ts: float = 0.0    # 心跳用:上次通知前端的實際時間戳
+    ticket_contributed_display: List[dict] = field(default_factory=list)  # 這張候選ticket合併時貢獻的逐行清單
 
     # --- 內容置換偵測用 ---
     geo_stable_frames: int = 0        # 連續「幾何完全靜止」的幀數,比 stable_frames 門檻更嚴格
@@ -58,10 +60,12 @@ class Tray:
     missing_count: int = 0
     drift_count: int = 0
 
-    expected_items: List[str] = field(default_factory=list)
+    expected_items: List[str] = field(default_factory=list) # ['菜單名']
+    expected_items_display: List[dict] = field(default_factory=list)  # 逐行顯示清單 [{"菜單名": 數量}]
     checked_items: List[str] = field(default_factory=list)
 
     ticket: Optional[TrackedItem] = None
+    extra_tickets: List[TrackedItem] = field(default_factory=list)  # 疑似「同單號第二張」的候選 ticket
     stickers: List[TrackedItem] = field(default_factory=list)
 
     pending_stickers: List[dict] = field(default_factory=list)

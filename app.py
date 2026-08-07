@@ -17,14 +17,16 @@ import threading
 import subprocess
 
 from config import load_config
-from mqtt_bus import MqttBus, MqttSettings
+from utils.mqtt_bus import MqttBus, MqttSettings
+from utils.video import Video
+
+from stream_vision.hikcam import HikCamera
+from stream_vision.streamer import Mjpeg_Streamer
+from logic.tray_tracker import Tray
+from logic_engine import LogicEngine
 from ocr_engine import AsyncOCR
 from mmr_engine import Rotated_RTMDET
-from hikcam import HikCamera
-from logic_engine import LogicEngine
-from video import Video
-from streamer import Mjpeg_Streamer
-from logic.tray_tracker import Tray
+
 
 
 def _now():
@@ -227,7 +229,7 @@ class StreamManager:
         跟 OCR overlay 分開,因為 ROI 是「設定檔畫出來的靜態框」,
         不管當下有沒有 OCR 任務在跑都應該持續顯示。
         """
-        if self.cfg.mode != "preset_roi" or self.cfg.preset_roi is None:
+        if self.cfg.preset_roi is None:
             return frame
 
         roi_entries = [
@@ -301,6 +303,19 @@ class StreamManager:
         
         return vis_frame
 
+    def _enqueue_frame(self, frame: np.ndarray) -> None:
+        """
+        將取到的 frame 放入 frame_queue。
+        預設策略：佇列滿了就丟棄舊幀 (取最新一幀為主)，適合線上相機即時串流。
+        子類別 (例如 offline 逐幀驗證模式) 可覆寫成阻塞式，確保不漏幀。
+        """
+        if self.frame_queue.full():
+            try:
+                self.frame_queue.get_nowait()
+            except queue.Empty:
+                pass
+        self.frame_queue.put(frame)
+
     def _camera_worker(self):
         """
         獨立的相機取像執行緒 (Producer)
@@ -327,14 +342,8 @@ class StreamManager:
 
                     # frame = cv2.cvtColor(frame, cv2.COLOR_BayerBG2BGR_VNG)
                     consecutive_errors = 0
+                    self._enqueue_frame(frame)
 
-                    if self.frame_queue.full():
-                        try:
-                            self.frame_queue.get_nowait()
-                        except queue.Empty:
-                            pass
-
-                    self.frame_queue.put(frame)
                     if self.camera_alone:     
                         record_frame = cv2.resize(frame, self.video_record_size)
                         self.video_recorder.write_frame(record_frame)
@@ -438,8 +447,8 @@ class StreamManager:
                         _t = time.time()
                         _ts = time.strftime("%Y%m%d_%H%M%S", time.localtime(_t))
                         _ms = int(_t * 1000) % 1000
-                        cv2.imwrite(str(warped_dir / f"{_ts}_{_ms:03d}.jpg"), warped_img) # 存裁減圖
-                        cv2.imwrite(str(fullframe_dir / f"{_ts}_{_ms:03d}.jpg"), self.tmp_frame) # 存完整圖
+                        # cv2.imwrite(str(warped_dir / f"{_ts}_{_ms:03d}.jpg"), warped_img) # 存裁減圖
+                        # cv2.imwrite(str(fullframe_dir / f"{_ts}_{_ms:03d}.jpg"), self.tmp_frame) # 存完整圖
                         
                         metadata = {
                             "tray_id": task["tray_id"],
@@ -563,8 +572,8 @@ class StreamManager:
 
                 # 用原始畫面 (未經錄影壓縮) 存檔，檔名含日期時間避免覆蓋
                 if hasattr(self, "tmp_frame") and self.tmp_frame is not None:
-                    pass
-                    # self._save_frame(self.tmp_frame, "reset_capture")
+                    # pass
+                    self._save_frame(self.tmp_frame, "reset_capture")
                 else:
                     logger.warning("[RESET] tmp_frame 尚未就緒，略過截圖")
 

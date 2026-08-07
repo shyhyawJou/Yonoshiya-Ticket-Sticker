@@ -9,12 +9,13 @@ import numpy as np
 import cv2
 from loguru import logger
 
-from schema import Detection
+from utils.mqtt_bus import MqttBus
+from utils.schema import Detection
+from utils.csv_writer import CsvWriter
+
 from config import Config
-from mqtt_bus import MqttBus
 from ocr_engine import StandaloneRecDLA
 from mmr_engine import Rotated_RTMDET
-from csv_writer import CsvWriter
 
 # === Step 1 重構：幾何運算與文字比對 ===
 from logic.geometry import PolygonXYXY
@@ -137,6 +138,7 @@ class LogicEngine:
                 frame_width=cfg.runtime.camera.width,
                 frame_height=cfg.runtime.camera.height,
                 ticket_leave_frame=self.ticket_leave_frame,
+                ticket_exclude_roi_polygon=cfg.preset_roi.ticket_roi.to_polygon_xyxy(),
             )
             logger.info("LogicEngine 啟動於 [single] 模式：單一訂單，不追蹤 tray 盤")
         elif self.mode == "preset_roi":
@@ -226,6 +228,7 @@ class LogicEngine:
                 ticket_dets.append(d)
             elif d.cls_name == "order_sticker":
                 sticker_dets.append(d)
+                # logger.info(f"[logic engine] sticker det: {d}")
             elif d.cls_name in {
                 "sesame_front",
                 "sesame_back",
@@ -250,6 +253,7 @@ class LogicEngine:
         # self._monitor_checked_stickers(frame) # 新增:偵測已核對貼紙是否被內容置換 ()
         self.state_machine.resolve_known_class_items(self.trays)  # 醬料包:直接比對,不進 OCR
         self.state_machine.resolve_wrong_item_removal(self.trays)
+        self.state_machine.resolve_missing_extra_tickets(self.trays)
         self.state_machine.heartbeat_wrong_items(self.trays)
         tasks = self.state_machine.generate_tasks(self.trays) # 一般貼紙:才需要送 OCR
 
