@@ -110,6 +110,9 @@ camera_params:
         ReverseY:
             value: false
             type: bool
+depth_camera:
+    id: 0
+    max_depth_mm: 1200
 birghtness_controller:
     golden_img: tasks/ocr/golden_brightness.png 
     roi: null 
