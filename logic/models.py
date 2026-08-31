@@ -69,3 +69,7 @@ class Tray:
     stickers: List[TrackedItem] = field(default_factory=list)
 
     pending_stickers: List[dict] = field(default_factory=list)
+    
+    # ticket mat 相關參數
+    ticket_mat_stable_frames: int = 0   # 連續幾幀看到完整 ticket_mat(容忍模式:一漏就歸零)
+    order_session_active: bool = False  # False=idle, True=訂單處理中(mat 被遮住後才轉 True)

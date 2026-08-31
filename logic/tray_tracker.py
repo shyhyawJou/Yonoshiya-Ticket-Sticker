@@ -39,6 +39,8 @@ class TrayTracker:
         roi_shrink: float,
         sticker_missing_frame: int,
         k_sticker_new: int = 3,  # 需連續幾幀確認才建立 STABLE_CONFIRM_CLASSES 這幾類貼紙
+
+
     ):
         self.bus = bus
         self.iou_assign = iou_assign
@@ -196,7 +198,7 @@ class TrayTracker:
 
         self.tray_candidates = next_candidates
 
-    def update_ticket_and_stickers(self, ticket_dets: list, sticker_dets: list) -> None:
+    def update_ticket_and_stickers(self, ticket_dets: list, sticker_dets: list, ticket_mat_dets: list = None) -> None:
         """
         2-1. 更新每個 tray 的 ticket 追蹤與穩定度
         2-2. 更新每個 tray 的 sticker 追蹤與穩定度

@@ -41,6 +41,8 @@ class PresetRoiTracker(SingleOrderTracker):
         ticket_leave_frame: int,
         ticket_roi_polygon: PolygonXYXY,
         tray_id: str = SINGLE_ORDER_ID,
+        finalize_mode: str = "ticket_leave",
+        ticket_mat_confirm_frames: int = 10,
     ):
         super().__init__(
             bus=bus,
@@ -50,6 +52,8 @@ class PresetRoiTracker(SingleOrderTracker):
             frame_height=frame_height,
             ticket_leave_frame=ticket_leave_frame,
             tray_id=tray_id,
+            finalize_mode=finalize_mode,
+            ticket_mat_confirm_frames=ticket_mat_confirm_frames,
         )
         self.ticket_roi_polygon = ticket_roi_polygon
 

@@ -1,8 +1,10 @@
 import cv2
+import math
 import numpy as np
 from AI import RTMDET
 from utils.schema import Detection  
 from typing import List, Tuple
+from loguru import logger
 
 # ---------------------------
 # main class
@@ -363,14 +365,89 @@ class Rotated_RTMDET:
     # ---------------------------
     # utils: crop
     # ---------------------------
+    # def crop_by_angle(self, img, cx, cy, w, h, angle_rad):
+    #     """
+    #     裁切旋轉影像, 直接拿 mmrotate 提供的 r 來裁減
+    #     """
+    #     angle_deg = np.degrees(angle_rad)
+    #     M = cv2.getRotationMatrix2D((cx, cy), angle_deg, 1.0)
+    #     M[0, 2] += (w / 2) - cx
+    #     M[1, 2] += (h / 2) - cy
+    #     warped_img = cv2.warpAffine(img, M, (int(w), int(h)))
+    #     M_inv = cv2.invertAffineTransform(M)
+    #     return warped_img, M_inv, M
+    
     def crop_by_angle(self, img, cx, cy, w, h, angle_rad):
         """
-        裁切旋轉影像
+        預期 w < h , 但 mmrotate 訓練完可能會認為 w 是長邊, 所以如果有發現 w > h 會多處理 90 度
         """
+        original_w = w
+        original_h = h
+        original_angle = angle_rad
+
+        # Normalize
+        if w > h:
+            w, h = h, w
+            angle_rad += np.pi / 2
+
+        angle_rad = (angle_rad + np.pi) % (2 * np.pi) - np.pi
+
+        # logger.error(
+        #     f"[OBB] "
+        #     f"original: w={original_w:.2f}, h={original_h:.2f}, "
+        #     f"angle={np.degrees(original_angle):.2f}° | "
+        #     f"normalized: w={w:.2f}, h={h:.2f}, "
+        #     f"angle={np.degrees(angle_rad):.2f}°"
+        # )
+
         angle_deg = np.degrees(angle_rad)
         M = cv2.getRotationMatrix2D((cx, cy), angle_deg, 1.0)
         M[0, 2] += (w / 2) - cx
         M[1, 2] += (h / 2) - cy
-        warped_img = cv2.warpAffine(img, M, (int(w), int(h)))
+        warped_img = cv2.warpAffine(img, M, (int(round(w)), int(round(h))))
         M_inv = cv2.invertAffineTransform(M)
-        return warped_img, M_inv
+
+        return warped_img, M_inv, M
+
+
+    def get_obb_corners(self, xywhr):
+        #第一個是 xywhr 轉成 4 角點 (只要前 5 個是 xywhr 就好，你維度超過 5 沒關係)
+        # 第二個是 4 角點轉成 xywhr 
+        # 所以我用法都是 xywhr = xyxyxyxy2xywhr(get_obb_corners(xywhr))
+        cos, sin, cat, stack = (np.cos, np.sin, np.concatenate, np.stack)
+        ctr = xywhr[..., :2]
+        w, h, angle = (xywhr[..., i : i + 1] for i in range(2, 5))
+        cos_value, sin_value = cos(angle), sin(angle)
+        vec1 = [w / 2 * cos_value, w / 2 * sin_value]
+        vec2 = [-h / 2 * sin_value, h / 2 * cos_value]
+        vec1 = cat(vec1, -1)
+        vec2 = cat(vec2, -1)
+        pt1 = ctr + vec1 + vec2
+        pt2 = ctr + vec1 - vec2
+        pt3 = ctr - vec1 - vec2
+        pt4 = ctr - vec1 + vec2
+        return stack([pt1, pt2, pt3, pt4], -2).reshape(-1, 4, 2)
+
+
+    def xyxyxyxy2xywhr(self, points):
+        # 統一將 r 的描述方式與 opencv 相同
+        pts = points.reshape(-1, 4, 2).astype(np.float32)
+        centers = pts.mean(axis=1)
+
+        edges = np.roll(pts, -1, axis=1) - pts
+        lengths = np.linalg.norm(edges, axis=2)
+
+        max_idx = lengths.argmax(axis=1)
+        long_edges = edges[np.arange(len(pts)), max_idx]
+        long_lengths = lengths[np.arange(len(pts)), max_idx]
+
+        short_idx = (max_idx + 1) % 4
+        short_lengths = lengths[np.arange(len(pts)), short_idx]
+
+        angles = np.degrees(np.arctan2(long_edges[:,1], long_edges[:,0]))
+        angles = np.where(angles < 0, angles + 180, angles)
+        angles = np.radians(angles)
+        angles = np.mod(angles, math.pi)
+
+        result = np.column_stack([centers, long_lengths, short_lengths, angles])
+        return result

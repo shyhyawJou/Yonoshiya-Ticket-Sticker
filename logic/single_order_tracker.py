@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 import numpy as np
 from loguru import logger
@@ -26,6 +26,8 @@ class SingleOrderTracker:
         tray_id: str = SINGLE_ORDER_ID,
         k_sticker_new: int = 3,  # 需連續幾幀確認才建立 STABLE_CONFIRM_CLASSES 這幾類貼紙
         ticket_exclude_roi_polygon: Optional[PolygonXYXY] = None,
+        finalize_mode: str = "ticket_leave",   # "ticket_leave" | "ticket_mat"
+        ticket_mat_confirm_frames: int = 10,
     ):
         self.bus = bus
         self.sticker_missing_frame = sticker_missing_frame
@@ -44,6 +46,18 @@ class SingleOrderTracker:
         self.K_sticker_new = k_sticker_new
         self.STABLE_CONFIRM_CLASSES = STABLE_CONFIRM_CLASSES
         self.pending_buffer = StickerPendingBuffer(k_new=self.K_sticker_new)
+
+        # 新增 ticket mat 相關參數, 最後判定有兩種方法, 一個是 ticket (物件遮住會被誤判), 一個是 ticket mat (實驗中)
+        self.ticket_mat_confirm_frames = ticket_mat_confirm_frames
+        self.finalize_mode = finalize_mode
+
+        finalize_checkers = {
+            "ticket_leave": self._check_finalize_ticket_leave,
+            "ticket_mat": self._check_finalize_ticket_mat,
+        }
+        if finalize_mode not in finalize_checkers:
+            raise ValueError(f"unknown finalize_mode: {finalize_mode}")
+        self._finalize_checker = finalize_checkers[finalize_mode]
     # ------------------------------------------------------------
     # 內部工具
     # ------------------------------------------------------------
@@ -93,6 +107,9 @@ class SingleOrderTracker:
         tray.extra_tickets = []
         tray.stickers = []
         tray.order_number = None  # 避免舊訂單編號殘留到下一筆
+        # ticket mat 參數重製狀態
+        tray.order_session_active = False
+        tray.ticket_mat_stable_frames = 0
         logger.info("[RESET-B][single_order] 已重置訂單狀態")
         self._publish_reset_status()
 
@@ -147,6 +164,76 @@ class SingleOrderTracker:
                 get_polygon_centroid(d.xyxy), self.ticket_exclude_roi_polygon
             )
         ]
+    
+    def _filter_ticket_mat_dets(self, ticket_mat_dets: list) -> list:
+        """
+        預設不過濾,整個畫面只看有沒有偵測到完整露出的 ticket_mat。
+        若子類別需要限制 mat 偵測的判斷範圍(例如多 ROI 場景),
+        覆寫此方法即可,沿用跟 _filter_ticket_dets 一樣的擴充點模式。
+        """
+        return ticket_mat_dets
+    
+    # ------------------------------------------------------------
+    # 判斷是否要重製的方法
+    # ------------------------------------------------------------
+    def _check_finalize_ticket_leave(self, tray: Tray, ticket_dets: list, ticket_mat_dets: list) -> bool:
+        """舊邏輯:ticket 連續 missing 超過門檻視為離開"""
+        if tray.ticket is not None and tray.ticket.missing_count > 0:
+            ticket_left = tray.ticket.missing_count > self.ticket_leave_frame
+        else:
+            ticket_left = False
+        if ticket_left:
+            logger.warning(f'傳票消失超過 {self.ticket_leave_frame} 幀, 觸發結束 !')
+        return ticket_left
+
+    def _check_finalize_ticket_mat(self, tray: Tray, ticket_dets: list, ticket_mat_dets: list) -> bool:
+        """
+        新邏輯:用 ticket_mat 完整露出與否判斷一輪訂單是否真的結束,
+        避免核對過程中人手遮擋 ticket 造成誤判。
+
+        狀態機:
+          idle(order_session_active=False)
+            -> mat 不可見 且 ROI 內有 ticket -> 進入 active
+          active(order_session_active=True)
+            -> mat 連續 N 幀重新完整可見 且 ROI 內已無 ticket -> 觸發一次收尾, 回到 idle
+
+        idle 狀態下絕不觸發收尾, 避免反覆誤清空造成當掉。
+        """
+        mat_visible_now = len(ticket_mat_dets) > 0
+        ticket_present_now = len(ticket_dets) > 0
+
+        if mat_visible_now:
+            tray.ticket_mat_stable_frames += 1
+        else:
+            tray.ticket_mat_stable_frames = 0
+
+        if not tray.order_session_active:
+            if not mat_visible_now and ticket_present_now:
+                tray.order_session_active = True
+                logger.info(f"[ticket_mat] tray={tray.id} mat 被遮擋且偵測到 ticket, 訂單流程開始")
+            return False
+
+        if tray.ticket_mat_stable_frames >= self.ticket_mat_confirm_frames and not ticket_present_now:
+            logger.warning(
+                f"[ticket_mat] tray={tray.id} mat 連續 {tray.ticket_mat_stable_frames} 幀重新完整露出, "
+                f"且 ROI 內無殘留 ticket, 觸發結束!"
+            )
+            tray.order_session_active = False
+            tray.ticket_mat_stable_frames = 0
+            return True
+
+        return False
+    
+    def _is_ticket_leave_detection_suspended(self, tray: Tray) -> bool:
+        """
+        finalize_mode == "ticket_mat" 且訂單進行中(order_session_active=True)時,
+        候選(第二張)ticket 暫時不可見屬於人手正常操作,不代表真的離開,
+        暫停「真的離開」判定,避免誤觸發 TrayStateMachine 那邊的扣除/清除通知。
+        真正的清除,交給 mat 出現時的一次性收尾(整批 reset)處理。
+
+        finalize_mode == "ticket_leave" 或 idle 狀態下,維持原本即時判斷行為。
+        """
+        return self.finalize_mode == "ticket_mat" and tray.order_session_active
 
     # ------------------------------------------------------------
     # 每幀更新
@@ -154,11 +241,12 @@ class SingleOrderTracker:
     def update_tray_positions(self, tray_dets: list, ts_utc: str) -> None:
         pass
 
-    def update_ticket_and_stickers(self, ticket_dets: list, sticker_dets: list) -> None:
+    def update_ticket_and_stickers(self, ticket_dets: list, sticker_dets: list, ticket_mat_dets: list = None) -> None:
         if self.tray_id not in self.trays:
             self._create_tray()
         tray = self.trays[self.tray_id]
         ticket_dets = self._filter_ticket_dets(ticket_dets)
+        ticket_mat_dets = self._filter_ticket_mat_dets(ticket_mat_dets or [])
         # --- ticket ---
         primary_seen_this_frame = False
         matched_extra_tickets = set()  # 存放本幀有被偵測配到的 extra_ticket 物件 id
@@ -203,10 +291,13 @@ class SingleOrderTracker:
 
         # --- 主 ticket 本幀沒看到：嘗試用「已確認同單號」且「本幀有出現」的候選頂替 ---
         if tray.ticket is not None and not primary_seen_this_frame:
-            promote_candidate = next(
-                (et for et in tray.extra_tickets if et.is_ticket_merged and id(et) in matched_extra_tickets),
-                None
-            )
+            promote_candidate = None
+            # ticket mat mode 不需要考慮主副 ticket 的問題, 只有 ticket level 要判斷是否 ticket 離開要清除菜單
+            if self.finalize_mode != "ticket_mat":
+                promote_candidate = next(
+                    (et for et in tray.extra_tickets if et.is_ticket_merged and id(et) in matched_extra_tickets),
+                    None
+                )
             if promote_candidate is not None:
                 logger.info("[single_order] 主 ticket 消失，改以已確認同單號的第二張 ticket 接手追蹤")
                 old_primary = tray.ticket
@@ -227,13 +318,14 @@ class SingleOrderTracker:
                 tray.ticket.missing_count += 1
 
         # --- 其餘候選 ticket 本幀沒被匹配到 ---
+        suspend_ticket_leave = self._is_ticket_leave_detection_suspended(tray)
         for et in tray.extra_tickets:
             if id(et) in matched_extra_tickets:
                 continue
             if not et.is_ocr_busy:
                 et.stable_frames = 0
                 et.missing_count += 1
-            if et.missing_count > self.sticker_missing_frame:
+            if not suspend_ticket_leave and et.missing_count > self.sticker_missing_frame:
                 et.is_missing = True   # 標記「真的離開」
 
         tray.extra_tickets = [
@@ -309,16 +401,12 @@ class SingleOrderTracker:
         ]
 
         # ------------------------------------------------------------
-        # 收尾觸發：只看 ticket 是否「真的離開」，不管 tray.state。
-        # 無論訂單有沒有核對完成，ticket 離開就收尾 —— 這是你要的行為。
+        # 收尾觸發:判斷方法可透過 finalize_mode 抽換("ticket_leave" / "ticket_mat"),
+        # 不管哪種方法, 觸發後對外的訊號都一樣是 tray.missing_count = tray_missing_frame + 1,
+        # 下游 LogicEngine._finalize_missing_trays 完全不用改。
         # ------------------------------------------------------------
-        if tray.ticket is not None and tray.ticket.missing_count > 0:
-            ticket_left = tray.ticket.missing_count > self.ticket_leave_frame
-        else:
-            ticket_left = False
-
-        if ticket_left:
+        finalize_triggered = self._finalize_checker(tray, ticket_dets, ticket_mat_dets)
+        if finalize_triggered:
             tray.missing_count = self.tray_missing_frame + 1
-            logger.warning(f'傳票消失超過 {self.ticket_leave_frame} 幀, 觸發結束 !')
         else:
             tray.missing_count = 0

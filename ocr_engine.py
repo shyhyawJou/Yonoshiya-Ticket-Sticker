@@ -11,6 +11,7 @@ import threading
 import queue
 import concurrent.futures
 from datetime import datetime
+from utils.skew_corrector import affine_to_homogeneous, rotate90_cw_matrix, rotate180_matrix, rotate90_ccw_matrix
 
 # 1. 取得當下時間，並格式化成字串 (例如: 20260702_105541)
 current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -65,6 +66,11 @@ REC_INDEX_MAPPING = {
             1691: 1696  # 教 -> 数
         }
 
+_ROTATE_MATRIX_FN = {
+    cv2.ROTATE_90_CLOCKWISE: rotate90_cw_matrix,
+    cv2.ROTATE_180: rotate180_matrix,
+    cv2.ROTATE_90_COUNTERCLOCKWISE: rotate90_ccw_matrix,
+}
 
 class TextSystemDLA:
     def __init__(self, det_path, cls_path, rec_path, dict_path):
@@ -1044,41 +1050,50 @@ class AsyncOCR:
         """後台工作迴圈"""
         while self.running:
             try:
-                input_data = self.input_queue.get(timeout=0.1)   
+                input_data = self.input_queue.get(timeout=0.1)
                 frame_crop, metadata = input_data
                 M_inv = metadata['M_inv']
+                M = metadata['M']
+                h0, w0 = frame_crop.shape[:2]
 
-                # --- 執行 OCR ---
+                t0 = time.perf_counter()
                 rec_res, dt_boxes, is_flip, is_rotated_90, time_cost = self.ocr_sys.predict(frame_crop, obj_type=metadata['type'])
-                # 若被判定為 90/270 度誤轉，先把來源圖轉正 90 度
-                if is_rotated_90:
-                    frame_crop = cv2.rotate(frame_crop, cv2.ROTATE_90_CLOCKWISE)
-                    is_rotated_90 = False
+                t1 = time.perf_counter()
 
-                #################################################################
-                if metadata['cls_name'] in {"sesame_front", "sesame_back"}:
-                    for i in range(len(rec_res)):
-                        rec_res[i] = ('ごまドレッシング', 1.0)
-                elif metadata['cls_name'] in {"wafusauce_front", "wafusauce_back"}:
-                    for i in range(len(rec_res)):
-                        rec_res[i] = ('和風ドレッング', 1.0)
-                elif metadata['cls_name'] in {"cream_front", "cream_back"}:
-                    for i in range(len(rec_res)):
-                        rec_res[i] = ('マヨネーズ', 1.0)
-                #################################################################
+                if is_rotated_90 and is_flip:
+                    rot_code = cv2.ROTATE_90_COUNTERCLOCKWISE
+                elif is_rotated_90:
+                    rot_code = cv2.ROTATE_90_CLOCKWISE
+                elif is_flip:
+                    rot_code = cv2.ROTATE_180
+                else:
+                    rot_code = None
 
-                # 若 OCR 內部偵測到翻轉，將來源 frame_crop 也一併旋轉
-                if is_flip:
-                    is_flip = False
-                    frame_crop = cv2.rotate(frame_crop, cv2.ROTATE_180)
-                         
-                draw_det_bboxes(frame_crop, dt_boxes, save_path="det_debug.jpg")
-                # 觸發 Callback，並將 metadata 原封不動送回
+                T_total = affine_to_homogeneous(M)
+
+                if rot_code is not None:
+                    T_total = _ROTATE_MATRIX_FN[rot_code](w0, h0) @ T_total
+                    frame_crop = cv2.rotate(frame_crop, rot_code)
+
+                is_rotated_90 = False
+                is_flip = False
+
+                t2 = time.perf_counter()
+                T_total_inv = np.linalg.inv(T_total)
+                metadata['M_inv_full'] = T_total_inv
+                t3 = time.perf_counter()
+
                 if self.result_callback:
                     try:
                         self.result_callback(frame_crop, rec_res, dt_boxes, is_flip, time_cost, metadata)
                     except Exception as e:
                         logger.error(f"Callback Error: {e}")
+                t4 = time.perf_counter()
+
+                # logger.info(
+                #     f"predict={1000*(t1-t0):.2f}ms rotate+matrix={1000*(t2-t1):.2f}ms "
+                #     f"inv={1000*(t3-t2):.2f}ms callback={1000*(t4-t3):.2f}ms rot_code={rot_code}"
+                # )
 
                 with self._lock:
                     self._busy = False

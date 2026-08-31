@@ -41,7 +41,9 @@ class TrayStateMachine:
         sticker_matcher: StickerMatcher,
         special_cases: Dict[str, List[str]],
         n_settle_frame: int,
-        wrong_item_margin: int = 10,   # 新增
+        wrong_item_margin: int = 10,
+        duplicate_content_similarity_threshold: float = 0.9,
+        on_recording_start=None,
     ):
         self.bus = bus
         self.order_parser = order_parser
@@ -49,6 +51,14 @@ class TrayStateMachine:
         self.special_cases = special_cases
         self.N = n_settle_frame
         self.wrong_item_margin = wrong_item_margin
+
+        # 新增：判斷「同單號第二張候選」是否為追丟重偵測(而非真的第二張票)的相似度門檻
+        self.duplicate_content_similarity_threshold = duplicate_content_similarity_threshold
+
+        # 只有「開始錄影」這個事件天然屬於狀態機自己的判斷（票證確認）；
+        # 「結束錄影」則不管訂單完成/reset 都收斂在 LogicEngine 那層，
+        # 狀態機不需要知道 reset 這件事。
+        self.on_recording_start = on_recording_start or (lambda reason="": None)
 
     def set_ocr_busy(self, trays: Dict[str, Tray], tray_id: str, item_type: str, bbox: PolygonXYXY):
         """由呼叫端確認已將任務送給 OCR 後呼叫，正式鎖定狀態"""
@@ -115,7 +125,87 @@ class TrayStateMachine:
                         break
 
         return tasks
+
+    def _calc_multiset_similarity(self, items_a: List[str], items_b: List[str]) -> float:
+        """
+        計算兩份「已展開品項清單」(例如 expanded_expected_items,一個品項出現幾次
+        就代表數量幾份)的相似度,採 multiset 版 Jaccard:
+            similarity = |交集(取較小數量)| / |聯集(取較大數量)|
+
+        任一邊為空視為 0 相似(避免「空 vs 空」或「有 vs 無」被誤判成高度相似)。
+        """
+        if not items_a or not items_b:
+            return 0.0
+
+        counter_a, counter_b = Counter(items_a), Counter(items_b)
+        all_keys = set(counter_a) | set(counter_b)
+
+        intersection = sum(min(counter_a[k], counter_b[k]) for k in all_keys)
+        union = sum(max(counter_a[k], counter_b[k]) for k in all_keys)
+
+        return intersection / union if union else 0.0
     
+    def _find_stale_tracking_anchor(self, tray, exclude):
+        """
+        在「已確認屬於這筆訂單」的既有追蹤物件中(tray.ticket 本身，
+        以及已合併過的其他候選 extra_ticket)，找出目前 missing_count
+        最高(代表 SingleOrderTracker 本幀沒追到它)的那一個，
+        視為被遮擋/快速移動追丟、bbox 卡在原地不動的幽靈物件。
+
+        找到後，這個 anchor 會被 target 的新 bbox 接管位置，
+        取代掉暫時冒出來的候選 extra_ticket，避免同一張票
+        留下兩個 TrackedItem 互相打架。
+        """
+        candidates = []
+        if tray.ticket is not None and tray.ticket is not exclude:
+            candidates.append(tray.ticket)
+        for et in tray.extra_tickets:
+            if et is exclude or not et.is_ticket_merged:
+                continue
+            candidates.append(et)
+
+        if not candidates:
+            return None
+
+        return max(candidates, key=lambda item: item.missing_count)
+
+    def _flatten_contributed_display(self, contributed_display: List[dict]) -> List[str]:
+        """把 [{"品項名": 數量}, ...] 攤平成 ["品項名", "品項名", ...]，方便跟
+        expanded_expected_items 做同一種格式的相似度比較。"""
+        flat = []
+        for d in contributed_display:
+            for item_name, count in d.items():
+                flat.extend([item_name] * count)
+        return flat
+
+    def _find_duplicate_content_candidate(self, tray, new_items: List[str], exclude):
+        """
+        在「已確認屬於這筆訂單」的既有追蹤物件(tray.ticket 本身，以及
+        已合併過的其他候選 extra_ticket)中，逐一比對「新解析出來的內容」
+        跟「該物件自己當初貢獻的那一份 contributed_display」的相似度，
+        取相似度最高者。
+
+        注意：基準是各自的「單一貢獻」，不是 tray.expected_items 整份
+        累積總表——否則被拿去比較的分母會隨著訂單疊加越來越大，導致
+        同一張票重複偵測到的內容永遠被稀釋、怎麼樣都達不到門檻。
+        """
+        candidates = []
+        if tray.ticket is not None and tray.ticket is not exclude:
+            candidates.append(tray.ticket)
+        for et in tray.extra_tickets:
+            if et is exclude or not et.is_ticket_merged:
+                continue
+            candidates.append(et)
+
+        best_candidate, best_similarity = None, 0.0
+        for c in candidates:
+            contributed_flat = self._flatten_contributed_display(getattr(c, "contributed_display", []) or [])
+            similarity = self._calc_multiset_similarity(new_items, contributed_flat)
+            if similarity > best_similarity:
+                best_candidate, best_similarity = c, similarity
+
+        return best_candidate, best_similarity
+
     def apply_ocr_result(
         self,
         trays: Dict[str, Tray],
@@ -191,6 +281,7 @@ class TrayStateMachine:
                 "tray_id": tray_id, "status": "TICKET_READY",
                 "expected_items": expected_items_list, "order_number": order_number,
             })
+            self.on_recording_start(reason=f"ticket_confirmed:{tray_id}") # 開始錄影
         else:
             if tray.ticket:
                 tray.ticket.stable_frames = 0
@@ -206,6 +297,16 @@ class TrayStateMachine:
         if target is None:
             return
 
+        if target.is_ticket_merged:
+            logger.info(
+                f"[tray_state_machine] tray={tray_id} 候選 ticket 早已合併過(is_ticket_merged=True)，"
+                f"視為遲到的重複 OCR 結果，忽略內容、僅確認狀態"
+            )
+            target.missing_count = 0
+            target.is_missing = False
+            target.has_notified_missing = False
+            return
+
         parsed_items, order_number = self.order_parser.parse(frame_crop, dt_boxes, rec_res, is_flip)
 
         if order_number is None or order_number != tray.order_number:
@@ -214,6 +315,36 @@ class TrayStateMachine:
             return
 
         expanded_expected_items, expected_items_list = self._expand_parsed_items(parsed_items)
+
+        # --- 改為跟「既有各貢獻者各自的內容」比對，而非跟訂單累積總表比對 ---
+        dup_candidate, similarity = self._find_duplicate_content_candidate(
+            tray, expanded_expected_items, exclude=target
+        )
+        logger.info(
+            f"[tray_state_machine] 候選 ticket 單號 {order_number} 內容相似度={similarity:.2f} "
+            f"(比對對象={'tray.ticket' if dup_candidate is tray.ticket else ('extra_ticket' if dup_candidate else 'None')}, "
+            f"門檻={self.duplicate_content_similarity_threshold})"
+        )
+
+        if dup_candidate is not None and similarity >= self.duplicate_content_similarity_threshold:
+            anchor = self._find_stale_tracking_anchor(tray, exclude=target)
+            # 優先用「內容比對出的那個候選」當接管對象；找不到才退回用 missing_count 找
+            anchor = dup_candidate if dup_candidate.missing_count > 0 else (anchor or dup_candidate)
+
+            logger.info(
+                f"[tray_state_machine] tray={tray_id} 判定為追丟重偵測(同一張票)，"
+                f"位置由 target(bbox={target.bbox}) 接管回原本卡住的追蹤物件，並移除暫時候選"
+            )
+            anchor.bbox = target.bbox
+            anchor.xywhr = target.xywhr
+            anchor.missing_count = 0
+            anchor.is_missing = False
+            anchor.has_notified_missing = False
+            tray.extra_tickets.remove(target)
+            return
+
+        # --- 相似度不足門檻 → 視為真正的第二張同單號票，維持原本疊加邏輯 ---
+
         tray.expected_items.extend(expanded_expected_items) # ex: ["菜單名"]
         tray.expected_items_display.extend(expected_items_list) # ex: [{"菜單名": 數量}]
         target.contributed_display = expected_items_list
@@ -356,7 +487,7 @@ class TrayStateMachine:
                 matched_item, match_status = self.sticker_matcher.match_known_item(
                     item_name, tray.expected_items, tray.checked_items
                 )
-
+                logger.info(f"[tray state machine] 已知物件 {matched_item}, 匹配狀況: {match_status}")
                 self._settle_sticker_match(tray, tray_id, ts, matched_item, match_status) 
 
     def resolve_wrong_item_removal(self, trays: Dict[str, Tray]) -> None:
@@ -400,10 +531,10 @@ class TrayStateMachine:
         每幀呼叫：檢查是否有貼紙確認消失，發送資訊給前端，並將對應已核對品項扣除
         """
         for tray_id, tray in trays.items():
-            # 收集這一個 tray 裡面，這一幀剛確認消失、且還沒通知外部的貼紙
+            # 收集這一個 tray 裡面，這一幀剛確認消失、且還沒通知外部的貼紙, wrong_item 交給後面的 resolve_wrong_item_removal 處理
             missing_stickers = [
-                ts for ts in tray.stickers 
-                if ts.is_missing and not ts.has_notified_missing
+                ts for ts in tray.stickers
+                if ts.is_missing and not ts.has_notified_missing and not ts.is_wrong_item
             ]
             
             if not missing_stickers:

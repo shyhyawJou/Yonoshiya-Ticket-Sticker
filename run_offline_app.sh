@@ -39,7 +39,7 @@ chmod 666 /dev/bus/usb/*/* 2>/dev/null
 export MVCAM_COMMON_RUNENV="/usr/lib"
 
 # 重現線上跳幀行為(測穩定性/reset 邏輯)
-python3 offline_app.py /home/root/ocr_mmr_dla/unit_test/test_data --task ocr
+# python3 offline_app.py /home/root/ocr_mmr_dla/unit_test/test_data --task ocr
 
 # 逐幀驗證準確率(不漏幀)
-# python offline_app.py /data/labeled_dataset --task ocr --accuracy-mode --loop
+python3 offline_app.py /home/root/ocr_mmr_dla/unit_test/test_data --task ocr --accuracy-mode --loop

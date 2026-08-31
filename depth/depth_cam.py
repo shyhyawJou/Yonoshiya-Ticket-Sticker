@@ -7,7 +7,11 @@ import numpy as np
 from queue import Queue, Empty, Full
 from threading import Thread
 import yaml
+import argparse
+import os
+from os.path import dirname
 import signal
+from datetime import datetime
 from pyorbbecsdk import Config, Context, OBSensorType, Pipeline, get_version
 
 
@@ -26,6 +30,7 @@ class ORBBEC_CAMERA:
             self.is_first_frame = True
             self.is_terminated = False
             self.frame_q = Queue(256)
+            self.fps_logger = My_Logger(**custom_cfg)
             self._start_stream()
             logger.success(f'深度相機初始化完畢 !')
             logger.info(f'\n\tpid: {self.device_info["pid"]:04x}\n'
@@ -70,7 +75,6 @@ class ORBBEC_CAMERA:
 
     def _run(self):
         try:
-            t = None
             while self.is_running:
                 frames = self.pipeline.wait_for_frames(1000)
                 if frames is None:
@@ -101,12 +105,7 @@ class ORBBEC_CAMERA:
                     pass
 
                 # FPS 
-                if t is None:
-                    t = time()
-                else:
-                    cur = time()
-                    logger.debug(f'FPS: {1 / (cur - t):.2f}')
-                    t = cur
+                self.fps_logger.log()
 
         except MyError as e:
             logger.error(f'啟動深度相機失敗: {e}')
@@ -141,6 +140,22 @@ class ORBBEC_CAMERA:
         self.pipeline.start(self.config)
 
 
+class My_Logger:
+    def __init__(self, fps_log_interval, **kwargs):
+        self.t = time()
+        self.interval = fps_log_interval
+        self.count = 0
+
+    def log(self):
+        self.count += 1
+        cur = time()
+        elapsed = cur - self.t
+        if elapsed > self.interval:
+            logger.info(f'FPS: {self.count / elapsed:.3f}')
+            self.count = 0
+            self.t = cur
+
+
 class MyError(Exception):
     pass
 
@@ -150,11 +165,18 @@ if __name__ == '__main__':
     with open('tasks/ocr/config.yaml') as f:
         cfg = yaml.safe_load(f)['depth_camera']
 
+    logger.add('z.log')
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-w', action='store_true', help='show window')
+    args = parser.parse_args()
+
     cam = ORBBEC_CAMERA(cfg)
     cam.start()
 
     is_running = True
-
+    show_window = bool(os.environ.get('DISPLAY'))
+    
     def handle_signal(signum, frame):
         global is_running
         is_running = False
@@ -170,11 +192,16 @@ if __name__ == '__main__':
 
             heatmap = cv2.applyColorMap(frame, cv2.COLORMAP_JET)
             heatmap[frame == 0] = 0
+            
+            dst = f'frames/{datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]}.jpg'
+            os.makedirs(dirname(dst), exist_ok=True)
+            cv2.imwrite(dst, heatmap)
 
-            cv2.imshow(f"Depth", heatmap)
-            cv2.waitKey(1)
+            if args.w:
+                cv2.imshow(f"Depth", heatmap)
+                cv2.waitKey(1)
     except Exception:
-        pass
+        logger.error(traceback.format_exc())
     finally:
         cam.stop()
         cv2.destroyAllWindows()

@@ -39,6 +39,53 @@ import numpy as np
 Point = Tuple[float, float]
 Box = Sequence[Sequence[float]]  # 4 個點的多邊形框，例如 [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]
 
+def affine_to_homogeneous(M: np.ndarray) -> np.ndarray:
+    """cv2 的 2x3 affine matrix -> 3x3 homogeneous matrix,方便鏈式相乘"""
+    return np.vstack([M, [0.0, 0.0, 1.0]]).astype(np.float64)
+
+def rotate90_cw_matrix(w: int, h: int) -> np.ndarray:
+    """
+    對應 cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
+    輸入影像 w x h,轉完後影像變成 h x w
+    (x, y) -> (h-1-y, x)
+    """
+    return np.array([
+        [0.0, -1.0, h - 1.0],
+        [1.0,  0.0,      0.0],
+        [0.0,  0.0,      1.0],
+    ], dtype=np.float64)
+
+def rotate180_matrix(w: int, h: int) -> np.ndarray:
+    """
+    對應 cv2.rotate(img, cv2.ROTATE_180),尺寸不變
+    (x, y) -> (w-1-x, h-1-y)
+    """
+    return np.array([
+        [-1.0,  0.0, w - 1.0],
+        [ 0.0, -1.0, h - 1.0],
+        [ 0.0,  0.0,     1.0],
+    ], dtype=np.float64)
+
+def rotate90_ccw_matrix(w: int, h: int) -> np.ndarray:
+    """
+    對應 cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    等同於 90 CW + 180，也就是 270 CW
+    輸入影像 w x h,轉完後影像變成 h x w
+    (x, y) -> (y, w-1-x)
+    """
+    return np.array([
+        [0.0, 1.0,      0.0],
+        [-1.0, 0.0, w - 1.0],
+        [0.0, 0.0,      1.0],
+    ], dtype=np.float64)
+
+def transform_points(points, M3x3: np.ndarray) -> np.ndarray:
+    """points: (N,2) array-like -> 套用 3x3 矩陣後的 (N,2)"""
+    pts = np.asarray(points, dtype=np.float64)
+    homo = np.hstack([pts, np.ones((pts.shape[0], 1))])
+    out = (M3x3 @ homo.T).T
+    return out[:, :2]
+
 
 @dataclass
 class SkewCorrector:

@@ -9,3 +9,4 @@ classes:
   - { id: 7, name: cream_front}
   - { id: 8, name: cream_back}
   - { id: 9, name: small_order_ticket}
+  - { id: 10, name: ticket_mat}

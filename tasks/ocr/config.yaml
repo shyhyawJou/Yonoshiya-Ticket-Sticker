@@ -9,7 +9,7 @@ mqtt:
     session: v1
 runtime:
     model:
-        object_det: ./mmr_10cls_v01_00.dla
+        object_det: ./mmr_11cls_v01_00.dla
         ocr_det: ./yoshi_det_v01_02.dla
         ocr_cls: ./cls_v2.dla
         ocr_rec: ./yoshi_rec_v01_04.dla
@@ -68,8 +68,8 @@ camera_params:
             value: Timed
             type: string
         ExposureAuto:
-            value: 'Continuous'
-            default: 'Continuous'
+            value: Continuous
+            default: Continuous
             type: string
             allowed:
             - Continuous
@@ -82,15 +82,15 @@ camera_params:
             max: 500000
             min: 20
         GainAuto:
-            value: 'Continuous'
-            default: 'Continuous'
+            value: 'Off'
+            default: Continuous
             type: string
             allowed:
             - Continuous
             - Once
             - 'Off'
         Gain:
-            value: 5.0
+            value: 10.4
             default: 6.0
             type: float
             max: 23.981199264526367
@@ -113,9 +113,10 @@ camera_params:
 depth_camera:
     id: 0
     max_depth_mm: 1200
+    fps_log_interval: 10 # 秒
 birghtness_controller:
-    golden_img: tasks/ocr/golden_brightness.png 
-    roi: null 
+    golden_img: tasks/ocr/golden_brightness.png
+    roi: null
     exposure_safety_margin: 0.85
     tolerance: 3.0
     max_step_ratio: 2.0
@@ -126,24 +127,15 @@ birghtness_controller:
 preset_roi:
     ticket_roi:
         points:
-            - [500, 1400]
-            - [1600, 1400]
-            - [1600, 2800]
-            - [500, 2800]
-        color: [0, 255, 255]   # BGR,黃色,前端 overlay 用
-
-    # 之後要用到辨識物件 ROI 時再打開:
-    # object_roi:
-    #     points:
-    #         - [x1, y1]
-    #         - [x2, y2]
-    #         - [x3, y3]
-    #         - [x4, y4]
-
-    # 之後要用到打包完成 ROI 時再打開:
-    # packing_roi:
-    #     points:
-    #         - [x1, y1]
-    #         - [x2, y2]
-    #         - [x3, y3]
-    #         - [x4, y4]
+        -   - 400
+            - 1400
+        -   - 1600
+            - 1400
+        -   - 1600
+            - 2800
+        -   - 400
+            - 2800
+        color:
+        - 0
+        - 255
+        - 255

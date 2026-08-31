@@ -4,20 +4,20 @@ import sys
 import signal
 import argparse
 import traceback
-import queue
 from pathlib import Path
 
-import numpy as np
 from loguru import logger
 
 from app import StreamManager
-from utils.offline_source import OfflineSource
+from manager.camera_controller import CameraController
+from manager.offline_camera_controller import OfflineCameraController
 
 
 class OfflineStreamManager(StreamManager):
     """
-    離線測試專用，繼承 StreamManager，只覆寫「取像來源」跟「入列策略」兩處，
-    其餘 (mmr / logic / ocr / overlay / streamer) 完全沿用父類別邏輯。
+    離線測試專用，繼承 StreamManager，只覆寫「要建立哪一種
+    CameraController」，其餘 (mmr / logic / ocr / overlay / streamer)
+    完全沿用父類別邏輯。
 
     ⚠️ 內部工具，客戶端 config/app.py 不會用到這支程式。
     """
@@ -45,28 +45,19 @@ class OfflineStreamManager(StreamManager):
         self._accuracy_mode = accuracy_mode
         super().__init__(task, ver)
 
-    # ---------- 覆寫:取像來源 ----------
-    def init_camera(self):
-        self.capture = OfflineSource(
-            self._source_path, loop=self._loop, fps=self._offline_fps
+    # ---------- 覆寫:相機控制器改用 OfflineCameraController ----------
+    def _build_camera_controller(self) -> CameraController:
+        return OfflineCameraController(
+            cfg=self.task.cfg,
+            bus=self.task.bus,
+            source_path=self._source_path,
+            loop=self._loop,
+            fps=self._offline_fps,
+            accuracy_mode=self._accuracy_mode,
+            video_recorder=self.video_recorder,
+            camera_alone=self.camera_alone,
+            video_record_size=self.video_record_size,
         )
-        if not self.capture.isOpened():
-            raise ValueError(f"Failed to open offline source: {self._source_path}")
-        logger.success(
-            f"opened offline source [{self._source_path}] "
-            f"(loop={self._loop}, accuracy_mode={self._accuracy_mode})"
-        )
-
-    # ---------- 覆寫:入列策略 ----------
-    def _enqueue_frame(self, frame: np.ndarray) -> None:
-        if not self._accuracy_mode:
-            # 重現線上行為：沿用父類別的「丟舊幀」策略
-            super()._enqueue_frame(frame)
-            return
-
-        # 逐幀驗證模式：maxsize=1，滿了就阻塞在這裡等 consumer 拿走，
-        # 保證每一幀都會被 stream_frames() 主迴圈消費到，不會漏偵測。
-        self.frame_queue.put(frame)
 
 
 def parse_args():

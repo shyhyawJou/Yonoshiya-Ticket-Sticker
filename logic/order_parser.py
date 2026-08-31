@@ -9,6 +9,7 @@ from rapidfuzz import fuzz, process
 
 from logic.text_utils import FuzzyMatcher
 from utils.skew_corrector import SkewCorrector
+from utils.quad_validator import validate_and_fix_boxes, find_angle_outliers
 
 ParsedItem = Tuple[str, int]  # (menu_name, quantity)
 
@@ -52,6 +53,17 @@ class OrderParser:
         # 傾斜校正 2：一次性批次將所有 Bbox 擺正，避免在後續迴圈重複運算消耗 CPU
         corrected_dt_boxes = skew.correct_boxes(flip_dt)
 
+        # 檢察 bbox 有沒有變成菱形或斗笠形狀
+        corrected_dt_boxes, bad_box_indices = validate_and_fix_boxes(
+            corrected_dt_boxes, log_fn=logger.warning
+        )
+        bad_box_indices = set(bad_box_indices)
+        # 角度離群值檢測（順序正確但形狀是菱形/怪異四邊形）
+        angle_outlier_indices = find_angle_outliers(corrected_dt_boxes, max_dev_deg=20.0)
+        if angle_outlier_indices:
+            logger.warning(f"[角度異常框] 偵測到 {len(angle_outlier_indices)} 個角度離群框，index={angle_outlier_indices}")
+        bad_box_indices |= set(angle_outlier_indices)
+
         # 1. 找出標題、外帶框、數量欄，同時收集純數字框
         takeout_y = None
         takeout_x = None
@@ -59,8 +71,10 @@ class OrderParser:
 
         zipped_data = list(zip(flip_dt, corrected_dt_boxes, flip_res))
 
-        for orig_box, corr_box, (text, score) in zipped_data:
+        for idx, (orig_box, corr_box, (text, score)) in enumerate(zipped_data):
             if score < 0.5:
+                continue
+            if idx in bad_box_indices:
                 continue
 
             # 全面使用已校正的擺正座標進行幾何判斷
@@ -98,9 +112,11 @@ class OrderParser:
 
         # 2. 過濾有效文字區塊 (排除外帶框外的雜訊)
         valid_items = []
-        for orig_box, corr_box, (text, score) in zipped_data:
+        for idx, (orig_box, corr_box, (text, score)) in enumerate(zipped_data):
             min_score = 0.3 if text.startswith("ねぎ") else 0.5
             if score < min_score:
+                continue
+            if idx in bad_box_indices:
                 continue
 
             cy = np.mean([pt[1] for pt in corr_box])

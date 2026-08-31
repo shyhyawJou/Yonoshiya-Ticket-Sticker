@@ -56,10 +56,13 @@ class LogicEngine:
           放在 tracker 或 state machine 裡都不合適。
     """
 
-    def __init__(self, cfg: Config, bus: MqttBus, mmr: Rotated_RTMDET, rec_path: str, dict_path: str):
+    def __init__(self, cfg: Config, bus: MqttBus, mmr: Rotated_RTMDET, rec_path: str, dict_path: str, on_recording_start=None, on_recording_stop=None):
         self.cfg = cfg
         self.bus = bus
         self.mmr = mmr
+
+        self.on_recording_start = on_recording_start or (lambda reason="": None)
+        self.on_recording_stop = on_recording_stop or (lambda reason="": None)
 
         #### 2026/06/24 by Chris
         self.menus_ticket = [normalize_text(m, ignore_space=True) for m in cfg.menus_ticket]
@@ -139,6 +142,7 @@ class LogicEngine:
                 frame_height=cfg.runtime.camera.height,
                 ticket_leave_frame=self.ticket_leave_frame,
                 ticket_exclude_roi_polygon=cfg.preset_roi.ticket_roi.to_polygon_xyxy(),
+                finalize_mode="ticket_leave",
             )
             logger.info("LogicEngine 啟動於 [single] 模式：單一訂單，不追蹤 tray 盤")
         elif self.mode == "preset_roi":
@@ -150,6 +154,7 @@ class LogicEngine:
                 frame_height=cfg.runtime.camera.height,
                 ticket_leave_frame=self.ticket_leave_frame,
                 ticket_roi_polygon=cfg.preset_roi.ticket_roi.to_polygon_xyxy(),
+                finalize_mode="ticket_mat", # "ticket_leave" | "ticket_mat"
             )
             logger.info("LogicEngine 啟動於 [preset_roi] 模式：單一訂單，依 ticket 是否在預設 ROI 內判斷生命週期")
         else:
@@ -172,6 +177,7 @@ class LogicEngine:
             sticker_matcher=self.sticker_matcher,
             special_cases=self.special_cases,
             n_settle_frame=self.N,
+            on_recording_start=self.on_recording_start,
         )
 
         self.csv = CsvWriter(log_dir="/mnt/reserved/csv_uploaded")
@@ -190,15 +196,20 @@ class LogicEngine:
     # ------------------------------------------------------------
     def reset(self, tray_id: str):
         self.tracker.reset(tray_id)
+        self.on_recording_stop(reason=f"reset:{tray_id}")
 
     def reset_all(self):
         self.tracker.reset_all()
+        self.on_recording_stop(reason="reset_all")
 
     def reset_tray_states(self, tray_id: str):
         self.tracker.reset_tray_states(tray_id)
+        self.on_recording_stop(reason=f"reset_tray_states:{tray_id}")
 
     def remove_tray(self, tray_id: str, ts_utc: str) -> bool:
+        self.on_recording_stop(reason=f"tray_removed:{tray_id}")
         return self.tracker.remove_tray(tray_id, ts_utc)
+        
 
     def set_ocr_busy(self, tray_id: str, item_type: str, bbox: PolygonXYXY):
         """由 app.py 確認已將任務送給 OCR 後呼叫，正式鎖定狀態"""
@@ -219,6 +230,7 @@ class LogicEngine:
 
         tray_dets: List[Detection] = []
         ticket_dets: List[Detection] = []
+        ticket_mat_dets: List[Detection] = []
         sticker_dets: List[Detection] = []
 
         for d in detections:
@@ -239,9 +251,11 @@ class LogicEngine:
             }:
                 sticker_dets.append(d)
                 # pass
+            elif d.cls_name == "ticket_mat":
+                ticket_mat_dets.append(d)
 
         self.tracker.update_tray_positions(tray_dets, ts_utc)
-        self.tracker.update_ticket_and_stickers(ticket_dets, sticker_dets)
+        self.tracker.update_ticket_and_stickers(ticket_dets, sticker_dets, ticket_mat_dets)
         
         # ========================================================
         # 3. 【核心修改：觸發貼紙消失處理】
@@ -249,7 +263,7 @@ class LogicEngine:
         # 在位置剛更新完、生成任務前，立刻找出有沒有剛消失的貼紙。
         # 它會幫你發送 -1 給前端，把狀態從 COMPLETED 退回 WAITING_STICKERS，
         # 並將貼紙標記為 has_notified_missing = True，讓 tracker 下一幀可以乾淨移除。
-        #self.state_machine.handle_missing_items(self.trays)
+        self.state_machine.handle_missing_items(self.trays)
         # self._monitor_checked_stickers(frame) # 新增:偵測已核對貼紙是否被內容置換 ()
         self.state_machine.resolve_known_class_items(self.trays)  # 醬料包:直接比對,不進 OCR
         self.state_machine.resolve_wrong_item_removal(self.trays)
@@ -318,7 +332,7 @@ class LogicEngine:
                 last_xywhr = tray.xywhr
                 if last_xywhr is not None:
                     cx, cy, w, h, r = last_xywhr
-                    warped_img, _ = self.mmr.crop_by_angle(frame, cx, cy, w, h, r)
+                    warped_img, _, M = self.mmr.crop_by_angle(frame, cx, cy, w, h, r)
                     final_tray_capture_b64 = encode_image_base64(warped_img)
 
                 ticket_capture = tray.ticket_crop
@@ -364,7 +378,7 @@ class LogicEngine:
                     continue
 
                 if ts.content_ref_image is None:
-                    warped_img, _ = self.mmr.crop_by_angle(frame, cx, cy, w, h, r)
+                    warped_img, _ , M = self.mmr.crop_by_angle(frame, cx, cy, w, h, r)
                     ts.content_ref_image = preprocess_for_diff(warped_img)
                     ts.content_check_counter = 0
                     ts.content_mismatch_streak = 0
@@ -376,7 +390,7 @@ class LogicEngine:
                     continue
                 ts.content_check_counter = 0
 
-                warped_img, _ = self.mmr.crop_by_angle(frame, cx, cy, w, h, r)
+                warped_img, _ , M = self.mmr.crop_by_angle(frame, cx, cy, w, h, r)
                 current_processed = preprocess_for_diff(warped_img)
                 change_ratio = compute_change_ratio(
                     ts.content_ref_image, current_processed,
