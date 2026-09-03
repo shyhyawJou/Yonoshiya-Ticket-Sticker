@@ -22,11 +22,12 @@ class CommandDispatcher:
         self._handlers = {
             "plot_setting": self._on_plot_setting,
             "mode_setting": self._on_mode_setting,
-            "capture": self._on_capture,
             "reset": self._on_reset,
             "hardware_ctrl": self._on_hardware_ctrl,
             "no_tray_setting": self._on_no_tray_setting,
             "img_reverse_xy": self._on_img_reverse_xy,
+            "snapshot": self._on_snapshot,
+            "record": self._on_manual_recording,
         }
 
     def _flip_roi_points(self, points, width: int, height: int, flip_x: bool, flip_y: bool):
@@ -100,9 +101,22 @@ class CommandDispatcher:
     def _on_mode_setting(self, payload: dict) -> None:
         pass
 
-    def _on_capture(self, payload: dict) -> None:
-        self.manager._trigger_capture = True
-        logger.info("CAPTURE done.")
+    def _on_snapshot(self, payload: dict) -> None:
+        if payload["action"] != "capture":
+            logger.error(f"[SNAPSHOT] MQTT 收到未知指令: {payload}")
+            return 0
+
+        m = self.manager
+        # 用原始畫面 (未經錄影壓縮) 存檔，檔名含日期時間避免覆蓋
+        if getattr(m, "tmp_frame", None) is not None:
+            m._save_frame(m.tmp_frame, f"{str(m.save_dir)}/{m.event_recorder.date}/snapshot")
+        else:
+            logger.warning("[SNAPSHOT] tmp_frame 尚未就緒，略過截圖")
+            return 0
+        logger.success("[SNAPSHOT] CAPTURE done.")
+
+    def _on_manual_recording(self, payload: dict) -> None:
+        pass
 
     def _on_reset(self, payload: dict) -> None:
         m = self.manager

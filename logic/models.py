@@ -64,6 +64,9 @@ class Tray:
     expected_items_display: List[dict] = field(default_factory=list)  # 逐行顯示清單 [{"菜單名": 數量}]
     checked_items: List[str] = field(default_factory=list)
 
+    ever_had_wrong_item: bool = False
+    wrong_item_history: List[str] = field(default_factory=list)  # 每次「首次判定」記一筆品項名稱
+
     ticket: Optional[TrackedItem] = None
     extra_tickets: List[TrackedItem] = field(default_factory=list)  # 疑似「同單號第二張」的候選 ticket
     stickers: List[TrackedItem] = field(default_factory=list)
@@ -73,3 +76,6 @@ class Tray:
     # ticket mat 相關參數
     ticket_mat_stable_frames: int = 0   # 連續幾幀看到完整 ticket_mat(容忍模式:一漏就歸零)
     order_session_active: bool = False  # False=idle, True=訂單處理中(mat 被遮住後才轉 True)
+
+    # 對應事件的影片 ID
+    record_session_id: Optional[str] = None

@@ -13,6 +13,7 @@ from typing import Any, Optional
 import csv
 import traceback
 import shutil
+import uuid
 
 
 def get_now_str(timestamp: float, utc: bool = False) -> str:
@@ -32,6 +33,18 @@ def get_now_str(timestamp: float, utc: bool = False) -> str:
         dt = datetime.fromtimestamp(timestamp)  # 系統本地時區
 
     return dt.strftime("%Y%m%d_%H%M%S_%f")
+
+def get_now_iso_str(timestamp: float, utc: bool = False) -> str:
+    """
+    跟 get_now_str 用同一套轉換邏輯，只是輸出成 ISO 格式
+    "YYYY-MM-DDTHH:MM:SS"，給 CSV / tray.start_time_str 這類
+    需要可讀時間戳的欄位使用，確保跟影片檔名的轉換方式完全一致。
+    """
+    if utc:
+        dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+    else:
+        dt = datetime.fromtimestamp(timestamp)  # 跟 get_now_str 同一行邏輯
+    return dt.strftime("%Y-%m-%dT%H:%M:%S")
 
 
 def get_utc_offset() -> int:
@@ -61,6 +74,8 @@ class Clip:
         self.rmtree_lock = Lock()
         self.is_enable = enable
         self.date = get_now_str(time(), utc=False)[:8]
+        self.session_id = None
+        self.session_video_map: dict[str, tuple[str, float]] = {}
 
         # --- pre-roll / post-roll 設定 ---
         self.preroll_frames = preroll_frames
@@ -74,6 +89,12 @@ class Clip:
         self._reset()
 
     # ---------- 對外主要介面 ----------
+    def get_current_session_id(self) -> Optional[str]:
+        return self.session_id
+
+    def get_video_filename_for_session(self, session_id: str) -> str:
+        entry = self.session_video_map.get(session_id)
+        return entry[0] if entry else ""
 
     def feed(self, frame, timestamp) -> None:
         """
@@ -139,6 +160,8 @@ class Clip:
             return
 
         self.is_running = True
+        self.session_id = uuid.uuid4().hex
+        self._prune_session_map() # 定期清空資訊
 
         preroll = list(self._preroll_buffer) if self._preroll_buffer else []
 
@@ -210,6 +233,16 @@ class Clip:
         )
 
     # ---------- 內部 ----------
+    def _prune_session_map(self, max_age_seconds: float = 3600.0):
+        now = time()
+        expired = [
+            sid for sid, (_, created_at) in self.session_video_map.items()
+            if now - created_at > max_age_seconds
+        ]
+        for sid in expired:
+            del self.session_video_map[sid]
+        if expired:
+            logger.info(f'[{self.tag}] 清掉 {len(expired)} 筆過期的 session_video_map 紀錄')
 
     def _do_stop(self, save_video, is_interrupted=False, wait_for_encode=False, encode_timeout=30.0,):
         if not self.is_enable:
@@ -307,6 +340,7 @@ class Clip:
                     self.save_dir = p(f'{self.root_dir}/{self.date}/{self.category}/{now_str}{self.suffix}')
                     self.csv_path = p(f'{self.root_dir}/{self.date}/{self.category}/{now_str}{self.suffix}.csv')
                     self.video_path = p(f'{self.root_dir}/{self.date}/{self.category}/{now_str}{self.suffix}.mp4')
+                    self.session_video_map[self.session_id] = (self.video_path.name, time())
                     os.makedirs(self.save_dir, exist_ok=True)
                     self._write_csv_header()
                     self.first_time = (now_str, time_offset)

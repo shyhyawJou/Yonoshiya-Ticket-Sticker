@@ -34,8 +34,9 @@ class CsvWriter:
 
     def _worker(self):
         fieldnames = [
-            "tray_id", "start_time", "end_time", "expected_item", "expected_item_count",
-            "checked_item", "ticket_capture", "final_tray_capture"
+            "tray_id", "order_number", "start_time", "end_time", "final_status",
+            "expected_item", "expected_item_count", "missing_item", "wrong_item",
+            "ticket_capture", "final_tray_capture", "video_file"
         ]
 
         while self.running:

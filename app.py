@@ -92,6 +92,7 @@ class StreamManager:
             task,
             on_recording_start=self.start_event_recording,
             on_recording_stop=self.stop_event_recording,
+            get_video_filename=self.get_event_video_filename,
         )
         self.task.bus.on_command(self._handle_cmd)
 
@@ -135,12 +136,18 @@ class StreamManager:
     def start_event_recording(self, reason: str = "") -> None:
         with self.data_lock:
             self.event_recorder.start()
-        logger.info(f"[event_recorder] 開始錄影 ({reason})")
-
+            session_id = self.event_recorder.get_current_session_id()
+        logger.info(f"[event_recorder] 開始錄影 ({reason}), session={session_id}")
+        return session_id
+    
     def stop_event_recording(self, save_video: bool = True, reason: str = "") -> None:
         with self.data_lock:
             self.event_recorder.request_stop(save_video=save_video)
         logger.info(f"[event_recorder] 請求結束錄影 ({reason}), save_video={save_video}")
+    
+    def get_event_video_filename(self, session_id: str) -> str:
+        with self.data_lock:
+            return self.event_recorder.get_video_filename_for_session(session_id)
 
     def _handle_cmd(self, cmd: str, payload: dict) -> None:
         self.commands.handle(cmd, payload)
@@ -234,7 +241,7 @@ class StreamManager:
                 record_frame = cv2.resize(frame, self.video_record_size)
                 now_ts = time.time()
                 self.event_recorder.feed(record_frame, now_ts) # 事件觸發影片
-                self.continuous_recorder.feed(record_frame, now_ts) # 時間內持續寫入影片
+                # self.continuous_recorder.feed(record_frame, now_ts) # 時間內持續寫入影片
                 self._check_event_record_timeout(now_ts)
 
                 for ocr_result in task_ctx.drain_ocr_results():

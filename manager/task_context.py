@@ -39,7 +39,7 @@ class TaskContext:
 
     # ---------- 載入 ----------
 
-    def load_task(self, task: str, on_recording_start=None, on_recording_stop=None) -> None:
+    def load_task(self, task: str, on_recording_start=None, on_recording_stop=None, get_video_filename=None) -> None:
         """
         安全地載入指定任務的設定檔、AI 模型和邏輯引擎。
         """
@@ -52,6 +52,7 @@ class TaskContext:
         self.config_path = config_path
         self._on_recording_start = on_recording_start
         self._on_recording_stop = on_recording_stop
+        self._get_event_video_filename = get_video_filename
 
         cfg = load_config(str(config_path))
         class_names = [c.name for c in cfg.classes]
@@ -81,6 +82,7 @@ class TaskContext:
             dict_path=cfg.runtime.model.text,
             on_recording_start=self._on_recording_start,
             on_recording_stop=self._on_recording_stop,
+            get_video_filename=self._get_event_video_filename,
         )
 
         # --- init ocr ---
@@ -150,6 +152,7 @@ class TaskContext:
                 dict_path=self.cfg.runtime.model.text,
                 on_recording_start=self._on_recording_start,
                 on_recording_stop=self._on_recording_stop,
+                get_video_filename=self._get_event_video_filename,
             )
         except Exception as e:
             logger.error(f"[MODE] 切換模式失敗，退回 '{old_mode}': {e}")

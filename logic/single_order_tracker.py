@@ -11,6 +11,8 @@ from logic.models import Tray, TrackedItem, TrayState
 from logic.known_class_items import STABLE_CONFIRM_CLASSES
 from logic.sticker_pending_buffer import StickerPendingBuffer
 
+from utils.clip_video import get_now_iso_str
+
 SINGLE_ORDER_ID = "single_order"
 
 
@@ -62,7 +64,8 @@ class SingleOrderTracker:
     # 內部工具
     # ------------------------------------------------------------
     def _create_tray(self):
-        ts_utc = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime())
+        # ts_utc = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime())
+        ts_local = get_now_iso_str(time.time(), utc=False)
         default_xywhr = (
             self.frame_width / 2.0,
             self.frame_height / 2.0,
@@ -74,7 +77,7 @@ class SingleOrderTracker:
             id=self.tray_id,
             rect=None,
             xywhr=default_xywhr,
-            start_time_str=ts_utc,
+            start_time_str=ts_local,
             ticket_crop=None,
         )
 
@@ -110,13 +113,17 @@ class SingleOrderTracker:
         # ticket mat 參數重製狀態
         tray.order_session_active = False
         tray.ticket_mat_stable_frames = 0
+        tray.ever_had_wrong_item = False
+        tray.wrong_item_history = []  # 每次「首次判定」記一筆品項名稱
+        tray.start_time_str = get_now_iso_str(time.time(), utc=False) #time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime())  # 新增：每次重置都刷新
         logger.info("[RESET-B][single_order] 已重置訂單狀態")
         self._publish_reset_status()
 
     def _publish_reset_status(self):
-        ts_utc = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime())
+        # ts_utc = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime())
+        ts_local = get_now_iso_str(time.time(), utc=False)
         self.bus.publish_system({
-            "ts": ts_utc,
+            "ts": ts_local,
             "type": "TRAY_RESET",
             "msg": {"tray_id": self.tray_id}
         })
@@ -126,9 +133,10 @@ class SingleOrderTracker:
         })
 
     def _publish_new_order_detected(self):
-        ts_utc = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime())
+        # ts_utc = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime())
+        ts_local = get_now_iso_str(time.time(), utc=False)
         self.bus.publish_system({
-            "ts": ts_utc,
+            "ts": ts_local,
             "type": "NEW_TRAY_DETECTED",
             "msg": {
                 "tray_id": self.tray_id,

@@ -56,13 +56,14 @@ class LogicEngine:
           放在 tracker 或 state machine 裡都不合適。
     """
 
-    def __init__(self, cfg: Config, bus: MqttBus, mmr: Rotated_RTMDET, rec_path: str, dict_path: str, on_recording_start=None, on_recording_stop=None):
+    def __init__(self, cfg: Config, bus: MqttBus, mmr: Rotated_RTMDET, rec_path: str, dict_path: str, on_recording_start=None, on_recording_stop=None, get_video_filename=None):
         self.cfg = cfg
         self.bus = bus
         self.mmr = mmr
 
         self.on_recording_start = on_recording_start or (lambda reason="": None)
         self.on_recording_stop = on_recording_stop or (lambda reason="": None)
+        self.get_video_filename = get_video_filename or (lambda session_id: "")
 
         #### 2026/06/24 by Chris
         self.menus_ticket = [normalize_text(m, ignore_space=True) for m in cfg.menus_ticket]
@@ -342,19 +343,33 @@ class LogicEngine:
                 expected_counts = Counter(tray.expected_items)
                 expected_list = [{item: count} for item, count in expected_counts.items()]
 
-                check_counts = Counter(tray.checked_items)
-                check_list = [{item: count} for item, count in check_counts.items()]
+                missing_counts = Counter(tray.expected_items) - Counter(tray.checked_items)
+                missing_list = [{item: count} for item, count in missing_counts.items()]
+
+                wrong_counts = Counter(tray.wrong_item_history)
+                wrong_list = [{item: count} for item, count in wrong_counts.items()]
+
+                final_status = (
+                    "NGtoOK" if tray.state == TrayState.COMPLETED and tray.ever_had_wrong_item
+                    else "OK" if tray.state == TrayState.COMPLETED
+                    else "NG"
+                )
+
+                video_file = self.get_video_filename(tray.record_session_id) if tray.record_session_id else ""
 
                 log_payload = {
                     "tray_id": tray_id,
                     "order_number": tray.order_number,
                     "start_time": tray.start_time_str,
                     "end_time": ts_utc,
+                    "final_status": final_status,
                     "expected_item": expected_list,
                     "expected_item_count": len(expected_list),
-                    "checked_item": check_list,
+                    "missing_item": missing_list,
+                    "wrong_item": wrong_list,
                     "ticket_capture": ticket_capture_b64,
-                    "final_tray_capture": final_tray_capture_b64
+                    "final_tray_capture": final_tray_capture_b64,
+                    "video_file": video_file,
                 }
                 self.csv.log(log_payload)
 

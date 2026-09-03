@@ -31,6 +31,8 @@ from logic.sticker_matcher import StickerMatcher
 from logic.single_order_tracker import SINGLE_ORDER_ID
 from logic.known_class_items import is_known_class_item, resolve_item_name
 
+from utils.clip_video import get_now_iso_str, get_now_str
+
 
 
 class TrayStateMachine:
@@ -276,12 +278,13 @@ class TrayStateMachine:
             # 污染 tray.ticket.contributed_display，造成扣除時範圍算錯
             tray.ticket.contributed_display = list(expected_items_list)
             tray.ticket.is_ticket_merged = True
-
+            tray.start_time_str = get_now_iso_str(time.time(), utc=False) # time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime())  # 新增：跟錄影開始時間對齊
+            logger.error(f"time iso: {get_now_iso_str(time.time(), utc=False)},  time str: {get_now_str(time.time(), utc=False)}")
             self.bus.publish_det_status({
                 "tray_id": tray_id, "status": "TICKET_READY",
                 "expected_items": expected_items_list, "order_number": order_number,
             })
-            self.on_recording_start(reason=f"ticket_confirmed:{tray_id}") # 開始錄影
+            tray.record_session_id = self.on_recording_start(reason=f"ticket_confirmed:{tray_id}")
         else:
             if tray.ticket:
                 tray.ticket.stable_frames = 0
@@ -393,6 +396,11 @@ class TrayStateMachine:
             else:
                 ts.stable_frames = 0
                 if match_status == "WRONG_ITEM":
+                    if not ts.is_wrong_item:
+                        # 只在「第一次」被判定為 wrong item 時記一筆，
+                        # 避免同一個物件之後重複送 OCR 或 heartbeat 通知造成重複計數
+                        tray.ever_had_wrong_item = True
+                        tray.wrong_item_history.append(matched_item)
                     ts.is_wrong_item = True
                     ts.item_name = matched_item
                     ts.last_wrong_notify_ts = time.time()
