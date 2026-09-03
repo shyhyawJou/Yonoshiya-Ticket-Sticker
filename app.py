@@ -6,6 +6,7 @@ import time
 import threading
 import traceback
 from pathlib import Path
+import numpy as np
 
 import cv2
 from loguru import logger
@@ -14,6 +15,7 @@ from utils.clip_video import Clip, PeriodicClipRecorder
 from utils.frame_writer import AsyncFrameWriter
 
 from stream_vision.streamer import Mjpeg_Streamer
+from depth import ORBBEC_CAMERA
 
 from manager.camera_controller import CameraController
 from manager.task_context import TaskContext
@@ -98,6 +100,7 @@ class StreamManager:
 
         # --- 相機 ---
         self.camera = self._build_camera_controller()
+        self.depth_cam = ORBBEC_CAMERA(self.task.cfg.runtime.depth_cam.cfg)
 
         # --- 畫面繪製 ---
         self.overlay = OverlayRenderer(self.task)
@@ -189,6 +192,7 @@ class StreamManager:
 
     def start_camera(self) -> None:
         self.camera.start()
+        self.depth_cam.start()
         self._running = True
         logger.info("Camera started. Streaming...")
 
@@ -208,6 +212,7 @@ class StreamManager:
         # 這裡的 logic 參照就會過期，所以每次迴圈開頭都重新快取一次
         # （比每次都走三層屬性鏈划算，因為單層 self.task 查詢只需要一次）。
         camera = self.camera
+        depth_cam = self.depth_cam
         overlay = self.overlay
 
         while self._running:
@@ -238,6 +243,9 @@ class StreamManager:
                         logger.error("Failed to capture frame.")
                         break
 
+                # 深度相機
+                depth_frame = depth_cam.get_frame(timeout=0.1)
+                
                 record_frame = cv2.resize(frame, self.video_record_size)
                 now_ts = time.time()
                 self.event_recorder.feed(record_frame, now_ts) # 事件觸發影片
@@ -307,8 +315,22 @@ class StreamManager:
                     with self.data_lock:
                         self.ocr_data = None
 
+                # 合併
+                if out is not None and depth_frame is not None:
+                    w = self.task.cfg.runtime.camera.width // 2
+                    h = self.task.cfg.runtime.camera.height
+                    out_depth = self.depth_cam.draw(depth_frame)
+                    out = cv2.resize(out, (w, h))
+                    out_depth = cv2.resize(out_depth, (w, h))
+                    out = np.concatenate([out, out_depth], 1)
+
                 if self.show_fps:
-                    cv2.putText(out, display_fps, (self.task.cfg.runtime.camera.width-650, self.task.cfg.runtime.camera.height-350), cv2.FONT_HERSHEY_SIMPLEX, 4, (194, 244, 255), 4)
+                    if self.depth_cam.enable:
+                        w = self.task.cfg.runtime.camera.width // 2
+                        h = self.task.cfg.runtime.camera.height
+                        cv2.putText(out, display_fps, (w - 650, h - 350), cv2.FONT_HERSHEY_SIMPLEX, 4, (194, 244, 255), 4)
+                    else:
+                        cv2.putText(out, display_fps, (self.task.cfg.runtime.camera.width-650, self.task.cfg.runtime.camera.height-350), cv2.FONT_HERSHEY_SIMPLEX, 4, (194, 244, 255), 4)
 
                 if self.stream_mode == "detect":
                     stream_out = cv2.resize(out, self.stream_size)
@@ -356,6 +378,7 @@ class StreamManager:
 
         self.task.stop()
         self.camera.stop()
+        self.depth_cam.stop()
         self.stop_stream()
         logger.info("Cleaned up.")
 

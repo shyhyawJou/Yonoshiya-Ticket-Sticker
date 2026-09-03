@@ -6,11 +6,8 @@ from time import time
 import numpy as np
 from queue import Queue, Empty, Full
 from threading import Thread
-import yaml
-import argparse
 import os
 from os.path import dirname
-import signal
 from datetime import datetime
 from pyorbbecsdk import Config, Context, OBSensorType, Pipeline, get_version
 
@@ -18,53 +15,43 @@ from pyorbbecsdk import Config, Context, OBSensorType, Pipeline, get_version
 
 class ORBBEC_CAMERA:
     def __init__(self, custom_cfg):
-        try:
-            self.custom_cfg = custom_cfg
-            self.context = Context()
-            self.config = Config()
-            self.device = self._get_device(self.custom_cfg['id'])
-            self.device_info = self._get_device_info()
-            self.pipeline = Pipeline(self.device)
-            self.stream_thread = None
-            self.is_running = False
-            self.is_first_frame = True
-            self.is_terminated = False
-            self.frame_q = Queue(256)
-            self.fps_logger = My_Logger(**custom_cfg)
-            self._start_stream()
-            logger.success(f'深度相機初始化完畢 !')
-            logger.info(f'\n\tpid: {self.device_info["pid"]:04x}\n'
-                        f'\tserial number: {self.device_info["serial number"]}\n'
-                        f'\tfirmware version: {self.device_info["firmware version"]}\n'
-                        f'\tsdk version: {get_version()}\n'
-                        f'\tconnection type: {self.device_info["connection type"]}\n')
-            
-        except MyError as e:
-            logger.error(f'啟動深度相機失敗: {e}')
-        except:
-            logger.error(f'啟動深度相機失敗: {traceback.format_exc()}')
+        self.custom_cfg = custom_cfg
+        self.enable = custom_cfg['enable_camera']
+        self.stream_thread = None
+        self.is_running = False
+        self.is_first_frame = True
+        self.is_terminated = False
+        self.pipeline = None
+        self.frame_q = Queue(1)
+        if not self.enable:
+            logger.warning('深度相機不會開啟, 因為 config.yaml 設定成 disable !')
 
-    def read(self):
-        frame = None
-        ret = False
+    def get_frame(self, timeout=0.1):
+        if not self.enable:
+            return
+
         try:
-            frame = self.frame_q.get_nowait()
-            ret = True
+            frame = self.frame_q.get(timeout=timeout)
         except Empty:
-            pass
+            frame = None
         except:
             logger.error(traceback.format_exc())
-        return ret, frame
+        return frame
 
     def start(self):
         if self.is_terminated:
             logger.error('這個深度相機物件已經結束, 請重新創建一個物件')
+            return
+        if not self.enable:
+            logger.error('目前 config 設定為 disable !')
             return
         self.is_running = True
         self.stream_thread = Thread(target=self._run, daemon=True)
         self.stream_thread.start()
 
     def stop(self):
+        if not self.enable:
+            return
         self.is_running = False
         if self.stream_thread:
             self.stream_thread.join(2)
@@ -73,7 +60,15 @@ class ORBBEC_CAMERA:
         self.is_terminated = True
         logger.success('深度相機已經關閉 !')
 
+    @staticmethod
+    def draw(frame):
+        heatmap = cv2.applyColorMap(frame, cv2.COLORMAP_JET)
+        heatmap[frame == 0] = 0
+        return heatmap
+
     def _run(self):
+        self._init()
+
         try:
             while self.is_running:
                 frames = self.pipeline.wait_for_frames(1000)
@@ -90,8 +85,8 @@ class ORBBEC_CAMERA:
                 raw = np.frombuffer(frame.get_data(), dtype=np.uint16)
                 depth_mm = raw.reshape(height, width).astype(np.float32) * scale
 
-                image = np.clip(depth_mm, 0, self.custom_cfg['max_depth_mm'])
-                image = (image * 255 / self.custom_cfg['max_depth_mm']).astype(np.uint8)
+                image = np.clip(depth_mm, 0, self.max_depth_mm)
+                image = (image * 255 / self.max_depth_mm).astype(np.uint8)
 
                 # 印 shape
                 if self.is_first_frame:
@@ -99,14 +94,39 @@ class ORBBEC_CAMERA:
                     self.is_first_frame = False
 
                 # 存當下幀
-                try:
-                    self.frame_q.put_nowait(image)
-                except Full:
-                    pass
+                if self.frame_q.full():
+                    try:
+                        self.frame_q.get_nowait()
+                    except Empty:
+                        pass
+                self.frame_q.put(image)
 
                 # FPS 
                 self.fps_logger.log()
 
+        except MyError as e:
+            logger.error(f'啟動深度相機失敗: {e}')
+        except:
+            logger.error(f'啟動深度相機失敗: {traceback.format_exc()}')
+
+    def _init(self):
+        try:
+            self.device_id = self.custom_cfg['id']
+            self.max_depth_mm = self.custom_cfg['max_depth_mm']
+            self.context = Context()
+            self.config = Config()
+            self.device = self._get_device(self.device_id)
+            self.device_info = self._get_device_info()
+            self.pipeline = Pipeline(self.device)
+            self.fps_logger = My_Logger(**self.custom_cfg)
+            self._start_stream()
+            logger.success(f'深度相機初始化完畢 !')
+            logger.info(f'\n\tpid: {self.device_info["pid"]:04x}\n'
+                        f'\tserial number: {self.device_info["serial number"]}\n'
+                        f'\tfirmware version: {self.device_info["firmware version"]}\n'
+                        f'\tsdk version: {get_version()}\n'
+                        f'\tconnection type: {self.device_info["connection type"]}\n')
+            
         except MyError as e:
             logger.error(f'啟動深度相機失敗: {e}')
         except:
@@ -141,17 +161,21 @@ class ORBBEC_CAMERA:
 
 
 class My_Logger:
-    def __init__(self, fps_log_interval, **kwargs):
+    def __init__(self, fps_log_interval, log_tag, enable_fps_log, **kwargs):
         self.t = time()
         self.interval = fps_log_interval
         self.count = 0
+        self.name = log_tag
+        self.enable = enable_fps_log
 
     def log(self):
+        if not self.enable:
+            return
         self.count += 1
         cur = time()
         elapsed = cur - self.t
         if elapsed > self.interval:
-            logger.info(f'FPS: {self.count / elapsed:.3f}')
+            logger.warning(f'[{self.name}] FPS: {self.count / elapsed:.3f}')
             self.count = 0
             self.t = cur
 
@@ -160,48 +184,3 @@ class MyError(Exception):
     pass
 
 
-
-if __name__ == '__main__':
-    with open('tasks/ocr/config.yaml') as f:
-        cfg = yaml.safe_load(f)['depth_camera']
-
-    logger.add('z.log')
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument('-w', action='store_true', help='show window')
-    args = parser.parse_args()
-
-    cam = ORBBEC_CAMERA(cfg)
-    cam.start()
-
-    is_running = True
-    show_window = bool(os.environ.get('DISPLAY'))
-    
-    def handle_signal(signum, frame):
-        global is_running
-        is_running = False
-
-    signal.signal(signal.SIGINT, handle_signal)
-    signal.signal(signal.SIGTERM, handle_signal)
-
-    try:
-        while is_running:
-            ret, frame = cam.read()
-            if not ret:
-                continue
-
-            heatmap = cv2.applyColorMap(frame, cv2.COLORMAP_JET)
-            heatmap[frame == 0] = 0
-            
-            dst = f'frames/{datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]}.jpg'
-            os.makedirs(dirname(dst), exist_ok=True)
-            cv2.imwrite(dst, heatmap)
-
-            if args.w:
-                cv2.imshow(f"Depth", heatmap)
-                cv2.waitKey(1)
-    except Exception:
-        logger.error(traceback.format_exc())
-    finally:
-        cam.stop()
-        cv2.destroyAllWindows()

@@ -34,6 +34,13 @@ class CameraCfg:
     height: int
     device: str  # 'aravis' or 'hik'
 
+
+@dataclass
+class DepthCamCfg:
+    """Detph Camera Source Configuration"""
+    cfg: dict
+
+
 @dataclass
 class StreamCfg:
     """Output Stream Configuration"""
@@ -45,6 +52,7 @@ class RuntimeCfg:
     """Runtime configurations including model, camera, and stream"""
     model: ModelCfg
     camera: CameraCfg
+    depth_cam: DepthCamCfg
     stream: StreamCfg
 
 @dataclass
@@ -223,6 +231,9 @@ def load_config(config_path: str) -> Config:
         ocr_rec_path = model["ocr_rec"]
         text_path = model["text"]
 
+        # depth camera setting
+        depth_cam = base["depth_camera"]
+
         runtime = RuntimeCfg(
             model=ModelCfg(
                 object_det=_resolve(base_dir, object_det_path),
@@ -237,6 +248,7 @@ def load_config(config_path: str) -> Config:
                 height=camera["height"],
                 device=camera["device"]
             ),
+            depth_cam=DepthCamCfg(depth_cam),
             stream=StreamCfg(port=int(stream["port"]), stream_size=stream["stream_size"])
         )
 
