@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 import numpy as np
 
@@ -62,7 +62,10 @@ class Tray:
 
     expected_items: List[str] = field(default_factory=list) # ['菜單名']
     expected_items_display: List[dict] = field(default_factory=list)  # 逐行顯示清單 [{"菜單名": 數量}]
-    checked_items: List[str] = field(default_factory=list)
+    checked_items: List[str] = field(default_factory=list) # 目前 tracker 還看得到，而且已經成功確認身份的實體餐點
+    locked_items: Dict[str, int] = field(default_factory=dict)  # confirmed 達到 expected 後的品項
+    confirmed_counts: Dict[str, int] = field(default_factory=dict) # 已經向前端確認過的歷史最高數量，只增不減
+
 
     ever_had_wrong_item: bool = False
     wrong_item_history: List[str] = field(default_factory=list)  # 每次「首次判定」記一筆品項名稱

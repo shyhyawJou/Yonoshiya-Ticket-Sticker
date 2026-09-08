@@ -243,6 +243,63 @@ class TrayStateMachine:
     # ------------------------------------------------------------
     # 內部細節
     # ------------------------------------------------------------
+    def _update_confirmed_count(self, tray: Tray, item_name: str) -> bool:
+        """
+        根據目前畫面中實際存在的 checked item 數量，
+        更新前端歷史確認數。
+
+        confirmed_counts 採 high-water mark：
+        只能增加，不能因餐點暫時離開而下降。
+
+        回傳：
+            True  = confirmed count 有增加
+            False = 沒有增加
+        """
+        if not item_name:
+            return False
+
+        expected_count = Counter(tray.expected_items).get(item_name, 0)
+        if expected_count <= 0:
+            return False
+
+        # checked_items 代表目前實際仍存在的已確認物件
+        visible_count = Counter(tray.checked_items).get(item_name, 0)
+
+        old_confirmed = tray.confirmed_counts.get(item_name, 0)
+
+        # high-water mark
+        new_confirmed = min(
+            expected_count,
+            max(old_confirmed, visible_count)
+        )
+
+        if new_confirmed <= old_confirmed:
+            return False
+
+        tray.confirmed_counts[item_name] = new_confirmed
+
+        logger.info(
+            f"[tray_state_machine] 確認進度增加 "
+            f"tray={tray.id}, "
+            f"item={item_name}, "
+            f"visible={visible_count}, "
+            f"confirmed={old_confirmed}->{new_confirmed}, "
+            f"expected={expected_count}"
+        )
+
+        # 真正達標才 lock
+        if new_confirmed >= expected_count:
+            tray.locked_items[item_name] = expected_count
+
+            logger.info(
+                f"[tray_state_machine] 品項達標並鎖定 "
+                f"tray={tray.id}, "
+                f"item={item_name}, "
+                f"count={expected_count}"
+            )
+
+        return True
+
     def _expand_parsed_items(self, parsed_items):
         """把 OrderParser 解析出的品項，展開 special_cases（套餐拆子品項）。"""
         expanded_expected_items = []
@@ -406,18 +463,55 @@ class TrayStateMachine:
                     ts.last_wrong_notify_ts = time.time()
 
         if match_status == "MATCHED":
+            # --------------------------------------------------
+            # 1. checked_items = 現在畫面上存在的已確認餐點
+            # --------------------------------------------------
             tray.checked_items.append(matched_item)
-            check_counts = Counter(tray.checked_items)
-            items_list = [{item: count} for item, count in check_counts.items()]
-            self.bus.publish_det_status({
-                "tray_id": tray_id,
-                "status": "ITEM_CHECKED",
-                "items": items_list
-            })
 
-            has_unresolved_wrong_item = any(t.is_wrong_item for t in tray.stickers)
-            if len(tray.checked_items) == len(tray.expected_items) and not has_unresolved_wrong_item:
+            # --------------------------------------------------
+            # 2. confirmed_counts = 歷史最高確認進度
+            #    只有真的突破歷史最高值，才通知 frontend
+            # --------------------------------------------------
+            confirmed_increased = self._update_confirmed_count(
+                tray,
+                matched_item
+            )
+
+            if confirmed_increased:
+                items_list = [
+                    {item: count}
+                    for item, count in tray.confirmed_counts.items()
+                ]
+
+                self.bus.publish_det_status({
+                    "tray_id": tray_id,
+                    "status": "ITEM_CHECKED",
+                    "items": items_list
+                })
+
+            # --------------------------------------------------
+            # 3. 判斷整份訂單是否完成
+            # --------------------------------------------------
+            expected_counts = Counter(tray.expected_items)
+
+            all_completed = all(
+                tray.confirmed_counts.get(item, 0) >= expected_count
+                for item, expected_count in expected_counts.items()
+            )
+
+            has_unresolved_wrong_item = any(
+                t.is_wrong_item
+                for t in tray.stickers
+            )
+
+            if all_completed and not has_unresolved_wrong_item:
                 tray.state = TrayState.COMPLETED
+
+                items_list = [
+                    {item: count}
+                    for item, count in tray.confirmed_counts.items()
+                ]
+
                 self.bus.publish_det_status({
                     "tray_id": tray_id,
                     "status": "TRAY_COMPLETED",
@@ -433,36 +527,6 @@ class TrayStateMachine:
 
         if tray.state != TrayState.COMPLETED:
             tray.state = TrayState.WAITING_STICKERS
-
-    def reopen_sticker_for_recheck(self, tray: Tray, tray_id: str, ts) -> None:
-        """
-        貼紙已核對過,但像素內容比對確認已被替換(例如被疊上新餐點)。
-        清空核對狀態、扣回原本記帳的品項,讓它重新走一次穩定度累積,
-        交給既有的 generate_tasks 重新送 OCR——處理方式跟「全新貼紙
-        出現」完全一樣,不需要另外寫一套辨識流程。
-        """
-        if ts.is_checked and ts.item_name and ts.item_name in tray.checked_items:
-            tray.checked_items.remove(ts.item_name)
-            ### 暫時不發送減少
-            # check_counts = Counter(tray.checked_items)
-            # items_list = [{item: count} for item, count in check_counts.items()]
-            # self.bus.publish_det_status({
-            #     "tray_id": tray_id,
-            #     "status": "ITEM_CHECKED",
-            #     "items": [{ts.item_name: -1}]
-            # })
-
-        ts.is_checked = False
-        ts.item_name = None
-        ts.stable_frames = 0
-        ts.content_ref_image = None
-        ts.content_check_counter = 0
-        ts.content_mismatch_streak = 0
-
-        if tray.state == TrayState.COMPLETED:
-            tray.state = TrayState.WAITING_STICKERS
-
-        logger.info(f"[內容變更偵測] tray={tray_id} 貼紙內容疑似已被替換或物件堆疊,重新排入辨識佇列")
     
     def resolve_known_class_items(self, trays: Dict[str, Tray]) -> None:
         """
@@ -536,46 +600,61 @@ class TrayStateMachine:
 
     def handle_missing_items(self, trays: Dict[str, Tray]) -> None:
         """
-        每幀呼叫：檢查是否有貼紙確認消失，發送資訊給前端，並將對應已核對品項扣除
+        checked_items：
+            表示目前畫面實際存在的已確認餐點。
+
+        confirmed_counts：
+            表示歷史最高確認進度，不因餐點離開而下降。
+        # 不修改 confirmed_counts
+        # 不發 ITEM_CHECKED -1
+        # 不取消 locked
+        # 不讓 COMPLETED 回退
         """
         for tray_id, tray in trays.items():
-            # 收集這一個 tray 裡面，這一幀剛確認消失、且還沒通知外部的貼紙, wrong_item 交給後面的 resolve_wrong_item_removal 處理
+
             missing_stickers = [
                 ts for ts in tray.stickers
-                if ts.is_missing and not ts.has_notified_missing and not ts.is_wrong_item
+                if (
+                    ts.is_missing
+                    and not ts.has_notified_missing
+                    and not ts.is_wrong_item
+                )
             ]
-            
+
             if not missing_stickers:
                 continue
-                
-            # 假設要做比較細緻的業務處理：
-            # 如果這張貼紙當初是核對成功的，它代表某個餐點，消失了要從 checked_items 扣除
-            # (這裡需要 StickerMatcher 在 match 成功時，把品項名稱綁定在 TrackedItem 上，
-            #  例如 ts.item_name = matched_item。假設你有做這個擴充：)
-            
+
             for ts in missing_stickers:
-                ts.has_notified_missing = True # 標記已通知，下一幀 Tracker 就會洗掉它
-                
-                # 舉例：如果該貼紙有綁定品項名稱，且之前是核對過的
-                if ts.is_checked and hasattr(ts, 'item_name') and ts.item_name:
-                    item_name = ts.item_name
-                    
-                    # 從記憶中移除該品項
-                    if item_name in tray.checked_items:
-                        tray.checked_items.remove(item_name)
-                    
-                    logger.info(f"[tray_state_machine] 貼紙消失 tray={tray_id}, 品項={item_name} 離開，通知前端扣減")
-                    
-                    # 發送 MQTT 給前端：塞入你說的數量 -1
-                    self.bus.publish_det_status({
-                        "tray_id": tray_id,
-                        "status": "ITEM_CHECKED",  # 或者保持 ITEM_CHECKED 但數量給負數
-                        "items": [{item_name: -1}] # 滿足前端直接加總的邏輯
-                    })
-                    
-                    # 既然餐點少拿了，狀態要從 COMPLETED 退回 WAITING_STICKERS
-                    if tray.state == TrayState.COMPLETED:
-                        tray.state = TrayState.WAITING_STICKERS
+
+                ts.has_notified_missing = True
+
+                if not ts.is_checked or not ts.item_name:
+                    continue
+
+                item_name = ts.item_name
+
+                # ---------------------------------------------
+                # checked_items 是「目前存在數」
+                # 所以實體消失一定要扣
+                # ---------------------------------------------
+                if item_name in tray.checked_items:
+                    tray.checked_items.remove(item_name)
+
+                visible_count = Counter(
+                    tray.checked_items
+                ).get(item_name, 0)
+
+                confirmed_count = tray.confirmed_counts.get(
+                    item_name, 0
+                )
+
+                logger.info(
+                    f"[tray_state_machine] 已確認餐點離開 "
+                    f"tray={tray_id}, "
+                    f"item={item_name}, "
+                    f"visible={visible_count}, "
+                    f"confirmed={confirmed_count}"
+                )
 
     def heartbeat_wrong_items(self, trays: Dict[str, Tray], heartbeat_interval: float = 1.5) -> None:
         """

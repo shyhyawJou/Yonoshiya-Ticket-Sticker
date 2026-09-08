@@ -116,7 +116,16 @@ class CommandDispatcher:
         logger.success("[SNAPSHOT] CAPTURE done.")
 
     def _on_manual_recording(self, payload: dict) -> None:
-        pass
+        m = self.manager
+        action = payload.get("action")
+        reason = payload.get("reason", "user")
+
+        if action == "start":
+            m.start_manual_recording(reason=reason)
+        elif action == "stop":
+            m.stop_manual_recording(reason=reason)
+        else:
+            logger.warning(f"[RECORD] MQTT 收到未知 action: {payload}")
 
     def _on_reset(self, payload: dict) -> None:
         m = self.manager
