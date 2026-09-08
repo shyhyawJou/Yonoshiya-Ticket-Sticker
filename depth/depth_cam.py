@@ -8,6 +8,7 @@ from queue import Queue, Empty, Full
 from threading import Thread
 import os
 from os.path import dirname
+from time import sleep
 from datetime import datetime
 from pyorbbecsdk import Config, Context, OBSensorType, Pipeline, get_version
 
@@ -16,15 +17,13 @@ from pyorbbecsdk import Config, Context, OBSensorType, Pipeline, get_version
 class ORBBEC_CAMERA:
     def __init__(self, custom_cfg):
         self.custom_cfg = custom_cfg
-        self.enable = custom_cfg['enable_camera']
+        self.enable = False
         self.stream_thread = None
         self.is_running = False
         self.is_first_frame = True
         self.is_terminated = False
         self.pipeline = None
         self.frame_q = Queue(1)
-        if not self.enable:
-            logger.warning('深度相機不會開啟, 因為 config.yaml 設定成 disable !')
 
     def get_frame(self, timeout=0.1):
         if not self.enable:
@@ -41,9 +40,6 @@ class ORBBEC_CAMERA:
     def start(self):
         if self.is_terminated:
             logger.error('這個深度相機物件已經結束, 請重新創建一個物件')
-            return
-        if not self.enable:
-            logger.error('目前 config 設定為 disable !')
             return
         self.is_running = True
         self.stream_thread = Thread(target=self._run, daemon=True)
@@ -67,9 +63,10 @@ class ORBBEC_CAMERA:
         return heatmap
 
     def _run(self):
-        self._init()
-
         try:
+            self._init()
+            self.enable = True
+
             while self.is_running:
                 frames = self.pipeline.wait_for_frames(1000)
                 if frames is None:
@@ -105,32 +102,28 @@ class ORBBEC_CAMERA:
                 self.fps_logger.log()
 
         except MyError as e:
-            logger.error(f'啟動深度相機失敗: {e}')
+            self.enable = False
+            logger.error(f'深度相機執行失敗: {e}')
         except:
-            logger.error(f'啟動深度相機失敗: {traceback.format_exc()}')
+            self.enable = False
+            logger.error(f'深度相機執行失敗: {traceback.format_exc()}')
 
     def _init(self):
-        try:
-            self.device_id = self.custom_cfg['id']
-            self.max_depth_mm = self.custom_cfg['max_depth_mm']
-            self.context = Context()
-            self.config = Config()
-            self.device = self._get_device(self.device_id)
-            self.device_info = self._get_device_info()
-            self.pipeline = Pipeline(self.device)
-            self.fps_logger = My_Logger(**self.custom_cfg)
-            self._start_stream()
-            logger.success(f'深度相機初始化完畢 !')
-            logger.info(f'\n\tpid: {self.device_info["pid"]:04x}\n'
-                        f'\tserial number: {self.device_info["serial number"]}\n'
-                        f'\tfirmware version: {self.device_info["firmware version"]}\n'
-                        f'\tsdk version: {get_version()}\n'
-                        f'\tconnection type: {self.device_info["connection type"]}\n')
-            
-        except MyError as e:
-            logger.error(f'啟動深度相機失敗: {e}')
-        except:
-            logger.error(f'啟動深度相機失敗: {traceback.format_exc()}')
+        self.device_id = self.custom_cfg['id']
+        self.max_depth_mm = self.custom_cfg['max_depth_mm']
+        self.context = Context()
+        self.config = Config()
+        self.device = self._get_device(self.device_id)
+        self.device_info = self._get_device_info()
+        self.pipeline = Pipeline(self.device)
+        self.fps_logger = My_Logger(**self.custom_cfg)
+        self._start_stream()
+        logger.success(f'深度相機初始化完畢 !')
+        logger.info(f'\n\tpid: {self.device_info["pid"]:04x}\n'
+                    f'\tserial number: {self.device_info["serial number"]}\n'
+                    f'\tfirmware version: {self.device_info["firmware version"]}\n'
+                    f'\tsdk version: {get_version()}\n'
+                    f'\tconnection type: {self.device_info["connection type"]}\n')
 
     def _get_device(self, idx=0):
         devices = self.context.query_devices()

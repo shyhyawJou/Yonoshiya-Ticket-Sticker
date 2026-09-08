@@ -325,7 +325,7 @@ class StreamManager:
                     out = np.concatenate([out, out_depth], 1)
 
                 if self.show_fps:
-                    if self.depth_cam.enable:
+                    if depth_frame is not None:
                         w = self.task.cfg.runtime.camera.width // 2
                         h = self.task.cfg.runtime.camera.height
                         cv2.putText(out, display_fps, (w - 650, h - 350), cv2.FONT_HERSHEY_SIMPLEX, 4, (194, 244, 255), 4)

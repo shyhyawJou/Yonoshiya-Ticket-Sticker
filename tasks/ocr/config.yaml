@@ -112,7 +112,6 @@ camera_params:
             type: bool
 depth_camera:
     id: 0
-    enable_camera: false
     max_depth_mm: 1200
     fps_log_interval: 5 # 秒
     log_tag: Depth
