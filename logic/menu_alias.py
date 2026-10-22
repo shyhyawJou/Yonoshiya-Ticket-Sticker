@@ -211,6 +211,7 @@ class MenuIndex:
         group_list: List[List[str]] = list(groups.values())
 
         # --- 2. 套用人工判定的 equivalents（可跨指紋，屬於人為覆寫）---
+        self._equiv_merged = 0   # 逐組明細在 DEBUG，INFO 只在下面總結行報組數
         group_list = self._merge_equivalents(group_list, order)
 
         # --- 3. 套用人工判定的 distinct：被宣告為不同的成員強制拆開 ---
@@ -242,7 +243,8 @@ class MenuIndex:
         merged = len(order) - len(self.canonical_names)
         logger.info(
             f"[menu_alias] pool={self.pool_name} 菜名 {len(order)} -> "
-            f"候選 {len(self.canonical_names)}（合併 {merged}，衝突 {len(self.conflicts)}）"
+            f"候選 {len(self.canonical_names)}（合併 {merged}，其中人工 equivalents {self._equiv_merged} 組；"
+            f"衝突 {len(self.conflicts)}）"
         )
         return self
 
@@ -277,7 +279,8 @@ class MenuIndex:
                 for moved in group_list[gi]:
                     index_of[moved] = keep
                 group_list[gi] = []
-            logger.info(
+            self._equiv_merged += 1
+            logger.debug(
                 f"[menu_alias] pool={self.pool_name} 人工 equivalents 合併: {group_list[keep]}"
             )
         return [g for g in group_list if g]

@@ -18,8 +18,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import numpy as np
 
 from logic.text_utils import FuzzyMatcher
-from logic.order_parser import OrderParser
-from logic.sticker_matcher import StickerMatcher
+from logic.szm.order_parser import OrderParser
+from logic.readers.sticker_matcher import StickerMatcher
 
 
 def box(x1, y1, x2, y2):

@@ -38,7 +38,7 @@ import numpy as np
 from loguru import logger
 
 from logic.text_utils import FuzzyMatcher
-from logic.ticket_layout import (
+from logic.szm.ticket_layout import (
     QUANTITY_RE, TicketRow, build_items, find_order_number, find_qty_column,
     parse_rows, to_legacy_items,
 )

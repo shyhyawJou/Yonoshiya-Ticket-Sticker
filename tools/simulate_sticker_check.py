@@ -30,7 +30,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 from logic.models import TrackedItem, Tray, TrayState  # noqa: E402
-from logic.sticker_matcher import StickerMatcher  # noqa: E402
+from logic.readers.sticker_matcher import StickerMatcher  # noqa: E402
 from logic.text_utils import FuzzyMatcher  # noqa: E402
 from logic.tray_state_machine import TrayStateMachine  # noqa: E402
 
@@ -110,7 +110,7 @@ def run_display_check(resolve_ticket, machine, ticket_text, qty, want_display):
     這裡鎖住「顯示只取主變體」的行為。
     """
     ticket_name = resolve_ticket(ticket_text)
-    _, display, _, alias = machine._expand_parsed_items([(ticket_name, qty)])
+    _, display, _, alias = machine.requirements.expand_parsed_items([(ticket_name, qty)])
     got = {k: v for d in display for k, v in d.items()}
     return ticket_name, got, alias
 
@@ -129,12 +129,12 @@ def run_scenario(resolve_ticket, matcher, machine, bus, ticket_text, sticker_tex
     tray = Tray(id="sim", rect=quad, xywhr=(5.0, 5.0, 10.0, 10.0, 0.0), ticket_crop=None)
     tray.ticket = TrackedItem(bbox=quad, xywhr=(5.0, 5.0, 10.0, 10.0, 0.0))
 
-    items, display, combos, report_alias = machine._expand_parsed_items([(ticket_name, 1)])
+    items, display, combos, report_alias = machine.requirements.expand_parsed_items([(ticket_name, 1)])
     tray.expected_items = items
     tray.expected_items_display = display
     tray.report_alias = report_alias
     tray.ticket.contributed_combos = combos
-    machine._recompute_expected_combos(tray)
+    machine.requirements.recompute_expected_combos(tray)
     tray.state = TrayState.WAITING_STICKERS
 
     results = []
@@ -144,7 +144,7 @@ def run_scenario(resolve_ticket, matcher, machine, bus, ticket_text, sticker_tex
         )
         ts = TrackedItem(bbox=quad, xywhr=(5.0, 5.0, 10.0, 10.0, 0.0))
         tray.stickers.append(ts)
-        machine._settle_sticker_match(tray, tray.id, ts, matched, status)
+        machine.sticker_reader.settle(tray, tray.id, ts, matched, status)
         results.append((text, matched, status))
 
     if verbose:
@@ -235,7 +235,7 @@ def main() -> int:
     mode = "legacy（改動前）" if args.legacy else "current（改動後）"
     print(f"\n模式：{mode}")
     print(f"菜單：傳票候選 {len(cfg.menus_ticket)} / 貼紙候選 {len(machine.sticker_matcher.menus_sticker)} "
-          f"/ 多變體傳票名 {sum(1 for v in machine.menu_variants.values() if len(v) > 1)}\n")
+          f"/ 多變體傳票名 {sum(1 for v in machine.requirements.menu_variants.values() if len(v) > 1)}\n")
 
     failed = 0
     for i, (desc, ticket, stickers, want_status, want_completed) in enumerate(SCENARIOS, 1):

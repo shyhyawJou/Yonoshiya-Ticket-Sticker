@@ -17,6 +17,7 @@ from utils.clip_video import Clip, PeriodicClipRecorder
 from utils.frame_writer import AsyncFrameWriter
 from utils import clock_guard
 from utils.disk_guard import DiskGuard
+from utils.perf_stats import LOOP_PROFILER, ocr_done_line
 
 from stream_vision.streamer import Mjpeg_Streamer
 from depth import ORBBEC_CAMERA
@@ -457,6 +458,10 @@ class StreamManager:
                 break
 
             try:
+                # 每段耗時 (ms)，彙總成每 60 秒一行的 [效能]（utils/perf_stats.py）
+                t_loop = t_prev = time.perf_counter()
+                stage = {}
+
                 if self.camera_alone:
                     frame = camera.get_frame(timeout=1.0)
                     if frame is None:
@@ -467,10 +472,12 @@ class StreamManager:
                     if not ok:
                         logger.error("Failed to capture frame.")
                         break
+                t_now = time.perf_counter(); stage["camera"] = 1000 * (t_now - t_prev); t_prev = t_now
 
                 # 深度相機
                 depth_frame = depth_cam.get_frame(timeout=0.1)
-                
+                t_now = time.perf_counter(); stage["depth"] = 1000 * (t_now - t_prev); t_prev = t_now
+
                 record_frame = cv2.resize(frame, self.video_record_size)
                 now_ts = time.time()
                 # 經過時間一律用 monotonic：跳電後 RTC 回到預設時間、chrony 校時把時鐘
@@ -482,9 +489,15 @@ class StreamManager:
                 # self.continuous_recorder.feed(record_frame, now_ts) # 時間內持續寫入影片
                 self._check_event_record_timeout(mono_ts) # 檢查事件觸發錄影是否超時 (10分鐘)
                 self._schedule_orphan_scan(mono_ts) # 檢查有沒有壞檔, 有的話嘗試補救
+                t_now = time.perf_counter(); stage["record"] = 1000 * (t_now - t_prev); t_prev = t_now
 
                 for ocr_result in task_ctx.drain_ocr_results():
                     metadata = ocr_result["metadata"]
+                    drained_mono = time.monotonic()
+                    # 數量欄 rec 在 apply 裡面（主執行緒）跑，前後相減才知道這次用了幾次
+                    rec_pred = getattr(logic, "rec_pred", None)
+                    qty0 = (getattr(rec_pred, "prof_calls", 0), getattr(rec_pred, "prof_ms", 0.0))
+                    t_apply = time.perf_counter()
                     with self.data_lock:
                         self.ocr_data = ocr_result
                         logic.apply_ocr_result(
@@ -494,13 +507,26 @@ class StreamManager:
                             dt_boxes=ocr_result["dt_boxes"],
                             rec_res=ocr_result["rec_res"],
                             is_flip=ocr_result["is_flip"],
-                            task_bbox=metadata["bbox"]
+                            task_bbox=metadata["bbox"],
+                            target=metadata.get("target"),
                         )
                         # 傳票的菜單區域下界（吉野家 parser 才有），跟著這份 OCR 結果給 overlay 畫
                         pop_line = getattr(logic.order_parser, "pop_menu_bottom_line", None)
                         ocr_result["menu_bottom_line"] = pop_line() if pop_line else None
+                    apply_ms = 1000 * (time.perf_counter() - t_apply)
+                    logger.info(ocr_done_line(
+                        metadata, drained_mono, apply_ms,
+                        getattr(rec_pred, "prof_calls", 0) - qty0[0],
+                        getattr(rec_pred, "prof_ms", 0.0) - qty0[1],
+                    ))
+                    trace = metadata.get("trace") or {}
+                    if trace.get("start_mono") is not None and trace.get("end_mono") is not None:
+                        LOOP_PROFILER.add_ocr(1000 * (trace["end_mono"] - trace["start_mono"]))
+                t_now = time.perf_counter(); stage["apply"] = 1000 * (t_now - t_prev); t_prev = t_now
 
                 out, detections = mmr.detect(frame, self.show_box)
+                stage.update(getattr(mmr, "last_timing", None) or {})
+                t_prev = time.perf_counter()
 
                 # preset_roi 自動校正：只在開機後那一小段（或收到 action=auto）
                 # 期間會真的做事，定案/逾時之後 is_active 就永遠是 False，
@@ -509,6 +535,7 @@ class StreamManager:
 
                 with self.data_lock:
                     tasks, movements = logic.update(frame, detections)
+                t_now = time.perf_counter(); stage["logic"] = 1000 * (t_now - t_prev); t_prev = t_now
 
                 for task in tasks:
                     if not ocr.is_busy:
@@ -527,15 +554,24 @@ class StreamManager:
                             "M": M,
                             "M_inv": M_inv,
                             "bbox": task["bbox"],
-                            "cls_name": task['cls_name']
+                            "cls_name": task['cls_name'],
+                            # 計時：出現時間、移動重置次數、第幾次讀取；OCR 線程再補上
+                            # 送出 / 開始 / 結束時間與各段耗時（utils/perf_stats.py）
+                            "trace": dict(task.get("trace") or {}),
+                            # 被讀的那個追蹤物件本身：標記 OCR 中、套用結果都認它，
+                            # 不靠框重疊去找（疊在一起的貼紙會配錯，見 logic/readers/base.py::find_task_item）。
+                            # OCR 線程不碰它，只是跟著結果帶回主迴圈
+                            "target": task.get("target"),
                         }
 
                         ocr.request_ocr(frame_crop=warped_img, metadata=metadata)
 
                         with self.data_lock:
-                            logic.set_ocr_busy(tray_id=task["tray_id"], item_type=task["type"], bbox=task["bbox"])
+                            logic.set_ocr_busy(tray_id=task["tray_id"], item_type=task["type"], bbox=task["bbox"],
+                                               target=task.get("target"))
 
                         break
+                t_now = time.perf_counter(); stage["dispatch"] = 1000 * (t_now - t_prev); t_prev = t_now
 
                 current_1 = time.time()
                 fps_counter += 1
@@ -576,6 +612,10 @@ class StreamManager:
                     self.streamer.push_frame(stream_out)
                 else:
                     self.streamer.push_frame(out)
+
+                t_now = time.perf_counter(); stage["overlay"] = 1000 * (t_now - t_prev)
+                LOOP_PROFILER.add_frame(stage, 1000 * (t_now - t_loop))
+                LOOP_PROFILER.maybe_report()
 
             except Exception:
                 logger.error(traceback.format_exc())
@@ -741,7 +781,6 @@ def main():
         level='INFO',
         rotation="00:00"
     )
-    clock_guard.report(clock_ok, clock_waited)
 
     import argparse
     parser = argparse.ArgumentParser()
@@ -749,6 +788,10 @@ def main():
     task = parser.parse_args().profile or "ocr"
     # 目前僅供人工辨識：StreamManager 沒有用這個參數，也沒有經 MQTT 對外發布
     version = "3.3.1"
+
+    # 一次開機的起點，log 裡往上找這行就是這一輪的開頭（模型檔名見後面的 [dla_guard]）
+    logger.info(f"{'=' * 20} [程式啟動] v{version} task={task} pid={os.getpid()} {'=' * 20}")
+    clock_guard.report(clock_ok, clock_waited)
 
     manager = None
 
@@ -773,6 +816,7 @@ def main():
                 manager.cleanup()
             except Exception as e:
                 logger.error(f"Cleanup 失敗: {e}")
+        logger.info(f"{'=' * 20} [程式結束] v{version} pid={os.getpid()} {'=' * 20}")
 
 if __name__ == "__main__":
     main()

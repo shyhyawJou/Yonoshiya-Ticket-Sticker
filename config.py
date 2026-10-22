@@ -354,7 +354,7 @@ class Config:
     sticker_index: Optional["MenuIndex"] = None
     # menu_aliases.yaml 的 distinct 台帳：人工判定「這兩個寫法不是同一道菜」。
     # 除了阻止等價層合併，也用來否決狀態機「同名多變體 -> 自動視為異寫」的
-    # 推論（見 TrayStateMachine._expand_parsed_items）。
+    # 推論（見 OrderRequirements.expand_parsed_items）。
     menu_distinct: List[List[str]] = field(default_factory=list)
     # 傳票修飾列台帳（menu_modifiers.yaml + 共用的 ja_ticket_grammar.yaml）。
     # 認出「変更しじみ汁」這種「改上一列」的列，並把被換掉的槽位從套餐的

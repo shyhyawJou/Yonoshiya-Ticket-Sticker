@@ -12,6 +12,7 @@ from loguru import logger
 from utils.mqtt_bus import MqttBus
 from utils.schema import Detection
 from utils.csv_writer import CsvWriter
+from utils.perf_stats import LOOP_PROFILER
 
 from config import Config, OrderGuardCfg
 from ocr_engine import StandaloneRecDLA
@@ -22,8 +23,8 @@ from logic.geometry import PolygonXYXY
 from logic.text_utils import normalize_text, FuzzyMatcher
 
 # === Step 2 重構：訂單解析 / 貼紙比對 ===
-from logic.order_parser import OrderParser
-from logic.sticker_matcher import StickerMatcher
+from logic.yoshinoya.order_parser import OrderParser
+from logic.readers.sticker_matcher import StickerMatcher
 
 # === Step 3 重構：tray 資料結構 / 追蹤 / 狀態機 ===
 from logic.models import Tray, TrayState, TrackedItem  # noqa: F401  (對外相容：舊呼叫端可能 import 這些名稱)
@@ -32,6 +33,22 @@ from logic.tray_tracker import TrayTracker
 from logic.single_order_tracker import SingleOrderTracker
 from logic.preset_roi_tracker import PresetRoiTracker
 from logic.tray_state_machine import TrayStateMachine
+
+# [訂單開始] / [訂單結束] 的「第 N 筆」：當天的流水號，日期一換（跟 log 每天換檔同一個時間點）
+# 就從 1 重來，每天的 log 檔都從第 1 筆開始。號碼在訂單開始時決定並記在 Tray 上，跨過半夜的
+# 那筆，結束那行仍印開始時的號碼，兩行照樣配得起來。放在模組層級，切換模式重建 LogicEngine
+# 時號碼接續、不會重來。
+# AI box 斷電後時鐘會先回到舊日期、等 chrony 校時再跳回來，那天號碼會多重來一次；
+# 這個號碼只用在 log，CSV / MQTT 都不用，接受。
+_order_seq = {"date": None, "n": 0}
+
+
+def _next_order_seq() -> int:
+    today = time.strftime("%Y%m%d")
+    if today != _order_seq["date"]:
+        _order_seq["date"], _order_seq["n"] = today, 0
+    _order_seq["n"] += 1
+    return _order_seq["n"]
 
 
 class LogicEngine:
@@ -108,12 +125,13 @@ class LogicEngine:
         )
 
         # 訂單 OCR 解析 / 貼紙比對：穩定層，與 tray 概念解耦
+        # 傳票解析器依品牌（ticket_parser）：吉野家 legacy 是預設，Suzumo 的 table 才載入 szm 那份
         parser_class = OrderParser
-        parser_options = {"vocab_ticket": self.vocab_ticket or None}
-        if cfg.ticket_parser == "legacy":
-            from logic.order_parser_yoshinoya import OrderParser as LegacyParser
-            parser_class = LegacyParser
-            parser_options = {"menu_index": self.ticket_index}
+        parser_options = {"menu_index": self.ticket_index}
+        if cfg.ticket_parser == "table":
+            from logic.szm.order_parser import OrderParser as TableParser
+            parser_class = TableParser
+            parser_options = {"vocab_ticket": self.vocab_ticket or None}
         self.order_parser = parser_class(
             menus_ticket=self.menus_ticket,
             menus_with_digits=self.menus_with_digits,
@@ -262,16 +280,23 @@ class LogicEngine:
     # tracker 重置一律換全新的 Tray（不逐欄清），對 App 的事件也由 tracker 發：
     #   single / preset_roi：每次重置發 TRAY_RESET + WAITING_TICKET，收尾再加 TRAY_REMOVED
     #   tray：reset a / all 刪掉 tray、reset b 換新 Tray，都不發事件；收尾刪 tray 並發 TRAY_REMOVED
+    #
+    # log 的訂單邊界也在這一區：tray 第一次看到傳票時印 [訂單開始]（_mark_order_starts），
+    # 上面每一種結束 / 重置都印 [訂單結束]（_log_order_end），兩行之間就是這筆訂單的全部 log。
     # ------------------------------------------------------------
     def reset(self, tray_id: str):
+        # single 模式只有一筆訂單，a / b / all 結果相同（見 SingleOrderTracker.reset）
+        self._end_open_orders(f"App reset a ({tray_id})", None if self.mode != "tray" else [tray_id])
         self.tracker.reset(tray_id)
         self.on_recording_stop(reason=f"reset:{tray_id}")
 
     def reset_all(self):
+        self._end_open_orders("App reset all")
         self.tracker.reset_all()
         self.on_recording_stop(reason="reset_all")
 
     def reset_tray_states(self, tray_id: str):
+        self._end_open_orders(f"App reset b ({tray_id})", None if self.mode != "tray" else [tray_id])
         self.tracker.reset_tray_states(tray_id)
         self.on_recording_stop(reason=f"reset_tray_states:{tray_id}")
 
@@ -287,7 +312,41 @@ class LogicEngine:
         本來就會重新收到狀態），只把事件錄影停掉 —— 不停的話，新的 LogicEngine
         不知道有這支影片，會一路錄到 app.py 的 watchdog 才停。
         """
+        self._end_open_orders(f"切換模式 ({reason})")
         self.on_recording_stop(reason=reason)
+
+    def _mark_order_starts(self) -> None:
+        """[訂單開始]：tray 第一次出現傳票（ticket_mat 模式是護貝板被遮住且有傳票）。
+
+        刻意不等 TICKET_READY：傳票 OCR、解析、讀失敗重讀都屬於這筆訂單，要落在
+        開始與結束之間。沒讀出內容就結束的（手擦過、傳票只是經過）會在結束那行
+        標成「無內容」。
+        """
+        for tray_id, tray in self.trays.items():
+            if tray.order_seq is None and (tray.ticket is not None or tray.order_session_active):
+                tray.order_seq = _next_order_seq()
+                tray.order_begin_mono = time.monotonic()
+                tray.perf_start = LOOP_PROFILER.snapshot()
+                logger.info(f"{'=' * 12} [訂單開始] 第 {tray.order_seq} 筆 tray={tray_id} {'=' * 12}")
+
+    def _log_order_end(self, tray_id: str, tray, reason: str, result: str) -> None:
+        """[訂單結束]，只給印過 [訂單開始] 的 tray（兩行永遠成對）"""
+        if tray.order_seq is None:
+            return
+        elapsed = time.monotonic() - tray.order_begin_mono if tray.order_begin_mono else 0.0
+        perf = LOOP_PROFILER.since(tray.perf_start)
+        logger.info(
+            f"{'=' * 12} [訂單結束] 第 {tray.order_seq} 筆 tray={tray_id} 單號={tray.order_number} "
+            f"原因={reason} 結果={result} 歷時 {elapsed:.1f}s" + (f"｜{perf}" if perf else "")
+            + f" {'=' * 12}"
+        )
+        tray.order_seq = None   # 同一個 Tray 物件不會再印第二次結束
+
+    def _end_open_orders(self, reason: str, tray_ids=None) -> None:
+        """reset / 切換模式：進行中的訂單不寫 CSV，直接收掉"""
+        for tray_id, tray in list(self.trays.items()):
+            if tray_ids is None or tray_id in tray_ids:
+                self._log_order_end(tray_id, tray, reason, "中止（未寫 CSV）")
 
     def refresh_preset_roi(self) -> None:
         """
@@ -316,9 +375,9 @@ class LogicEngine:
 
         logger.info(f"[ROI] tracker 的 ticket_roi 已更新為 {polygon}")
 
-    def set_ocr_busy(self, tray_id: str, item_type: str, bbox: PolygonXYXY):
-        """由 app.py 確認已將任務送給 OCR 後呼叫，正式鎖定狀態"""
-        self.state_machine.set_ocr_busy(self.trays, tray_id, item_type, bbox)
+    def set_ocr_busy(self, tray_id: str, item_type: str, bbox: PolygonXYXY, target=None):
+        """由 app.py 確認已將任務送給 OCR 後呼叫，正式鎖定狀態。target = task["target"]"""
+        self.state_machine.set_ocr_busy(self.trays, tray_id, item_type, bbox, target)
 
     # ------------------------------------------------------------
     # 主要流程
@@ -354,6 +413,7 @@ class LogicEngine:
 
         self.tracker.update_tray_positions(tray_dets, ts_utc)
         self.tracker.update_ticket_and_stickers(ticket_dets, sticker_dets, ticket_mat_dets)
+        self._mark_order_starts()
         
         # ========================================================
         # 3. 【核心修改：觸發貼紙消失處理】
@@ -381,18 +441,21 @@ class LogicEngine:
         rec_res: list,
         is_flip: bool,
         task_bbox: PolygonXYXY,
+        target=None,
     ):
         """
         1. 處理 OCR 結果
         2. 檢查 tray盤狀態
         3. 發布 mqtt 訊息
+        target = 送出時 task["target"]（被讀的那個追蹤物件），沒有就退回用 task_bbox 找
         """
         self.state_machine.apply_ocr_result(
             self.trays, tray_id, item_type, frame_crop, dt_boxes, rec_res, is_flip, task_bbox,
+            target=target,
         )
 
         # === single 模式專屬修正 ===
-        # TrayStateMachine._apply_ticket_result 解析失敗時，只會把
+        # TicketReader.apply_ticket_result 解析失敗時，只會把
         # stable_frames 歸零、state 打回 WAITING_TICKET，並不會把
         # tray.ticket 設回 None（這在 tray 模式下沒問題，因為前端本來
         # 就不是靠「ticket 被鎖定」這件事拿到觸發訊號）。
@@ -470,7 +533,12 @@ class LogicEngine:
         tray = self.trays[tray_id]
 
         if self._has_order_content(tray):
-            self.csv.log(self._build_csv_row(tray_id, tray, frame, ts_utc))
+            row = self._build_csv_row(tray_id, tray, frame, ts_utc)
+            self.csv.log(row)
+            result = row["final_status"]
+            for key, label in (("missing_item", "缺"), ("wrong_item", "錯誤")):
+                if row[key]:
+                    result += f" {label} {row[key]}"
         else:
             # 空殼收尾：照樣重置 tray，但不寫 CSV
             logger.warning(
@@ -478,12 +546,23 @@ class LogicEngine:
                 f"(單號/應有/已核對/錯誤品項全空)，不寫入 CSV。"
                 f"start={tray.start_time_str} end={ts_utc}"
             )
+            result = "無內容（未寫 CSV）"
+        self._log_order_end(tray_id, tray, self._finish_reason(timed_out), result)
 
         self.remove_tray(tray_id, ts_utc)
 
         # 一定要在 remove_tray 之後：remove_tray 會經過 reset_tray_states，那裡會把閘門打開
         if timed_out:
             self.tracker.hold_tickets_until_clear(tray_id)
+
+    def _finish_reason(self, timed_out: bool) -> str:
+        if timed_out:
+            return "超時"
+        if self.mode == "tray":
+            return "tray 消失"
+        return {"ticket_mat": "護貝板露出", "ticket_leave": "傳票離開"}.get(
+            getattr(self.tracker, "finalize_mode", None), "收尾"
+        )
 
     def _build_csv_row(self, tray_id: str, tray, frame: np.ndarray, ts_utc: str) -> dict:
         """把一筆結束的訂單整理成 CSV 的一列（欄位見 utils/csv_writer.py）"""
@@ -506,11 +585,11 @@ class LogicEngine:
         # 收尾一定發生在扣完之後 —— 用它記帳就會寫出 final_status=OK 卻
         # 同時列出缺少品項的矛盾紀錄。
         # confirmed_counts 是只增不減的歷史最高確認數（見
-        # TrayStateMachine._update_confirmed_count），也是 TRAY_COMPLETED /
+        # OrderRequirements.update_confirmed_count），也是 TRAY_COMPLETED /
         # resolve_wrong_item_removal 判斷完成用的同一份依據，CSV 跟著用
         # 同一份，報表才不會跟前端看到的結果打架。
         # 再取跟當下 checked 的逐項最大值（Counter 的 | 是逐項 max），
-        # 純粹是保險：任何沒走 _update_confirmed_count 的路徑（例如
+        # 純粹是保險：任何沒走 update_confirmed_count 的路徑（例如
         # confirmed 被 expected 上限夾住）都不會讓收尾少算。
         achieved_counts = Counter(tray.confirmed_counts) | Counter(tray.checked_items)
 

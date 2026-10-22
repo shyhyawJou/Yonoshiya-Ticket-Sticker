@@ -151,7 +151,7 @@ def encode_frames_to_video(save_dir, video_path, csv_path, fps, bitrate, tag='',
             '-num_capture_buffers', '32',
             str(video_path),
         ]
-        logger.info(f'ffmpeg command: {cmd}')
+        logger.debug(f'ffmpeg command: {cmd}')
 
         logger.info(f'[{tag}] start encoding video: {video_path} (fps={fps:.2f}) ...')
         # start_new_session=True 把 ffmpeg 放到自己的 process group / session。

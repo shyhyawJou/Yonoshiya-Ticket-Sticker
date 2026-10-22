@@ -217,7 +217,9 @@ class TrayTracker:
             shift = center_shift_ratio(item.bbox, new_bbox)
             if shift > self.still_shift_ratio:
                 if item.stable_frames > 0:
-                    logger.info(
+                    # 逐次明細在 DEBUG；次數記在 item 上，併進 [OCR#n ■] 那行的「移動重置 N 次」
+                    item.still_resets += 1
+                    logger.debug(
                         f"[still] {label} 累積 {item.stable_frames} 幀後移動"
                         f"（位移 {shift:.1%} > {self.still_shift_ratio:.1%}），穩定幀數歸零"
                     )

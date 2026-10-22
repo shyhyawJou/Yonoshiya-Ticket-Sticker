@@ -373,7 +373,7 @@ class HikCamera:
 
         # command or config
         if from_cmd:
-            logger.info('=' * 25 + ' Set Camera Parameter by [command]' + '=' * 25)
+            logger.debug('=' * 25 + ' Set Camera Parameter by [command]' + '=' * 25)
             msg = params
             name = msg['control']
             info = self.cfg.camera_params['hik'].get(name)
@@ -384,7 +384,7 @@ class HikCamera:
             params[name]['value'] = msg['value']
             logger.debug(f'new camera parameter: {params}')
         else:
-            logger.info('=' * 25 + ' Set Camera Parameter by [config]' + '=' * 25)
+            logger.debug('=' * 25 + ' Set Camera Parameter by [config]' + '=' * 25)
             params = self.cfg.camera_params['hik']
 
         # set
@@ -411,11 +411,19 @@ class HikCamera:
             set_success[name] = (ret == 0)
 
             if ret == 0:
-                logger.success(f'Set [{name}] to {value} !')
+                logger.debug(f'Set [{name}] to {value} !')
             else:
                 logger.warning(f'Set camera parameter [{name}] failed ! ret[0x{ret:x}]')
 
-        logger.info('=' * 60)
+        logger.debug('=' * 60)
+        # 逐項明細在 DEBUG（要看就把 app.py 檔案 sink 的 level 調成 DEBUG），
+        # INFO 只留一行總結；失敗的參數上面已經各自 WARNING 過
+        failed = [n for n, ok in set_success.items() if not ok]
+        logger.info(
+            f"[相機參數] 來源={'command' if from_cmd else 'config'} 設定 {len(set_success)} 項"
+            f"（失敗 {len(failed)}{': ' + ', '.join(failed) if failed else ''}）: "
+            + ', '.join(f"{n}={i['value']}" for n, i in params.items())
+        )
 
         # 印出所有相機參數和有效的範圍值
         if display:
@@ -463,7 +471,7 @@ class HikCamera:
 
         result = {}
 
-        logger.info('=' * 25 + f' Camera Parameter Range ' + '=' * 25)
+        logger.debug('=' * 25 + f' Camera Parameter Range ' + '=' * 25)
 
         for name, info in params.items():
             typ = info['type']
@@ -473,7 +481,7 @@ class HikCamera:
                 ret = self.cam.MV_CC_GetFloatValue(name, val)
                 if ret == 0:
                     data = {'cur': val.fCurValue, 'min': val.fMin, 'max': val.fMax}
-                    logger.info(f"[{name}] cur={data['cur']}, min={data['min']}, max={data['max']}")
+                    logger.debug(f"[{name}] cur={data['cur']}, min={data['min']}, max={data['max']}")
                 else:
                     data = None
                     logger.warning(f"cannot read parameter [{name}], ret[0x{ret:x}]")
@@ -483,7 +491,7 @@ class HikCamera:
                 ret = self.cam.MV_CC_GetIntValueEx(name, val)
                 if ret == 0:
                     data = {'cur': val.nCurValue, 'min': val.nMin, 'max': val.nMax, 'step': val.nInc}
-                    logger.info(
+                    logger.debug(
                         f"[{name}] cur={data['cur']}, min={data['min']}, "
                         f"max={data['max']}, step={data['step']}"
                     )
@@ -496,7 +504,7 @@ class HikCamera:
                 ret = self.cam.MV_CC_GetBoolValue(name, val)
                 if ret == 0:
                     data = {'cur': val.value}
-                    logger.info(f"[{name}] cur={data['cur']}")
+                    logger.debug(f"[{name}] cur={data['cur']}")
                 else:
                     data = None
                     logger.warning(f"cannot read parameter [{name}], ret[0x{ret:x}]")
@@ -507,7 +515,7 @@ class HikCamera:
                 if ret == 0:
                     supported = list(val.nSupportValue[:val.nSupportedNum])
                     data = {'cur': val.nCurValue, 'supported': supported}
-                    logger.info(f"[{name}] cur={data['cur']}, supported={data['supported']}")
+                    logger.debug(f"[{name}] cur={data['cur']}, supported={data['supported']}")
                 else:
                     data = None
                     logger.warning(f"cannot read parameter [{name}], ret[0x{ret:x}]")
@@ -518,7 +526,7 @@ class HikCamera:
 
             result[name] = data
 
-        logger.info('=' * 78)
+        logger.debug('=' * 78)
         return result
 
     def list_all_camera_parameters(self, xml_path='./camera_features.xml'):
@@ -543,7 +551,7 @@ class HikCamera:
             return {}
 
         names = self._parse_param_names(xml_path)
-        logger.info(f"found {len(names)} candidate parameter names")
+        logger.debug(f"found {len(names)} candidate parameter names")
 
         if not names:
             logger.warning("no parameter name parsed, check file format manually")
@@ -555,9 +563,9 @@ class HikCamera:
             if typ:
                 params[name] = {'type': typ}
             else:
-                logger.warning(f"cannot resolve type for parameter [{name}], skip")
+                logger.debug(f"cannot resolve type for parameter [{name}], skip")
 
-        logger.info(f"resolved {len(params)} / {len(names)} parameters with known type")
+        logger.debug(f"resolved {len(params)} / {len(names)} parameters with known type")
 
         return self.display_camera_parameters(params)
 

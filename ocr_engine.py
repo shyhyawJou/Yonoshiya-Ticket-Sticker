@@ -17,6 +17,7 @@ from utils.skew_corrector import affine_to_homogeneous, rotate90_cw_matrix, rota
 current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
 from AI import PaddleOCR_Det, PaddleOCR_Cls, PaddleOCR_Rec
 from utils import dla_guard
+from utils.perf_stats import ocr_begin_line
 from logic.orientation import (
     AREA_RATIO_THRESHOLD as ORIENT_AREA_THRESHOLD,
     VERTICAL_ASPECT as ORIENT_VERTICAL_ASPECT,
@@ -156,7 +157,21 @@ class TextSystemDLA:
         self.orient_ambiguous_area_ratio = 0.5  # 方向不明的框需佔總面積多少才啟動補救
         self.orient_retry_conf_thresh = 1.0     # 原樣/轉180 的最佳信心低於此值, 才再比順轉/逆轉 90
 
+        self._prof_reset()
         logger.info("模型初始化完成。")
+
+    def _prof_reset(self):
+        """
+        這次讀取的計時（utils/perf_stats.py 的 [OCR#n ■] 那行）。det / rec 的次數不固定：
+        轉 90、翻 180 會重跑 det，正方形貼紙會讀 2~4 個方向的 rec，所以次數跟耗時一起記，
+        DLA 推論（model.run）另外拆出來，才分得出慢在模型還是 Python 的前後處理。
+        """
+        self.prof = {
+            "path": [],
+            "det_n": 0, "det_ms": 0.0, "det_pre_ms": 0.0, "det_infer_ms": 0.0,
+            "cls_n": 0, "cls_ms": 0.0,
+            "rec_rounds": 0, "rec_boxes": 0, "rec_ms": 0.0, "rec_infer_ms": 0.0,
+        }
 
     def _save_debug_image(self, img, filename):
         """儲存 debug 圖片"""
@@ -476,6 +491,7 @@ class TextSystemDLA:
     def run_det(self, img):
         """執行文字檢測 (DLA 版)"""
         st1 = time.time()
+        st1_pc = time.perf_counter()
         ori_im = img.copy()
         data, shape = self._det_preprocess(ori_im)
         if data is None:
@@ -483,7 +499,10 @@ class TextSystemDLA:
 
         # DLA 推論
         input_data = np.expand_dims(data, axis=0).astype(np.float16) 
+        t_inf = time.perf_counter()
+        self.prof["det_pre_ms"] += 1000 * (t_inf - st1_pc)   # resize 到 640x640 + 正規化
         flat_output = self.det_model.run(input_data)
+        self.prof["det_infer_ms"] += 1000 * (time.perf_counter() - t_inf)
         pred = flat_output.reshape(1, self.det_image_shape[0], self.det_image_shape[1], 1)
         
         # 後處理
@@ -494,6 +513,8 @@ class TextSystemDLA:
             dt_boxes = self.filter_tag_det_res(dt_boxes, ori_im.shape)
 
         et1 = time.time()
+        self.prof["det_n"] += 1
+        self.prof["det_ms"] += 1000 * (et1 - st1)
         return dt_boxes, et1 - st1
 
 
@@ -555,6 +576,8 @@ class TextSystemDLA:
                 flip_count += 1
         
         et2 = time.time()
+        self.prof["cls_n"] += img_num
+        self.prof["cls_ms"] += 1000 * (et2 - st2)
         return img_list, cls_res, flip_count, et2 - st2
 
     def _decide_flip(self, img_crop_list, cls_res, min_aspect=3.0):
@@ -715,7 +738,9 @@ class TextSystemDLA:
             norm_img = np.expand_dims(norm_img, axis=0).astype(np.float16)
 
             # DLA 推論
+            t_inf = time.perf_counter()
             flat_output = self.rec_model.run(norm_img)
+            self.prof["rec_infer_ms"] += 1000 * (time.perf_counter() - t_inf)
             # preds = flat_output.reshape(1, 40, 4401)
             preds = flat_output.reshape(1, 40, -1)
 
@@ -725,6 +750,9 @@ class TextSystemDLA:
             rec_res[idx] = rec_result[0]
 
         et3 = time.time()
+        self.prof["rec_rounds"] += 1
+        self.prof["rec_boxes"] += img_num
+        self.prof["rec_ms"] += 1000 * (et3 - st3)
         return rec_res, et3 - st3
 
     def _check_boxes_need_rotate_90(self, dt_boxes, ratio_thresh=1.4, vertical_ratio=None):
@@ -941,10 +969,12 @@ class TextSystemDLA:
         if not unanimous:
             # 票數分歧時 cls 的結論不可靠,兩個方向都讀過、比辨識信心決定方向;
             # 之後照一般流程讀(翻轉就重跑 det + cls)
+            self.prof["path"].append("翻轉比對")
             is_flip = self._decide_flip_by_rec(ori_im, raw_dt_boxes, obj_type)
 
         # 4. 若偵測到翻轉，旋轉影像 180 度後重新執行偵測與識別
         if is_flip:
+            self.prof["path"].append("轉180重讀")
             rotated_im = cv2.rotate(ori_im, cv2.ROTATE_180)
 
             dt_boxes, _ = self.run_det(rotated_im)
@@ -1013,6 +1043,7 @@ class TextSystemDLA:
         best = max(cands, key=lambda c: self._mean_rec_conf(c[1]))
 
         if self._mean_rec_conf(best[1]) < self.orient_retry_conf_thresh:
+            self.prof["path"].append("含90度")
             rotated_im = cv2.rotate(ori_im, cv2.ROTATE_90_CLOCKWISE)
             r_dt_boxes, _ = self.run_det(rotated_im)
             if len(r_dt_boxes) > 0:
@@ -1034,6 +1065,7 @@ class TextSystemDLA:
     def predict(self, image_input, obj_type="unknown"):
         """主要預測流程"""
         st = time.time()
+        self._prof_reset()
 
         ori_im = image_input.copy()
         img_to_detect = ori_im
@@ -1048,6 +1080,7 @@ class TextSystemDLA:
 
         # 1.5 檢查是否整張圖被轉成 90 / 270 度（大量直式文字框）
         if self._check_boxes_need_rotate_90(dt_boxes):
+            self.prof["path"].append("轉90")
             ori_im = cv2.rotate(ori_im, cv2.ROTATE_90_CLOCKWISE)
             is_rotated_90 = True
 
@@ -1061,6 +1094,7 @@ class TextSystemDLA:
         # 1.6 方向補救：框近乎正方形（幾何無解）時，四個方向都讀過、取信心最高者。
         #     是否落在正方形區間要用「轉正前」的框判斷。
         if self._orientation_is_ambiguous(dt_boxes):
+            self.prof["path"].append("正方形多向")
             rec_res, dt_boxes, is_flip, is_rotated_90 = self._predict_ambiguous(
                 ori_im, dt_boxes, obj_type
             )
@@ -1079,6 +1113,10 @@ class StandaloneRecDLA:
 
         self.rec_image_shape = rec_image_shape
         self.count = 0
+        # 從開機起累計的呼叫次數 / 耗時；app.py 在 apply_ocr_result 前後相減，
+        # 印在 [OCR#n ■ ticket] 那行的「數量欄 rec」
+        self.prof_calls = 0
+        self.prof_ms = 0.0
         self.rec_model = dla_guard.load(PaddleOCR_Rec, rec_path, "數量欄 rec (standalone)")
 
         # 載入字典
@@ -1184,6 +1222,7 @@ class StandaloneRecDLA:
         """
         傳入單張事先裁切好的圖片
         """
+        t_prof = time.perf_counter()
         if not nn_x:
             if not is_flip:
                 dt_box[0][0] -= 35
@@ -1237,10 +1276,13 @@ class StandaloneRecDLA:
         decode_out = self._decode(preds_idx, preds_prob)
 
         self.count += 1
+        self.prof_calls += 1
+        self.prof_ms += 1000 * (time.perf_counter() - t_prof)
 
         return decode_out
 
     def predict_quantity(self, frame_crop: np.ndarray, cx: float, cy: float, h: float, w: float, is_flip: bool):
+        t_prof = time.perf_counter()
         half_h = int(h / 2 * 1.1)
         half_w = int(w / 2 * 1.0)
         cx = int(cx) + 10  # 往右偏移
@@ -1282,6 +1324,8 @@ class StandaloneRecDLA:
 
         decode_out = self._decode(preds_idx, preds_prob)
         self.count += 1
+        self.prof_calls += 1
+        self.prof_ms += 1000 * (time.perf_counter() - t_prof)
 
         return decode_out
 
@@ -1304,6 +1348,7 @@ class AsyncOCR:
         
         self.result_callback = result_callback
         self.worker_thread = None
+        self._job_seq = 0   # [OCR#n] 的 n，本次開機的流水號
 
     @property
     def is_busy(self):
@@ -1334,6 +1379,8 @@ class AsyncOCR:
             if self._busy:
                 return False 
             self._busy = True
+        if metadata is not None:
+            metadata.setdefault("trace", {})["req_mono"] = time.monotonic()
         try:
             self.input_queue.put((frame_crop.copy(), metadata), block=False)
             return True
@@ -1351,8 +1398,16 @@ class AsyncOCR:
                 from logic.ocr_routing import backend_for
                 backend = backend_for(self.ocr_routes, metadata['type'])
                 metadata['text_backend'] = backend
+                self._job_seq += 1
+                trace = metadata.setdefault('trace', {})
+                trace['job'] = self._job_seq
+                trace['start_mono'] = time.monotonic()
+                trace['crop'] = f"{frame_crop.shape[1]}x{frame_crop.shape[0]}"
+                logger.info(ocr_begin_line(metadata))
                 if backend != 'det':
-                    from logic.cv_text_regions import extract_regions
+                    from logic.szm.cv_text_regions import extract_regions
+                    self.ocr_sys._prof_reset()
+                    self.ocr_sys.prof["path"].append(backend)
                     t0 = time.perf_counter()
                     upright, boxes, transform = extract_regions(frame_crop, backend)
                     crops = [self.ocr_sys.get_rotate_crop_image(upright, b.copy()) for b in boxes]
@@ -1361,6 +1416,8 @@ class AsyncOCR:
                         crops, _, _, _ = self.ocr_sys.run_cls(crops)
                     rec_res, _ = self.ocr_sys.run_rec(crops)
                     metadata['M_inv_full'] = np.linalg.inv(transform @ affine_to_homogeneous(metadata['M']))
+                    trace['end_mono'] = time.monotonic()
+                    trace['prof'] = dict(self.ocr_sys.prof, path=list(self.ocr_sys.prof["path"]))
                     if self.result_callback:
                         self.result_callback(upright, rec_res, boxes, False,
                                              time.perf_counter()-t0, metadata)
@@ -1375,6 +1432,8 @@ class AsyncOCR:
                 t0 = time.perf_counter()
                 rec_res, dt_boxes, is_flip, is_rotated_90, time_cost = self.ocr_sys.predict(frame_crop, obj_type=metadata['type'])
                 t1 = time.perf_counter()
+                trace['end_mono'] = time.monotonic()
+                trace['prof'] = dict(self.ocr_sys.prof, path=list(self.ocr_sys.prof["path"]))
 
                 if is_rotated_90 and is_flip:
                     rot_code = cv2.ROTATE_90_COUNTERCLOCKWISE

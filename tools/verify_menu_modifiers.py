@@ -116,14 +116,14 @@ class Brand:
 
     # ------------------------------------------------------------------
     def slot_count(self, ticket_name: str, axis: str) -> int:
-        """必須跟 TrayStateMachine._slot_count 一致，否則稽核對不上線上。"""
-        from logic.tray_state_machine import TrayStateMachine
+        """必須跟 OrderRequirements.slot_count 一致，否則稽核對不上線上。"""
+        from logic.order_requirements import OrderRequirements
         variants = self.menu_variants.get(ticket_name) or [[ticket_name]]
-        primary = TrayStateMachine._pick_primary_variant(ticket_name, variants)
+        primary = OrderRequirements.pick_primary_variant(ticket_name, variants)
         return sum(1 for sub in primary if self.modifiers.is_slot(axis, sub))
 
     def state_machine(self):
-        """只為了呼叫 _expand_parsed_items —— 它不會用到 bus/parser/matcher。"""
+        """只為了呼叫 requirements.expand_parsed_items —— 它不會用到 bus/parser/matcher。"""
         from logic.tray_state_machine import TrayStateMachine
 
         class _NullBus:
@@ -343,13 +343,13 @@ def run_scenarios(b: Brand) -> int:
         if missing:
             print(f"  [skip] {desc}\n         菜單裡沒有: {missing}")
             continue
-        union, display, combos, _alias = sm._expand_parsed_items(norm_items)
+        union, display, combos, _alias = sm.requirements.expand_parsed_items(norm_items)
         result = {
             "union": Counter(union),
             "display": Counter({k: v for d in display for k, v in d.items()
                                 if v is not None}),
             "combos": combos,
-            "unattached": len(sm.last_unattached_modifiers),
+            "unattached": len(sm.requirements.last_unattached_modifiers),
         }
         ok = False
         try:
@@ -364,7 +364,7 @@ def run_scenarios(b: Brand) -> int:
             print(f"         聯集: {dict(result['union'])}")
             print(f"         顯示: {display}")
             print(f"         假設: {[dict(c) for c in combos]}")
-            print(f"         錨不到: {sm.last_unattached_modifiers}")
+            print(f"         錨不到: {sm.requirements.last_unattached_modifiers}")
     print(f"\n  {len(SCENARIOS) - failed}/{len(SCENARIOS)} 通過")
     return failed
 
@@ -391,7 +391,7 @@ def simulate(b: Brand, spec: str) -> None:
 
     lines, unattached = resolve_modifiers(items, b.modifiers, b.slot_count)
     sm = b.state_machine()
-    union, display, combos, alias = sm._expand_parsed_items(items)
+    union, display, combos, alias = sm.requirements.expand_parsed_items(items)
 
     print("\n  錨定結果:")
     for line in lines:
@@ -401,7 +401,7 @@ def simulate(b: Brand, spec: str) -> None:
     for mod in unattached:
         print(f"    '{mod.ticket_name}' x{mod.quantity} -> 錨不到，退回普通品項")
 
-    print(f"\n  替換明細: {sm.last_substitutions}")
+    print(f"\n  替換明細: {sm.requirements.last_substitutions}")
     print(f"  顯示清單 (前端): {display}")
     print(f"  聯集 (歸屬判定): {dict(Counter(union))}")
     print(f"  組合假設 (完成判定): {[dict(c) for c in combos]}")

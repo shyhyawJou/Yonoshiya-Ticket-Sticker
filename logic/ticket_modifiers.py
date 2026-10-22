@@ -16,7 +16,7 @@ ticket_modifiers.py
 みそ汁 從需求裡扣掉**。不扣的後果有兩個，後者比前者嚴重：
 
     1. 前端顯示「一份餐 + 兩種湯」（2026-09-21 客戶回報）
-    2. 店家換湯後不會印 みそ汁 貼紙，`_is_order_satisfied()` 永遠等不到，
+    2. 店家換湯後不會印 みそ汁 貼紙，`OrderRequirements.is_order_satisfied()` 永遠等不到，
        這筆訂單到不了 TRAY_COMPLETED
 
 為什麼不用 bbox 的 y 座標
@@ -363,7 +363,7 @@ def resolve_modifiers(
             continue
         axis = know.axis_of(line.name)
         if line.quantity is None:
-            # 數量未確認：不知道要換幾份，不動作（與 _expand_parsed_items
+            # 數量未確認：不知道要換幾份，不動作（與 OrderRequirements.expand_parsed_items
             # 對未確認數量的一貫處理相同 —— 不預設 1）
             logger.warning(
                 f"[ticket_modifiers] 修飾列 '{line.name}' 數量未確認，不套用替換"

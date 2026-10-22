@@ -5,7 +5,7 @@ import numpy as np
 
 
 def _load(name):
-    path = Path(__file__).resolve().parents[2] / "ONNX_on_nuc" / "suzumo" / f"{name}.py"
+    path = Path(__file__).resolve().parents[3] / "ONNX_on_nuc" / "suzumo" / f"{name}.py"
     spec = importlib.util.spec_from_file_location(f"_cv_{name}", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

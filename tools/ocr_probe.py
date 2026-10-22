@@ -56,12 +56,12 @@ from tools.ocr_backend import OcrBackend, load_vocab  # noqa: E402
 
 def make_ticket_parser(vocab, cfg=None):
     if cfg is not None and cfg.ticket_parser == 'legacy':
-        from logic.order_parser_yoshinoya import OrderParser
+        from logic.yoshinoya.order_parser import OrderParser
         from logic.text_utils import FuzzyMatcher
         return OrderParser(menus_ticket=list(vocab),
                            menus_with_digits={n for n in vocab if any(c.isdigit() for c in n)},
                            fuzzy_matcher=FuzzyMatcher(), rec_pred=None)
-    from logic.order_parser import OrderParser
+    from logic.szm.order_parser import OrderParser
     from logic.text_utils import FuzzyMatcher
     fm = FuzzyMatcher(special_prefixes=["ねぎ"], prefix_len=2,
                       special_score_threshold=35, default_score_threshold=40)
@@ -74,7 +74,7 @@ def make_ticket_parser(vocab, cfg=None):
 
 
 def make_sticker_matcher(vocab):
-    from logic.sticker_matcher import StickerMatcher
+    from logic.readers.sticker_matcher import StickerMatcher
     from logic.text_utils import FuzzyMatcher
     fm = FuzzyMatcher()
     return StickerMatcher(menus_sticker=list(vocab), fuzzy_matcher=fm,

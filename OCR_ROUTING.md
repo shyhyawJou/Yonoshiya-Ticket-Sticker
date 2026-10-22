@@ -15,7 +15,7 @@ ocr_routes:
 - 這只是既有 OCR 任務的處理方式，不會讓未被狀態機排入 OCR 的其他物件自動產生任務。
 
 流程接線位於 `manager/task_context.py` 與 `ocr_engine.AsyncOCR`。
-CV 路徑使用 `logic/cv_text_regions.py`，同時回傳轉正後圖片、文字框與座標變換，合成 `M_inv_full` 後再交給既有回呼，避免畫框位置偏移。
+CV 路徑使用 `logic/szm/cv_text_regions.py`，同時回傳轉正後圖片、文字框與座標變換，合成 `M_inv_full` 後再交給既有回呼，避免畫框位置偏移。
 表格找不到時回空框；不會在背後改用 DET。DET 模型目前仍在 OCR 服務初始化時載入，CV 是略過該次推論，不代表完全不占 DET 模型記憶體。
 
 共用純 CV 程式位於同層 `../ONNX_on_nuc/suzumo/table_grid.py`、`sticker_box.py`，部署時須保留這兩個檔案及相對位置；它們不依賴 OpenVINO。DLA 主程式依然需原本的 NPU `AI` 模組及廠商環境。

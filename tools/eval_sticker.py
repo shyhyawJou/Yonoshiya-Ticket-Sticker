@@ -96,7 +96,7 @@ def main():
         with open(CACHE, "w", encoding="utf-8") as fh:
             json.dump(cache, fh, ensure_ascii=False)
 
-    from logic.sticker_matcher import StickerMatcher
+    from logic.readers.sticker_matcher import StickerMatcher
     from logic.text_utils import FuzzyMatcher, normalize_text
 
     fm = FuzzyMatcher()

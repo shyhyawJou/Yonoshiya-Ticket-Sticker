@@ -27,8 +27,9 @@ python3 app.py --profile suzumo
 - profile_config.py：選擇品牌；所有實際設定只從品牌 config.yaml 載入。
 - config.py：載入選定 YAML 與品牌資料。
 - manager/task_context.py：把設定傳給模型、OCR 與 LogicEngine。
-- logic/order_parser.py：保留 Suzumo 的表格／數量解析。
-- logic/order_parser_yoshinoya.py：以 origin/main 的原版解析建立的獨立策略。
+- logic/szm/：Suzumo 專用。order_parser.py（表格／數量解析）、ticket_layout.py（表格版面）、cv_text_regions.py（純 CV 文字區域）、order_parser_legacy_reference.py（eval 工具的新舊比較基準）。
+- logic/yoshinoya/order_parser.py：以 origin/main 的原版解析建立的獨立策略（原 logic/order_parser_yoshinoya.py）。
+- 兩品牌共用的 reader 流程與貼紙比對在 logic/readers/（sticker_matcher.py 也在這裡）。
 - logic_engine.py：依 ticket_parser 選 parser，依品牌 object_class_items 分流配件。
 - tracker、pending buffer、state machine：取得該任務自己的映射，沒有更改全域映射來切品牌。
 

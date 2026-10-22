@@ -7,6 +7,7 @@ Tray 相關的資料結構。純資料容器，不含任何行為邏輯，
 
 from __future__ import annotations
 
+import time
 from collections import Counter
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -55,6 +56,13 @@ class TrackedItem:
     wrong_reads: List[tuple] = field(default_factory=list)
     # 連續 K 次都讀不出菜名：只通知前端（Unknown:讀到的字）、畫面標紅，不擋訂單完成、不寫 CSV
     is_unknown_item: bool = False
+    # 計時 log 用（[OCR#n ■] 那行的「本輪」）：開始追蹤的 monotonic 時間、
+    # 上次送 OCR 之後因為移動而穩定幀數歸零幾次、已經送過幾次 OCR、
+    # 上一輪 OCR 結果套用回來的時間（第 2 輪起的起點）
+    first_seen_mono: float = field(default_factory=time.monotonic)
+    still_resets: int = 0
+    ocr_reads: int = 0
+    last_result_mono: Optional[float] = None
 
 @dataclass
 class Tray:
@@ -74,7 +82,7 @@ class Tray:
     # 這筆訂單可能的「貼紙組合」假設，每個元素是一份 {菜單名: 需要幾份} 需求表。
     # 同一個傳票名稱在 menus_mapping.yaml 可能有多列（不同 POS 代碼對到不同
     # 組合），而傳票上讀不到 POS 代碼，所以哪一版為真是不可知的 —— 全部當成
-    # 活著的假設，任一份被滿足就算完成（見 TrayStateMachine._is_order_satisfied）。
+    # 活著的假設，任一份被滿足就算完成（見 OrderRequirements.is_order_satisfied）。
     # expected_items 則是這些假設的聯集，負責「這個品項算不算屬於本訂單」。
     expected_combos: List[Counter] = field(default_factory=list)
     # {其他寫法: 主變體寫法}。同一個傳票名稱有多種「純異寫」的貼紙組合時
@@ -105,3 +113,10 @@ class Tray:
     # None = 這筆訂單還沒開始。用 monotonic 是因為跳電後 chrony 校時會把
     # 牆上時鐘一口氣往前撥（見 app.py 主迴圈的說明）。
     order_started_mono: Optional[float] = None
+
+    # log 的「[訂單開始] / [訂單結束]」標記用（LogicEngine._mark_order_starts）。
+    # None = 這個 Tray 還沒被當成一筆訂單開始過。perf_start 是開始當下主迴圈
+    # 計時的累計快照，結束時相減就是這筆訂單期間的效能。
+    order_seq: Optional[int] = None
+    order_begin_mono: Optional[float] = None
+    perf_start: Optional[dict] = None

@@ -257,8 +257,8 @@ def main():
             orient_acc = (ok, bad, bad_list)
 
     # --- run both parsers -------------------------------------------------
-    from logic.order_parser import OrderParser
-    from logic.order_parser_legacy_reference import LegacyOrderParser
+    from logic.szm.order_parser import OrderParser
+    from logic.szm.order_parser_legacy_reference import LegacyOrderParser
     from logic.text_utils import FuzzyMatcher, normalize_text
 
     vocab = [normalize_text(w, ignore_space=True) for w in load_vocab(VOCAB_TICKET)]

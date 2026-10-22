@@ -160,7 +160,7 @@ thresholds:
 | `sticker_missing_frame` | 貼紙消失幾幀算「真的被拿走」，之後才從追蹤名單移除 | 太小 = 手掠過就被當拿走；太大 = 拿走又放回會被當成同一個 |
 | `ticket_leave_frame` | 傳票離開判定幀數（`finalize_mode: ticket_leave` 時用；`order_guard` 超時收尾後，傳票也要連續消失這麼多幀才重新接單） | — |
 | `k_container_fail` / `k_container_new` | 餐盤消失 / 新增的確認幀數（**只有 `tray` 模式用到**） | — |
-| `still_shift_ratio` | 靜止判定（選填，預設 `0` = 關閉）。相鄰兩幀中心位移超過**框短邊的這個比例**就算還在動，`n_settle_frame` 的累積歸零 —— 避免紙被推動中就送 OCR 拍到糊字 | 例 `0.03` = 3%。太小：框本身的抖動就會一直歸零，OCR 遲遲不觸發；看 log 的 `[still] … 累積 N 幀後移動（位移 x%）` 校正 |
+| `still_shift_ratio` | 靜止判定（選填，預設 `0` = 關閉）。相鄰兩幀中心位移超過**框短邊的這個比例**就算還在動，`n_settle_frame` 的累積歸零 —— 避免紙被推動中就送 OCR 拍到糊字 | 例 `0.03` = 3%。太小：框本身的抖動就會一直歸零，OCR 遲遲不觸發；看 log 的 `[OCR#n ■ …]` 那行的「移動重置 N 次」與「出現→送OCR」秒數校正（逐次的 `[still] … 累積 N 幀後移動（位移 x%）` 改在 DEBUG） |
 | `wrong_item_confirm` | 錯誤品項確認次數（選填，預設 `0` = 關閉，第一次判錯就成立）。同一張貼紙連續這麼多次 OCR 都沒比對成功才成立：發 `WRONG_ITEM_DETECTED`、CSV 記一筆、畫面標紅 NG。品名不要求每次相同，取出現最多的；中途比對成功或成立前就被拿走都不記 —— 擋畫面模糊、遮擋時一時看錯字造成的 NGtoOK。確認中讀到過不在訂單內品名的貼紙會先擋住訂單完成。全部都讀不出菜名時改發 `Unknown:<讀到的字>`，只提醒，不擋完成、不寫 CSV。醬料包不受影響 | 目前 `2`。每多 1 次，警報晚約 1 秒（貼紙要重新靜止 `n_settle_frame` 幀再讀）；太小：連續兩次模糊誤讀就會誤判。log 關鍵字 `[wrong_confirm]` |
 | `wrong_item_strong_score` / `wrong_item_strong_conf` | 強證據一次成立（選填，`strong_score` 預設 `0` = 關閉；`strong_conf` 預設 `0.9`）。讀到不在訂單內的品名，且比對分數 ≥ `strong_score`、rec 信心 ≥ `strong_conf`，第一次就成立，不必等滿 `wrong_item_confirm` 次。依據：歷史 log 裡看錯字（模糊、遮擋）都是模糊比對（分數 < 100），一字不差讀成另一個菜名幾乎都是真的放錯。以下仍要等滿次數：不是真的一字不差（ねぎ 前綴邏輯的 100 分）、品名本來就在訂單裡（已核對的餐點被推開換了框、或真的多放一份同名）、品名跟還沒核對的品項互為子序列（`牛黒カレー` 被遮成 `黒カレー`） | 目前 `100` / `0.9`。rec 信心本身分不出看錯字（10/06 的誤讀信心 0.99），所以主要靠分數；log 會寫 `強證據（一字不差、信心夠高）` |
 
@@ -319,8 +319,8 @@ key 也可以寫縮寫 `ticket` / `sticker`。值打錯會在載入設定時直�
 
 `table` | `legacy`（**吉野家目前用 `legacy`**）。
 
-`legacy` = `logic/order_parser_yoshinoya.py`（依吉野家傳票版面寫的版本）；
-`table` = `logic/order_parser.py`（通用表格解析，會用到 `vocab_ticket`）。
+`legacy` = `logic/yoshinoya/order_parser.py`（依吉野家傳票版面寫的版本）；
+`table` = `logic/szm/order_parser.py`（Suzumo 的表格解析，會用到 `vocab_ticket`）。
 
 ---
 

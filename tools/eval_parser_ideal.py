@@ -117,8 +117,8 @@ def main():
     names = {"dev": dev, "test": [n for n in all_names if n not in dev],
              "all": all_names}[args.split]
 
-    from logic.order_parser import OrderParser
-    from logic.order_parser_legacy_reference import LegacyOrderParser
+    from logic.szm.order_parser import OrderParser
+    from logic.szm.order_parser_legacy_reference import LegacyOrderParser
     from logic.text_utils import FuzzyMatcher, normalize_text
 
     vocab = [normalize_text(w, ignore_space=True) for w in load_vocab(VOCAB_TICKET)]

@@ -2,7 +2,7 @@
 """
 test_ticket_layout.py
 =====================
-logic/ticket_layout.py 的單元測試。純幾何 / 純字串，不需要模型或 NPU，
+logic/szm/ticket_layout.py 的單元測試。純幾何 / 純字串，不需要模型或 NPU，
 所以可以在開發機直接跑：
 
     cd DLA_on_720
@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 
-from logic.ticket_layout import (
+from logic.szm.ticket_layout import (
     TextItem, build_items, find_order_number, find_qty_column,
     group_rows, parse_rows, to_legacy_items,
 )

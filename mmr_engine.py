@@ -1,5 +1,6 @@
 import cv2
 import math
+import time
 import numpy as np
 from AI import RTMDET
 from utils import dla_guard
@@ -60,6 +61,7 @@ class Rotated_RTMDET:
         self.agnostic_nms = False
         self.partial_agnostic_ids = np.array(partial_agnostic_ids, dtype=np.float32) if partial_agnostic_ids else None
         self.grids = self._make_grids()
+        self.last_timing = {}   # 最近一次 detect 的各段耗時，見 detect
         self._warmup()
 
     def _warmup(self):
@@ -155,15 +157,25 @@ class Rotated_RTMDET:
     # api
     # --------
     def detect(self, img, show_box: bool):
+        # 各段耗時 (ms)，app.py 主迴圈彙總成 [效能] 那行
+        t0 = time.perf_counter()
         x = self._preprocess(img)[0]
+        t1 = time.perf_counter()
         boxes = self.model.run(x).reshape(1, -1, self.grids.shape[0])
+        t2 = time.perf_counter()
         scores, boxes, angles = np.split(boxes, [boxes.shape[1] - 5, boxes.shape[1] - 1], 1)
         boxes = np.concatenate((boxes[0].T, angles[0].T), 1)
         boxes = self._distance2obb(self.grids, boxes, angle_version='le90').T[None]
         y = np.concatenate((boxes[:, :4], scores, angles), 1)
         xywhr, boxes, scores, cls_ids = self._postprocess(y, img.shape)
+        t3 = time.perf_counter()
 
         out = self._plot(boxes, scores, cls_ids, img, show_box)
+        t4 = time.perf_counter()
+        self.last_timing = {
+            "mmr_pre": 1000 * (t1 - t0), "mmr_infer": 1000 * (t2 - t1),
+            "mmr_post": 1000 * (t3 - t2), "mmr_plot": 1000 * (t4 - t3),
+        }
 
         detections: List[Detection] = []
         for r, b, s, c in zip(xywhr, boxes, scores, cls_ids):          
