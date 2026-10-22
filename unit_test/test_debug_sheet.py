@@ -210,7 +210,8 @@ def test_full_order_records_every_stage_and_renders_one_sheet(tmp_path):
     img = cv2.imdecode(np.fromfile(str(jpg), np.uint8), cv2.IMREAD_COLOR)
     assert img.shape == (3036, 4024, 3)
     assert img.std() > 10, "圖不能是空白的"
-    doc = json.loads(jpg.with_suffix(".json").read_text(encoding="utf-8"))
+    assert jpg.name.endswith("_p01.jpg"), "單頁訂單也帶 _p01，每張檔名格式一致"
+    doc = json.loads(DebugSheet.json_path_for(jpg).read_text(encoding="utf-8"))
     verdicts = [e["data"].get("verdict") for e in doc["entries"] if e["kind"] in ("sticker", "known")]
     assert "OK" in verdicts and "NG" in verdicts
     assert doc["summary"]["status"] == "NGtoOK"
@@ -454,3 +455,449 @@ def test_suzumo_table_parser_rows_are_converted(tmp_path):
     assert [r["status"] for r in rows] == ["ok", "no_match", "qty_unconfirmed"]
     assert rows[0]["name"] == "牛丼･小" and rows[0]["qty"] == 2 and rows[0]["qty_src"] == "qty_column"
     assert rows[1]["name"] is None and rows[2]["qty"] is None
+
+
+# ---------------------------------------------------------------------------
+# NG 之後被 OK 貼紙蓋住：NG 的證據不能從圖上消失
+# ---------------------------------------------------------------------------
+def _renderer(ds):
+    from utils.debug_sheet import SheetRenderer
+    return SheetRenderer(ds.ctx, ds.font_path)
+
+
+def _stickers(ds):
+    return [e for e in ds._evidence["t1"] if e.kind in ("sticker", "known")]
+
+
+def _order_with_ng(tmp_path):
+    ds = DebugSheet(make_cfg(tmp_path), tmp_path, ROOT, DebugContext(menu_variants=VARIANTS))
+    sm, _ = make_sm(tmp_path, ds)
+    tray = make_tray()
+    trays = {"t1": tray}
+    ticket_ocr(sm, trays)
+    b = add_sticker(tray, poly(260, 120, 360, 180))
+    sticker_ocr(sm, trays, b, "豚丼特盛")
+    b.stable_frames = 5
+    sticker_ocr(sm, trays, b, "豚丼特盛")
+    assert b.is_wrong_item and tray.ever_had_wrong_item
+    return ds, sm, tray, trays, b
+
+
+def test_ng_covered_by_ok_sticker_keeps_both_tiles(tmp_path):
+    """復現：NG 出現後用 OK 貼紙蓋住（追蹤器把它當同一個物件重讀，判定 NG -> OK）。
+    以前併成一格、只顯示最後的 OK，NG 那張的裁切圖與 det 框就消失了。"""
+    ds, sm, tray, trays, b = _order_with_ng(tmp_path)
+    b.stable_frames = 5
+    sticker_ocr(sm, trays, b, "牛丼小")
+    assert not b.is_wrong_item and tray.ever_had_wrong_item, "狀態機本來就會解除警示，但 CSV 仍記錯誤"
+
+    segs = _renderer(ds)._group_tracks(_stickers(ds))
+    assert len(segs) == 2, "NG 與 OK 必須是兩格"
+    ng, ok = segs[0], segs[1]
+    assert ng[-1].data["verdict"] == "NG" and ng[-1].crop is not None and ng[-1].boxes
+    assert ok[-1].data["verdict"] == "OK"
+    assert ng.next is ok and ok.prev is ng, "兩格要互相連結，圖上才能互相註明"
+    lines = [t for t, _, _ in _renderer(ds)._item_lines(ng)]
+    assert any("之後" in x and "OK" in x for x in lines), lines
+    assert any("先前" in x and "NG" in x for x in [t for t, _, _ in _renderer(ds)._item_lines(ok)])
+
+    # 整張圖要畫得出來，而且 json 裡兩筆判定都在
+    ds.render_to_array(ds._evidence["t1"], dict(SUMMARY))
+    assert ds.finalize("t1", dict(SUMMARY)) is not None
+    ds.shutdown()
+    doc = json.loads(next(tmp_path.rglob("*.json")).read_text(encoding="utf-8"))
+    assert [e["data"]["verdict"] for e in doc["entries"] if e["kind"] == "sticker"][-3:] == ["SUSPECT", "NG", "OK"]
+
+
+def test_single_misread_then_ok_keeps_the_suspect_tile(tmp_path):
+    """只讀錯一次（確認中、還沒成立）就換成對的：狀態機不記錯誤，但除錯圖要留下那一次疑似。"""
+    ds = DebugSheet(make_cfg(tmp_path), tmp_path, ROOT, DebugContext(menu_variants=VARIANTS))
+    sm, _ = make_sm(tmp_path, ds)
+    tray = make_tray()
+    trays = {"t1": tray}
+    ticket_ocr(sm, trays)
+    b = add_sticker(tray, poly(260, 120, 360, 180))
+    sticker_ocr(sm, trays, b, "豚丼特盛")
+    assert not b.is_wrong_item and not tray.ever_had_wrong_item
+    b.stable_frames = 5
+    sticker_ocr(sm, trays, b, "牛丼小")
+    segs = _renderer(ds)._group_tracks(_stickers(ds))
+    assert [s[-1].data["verdict"] for s in segs] == ["SUSPECT", "OK"]
+
+
+def test_rereading_a_normal_sticker_stays_one_tile(tmp_path):
+    """同一張正常貼紙讀好幾次（OK / 沒讀到字）不能拆開，否則圖面會被塞滿。"""
+    ds = DebugSheet(make_cfg(tmp_path), tmp_path, ROOT, DebugContext(menu_variants=VARIANTS))
+    track = ds.track_uid(SimpleNamespace())
+    for verdict in ("OK", "UNREAD", "OK", "UNTRACKED", "OK"):
+        ds.record_ocr("t1", "sticker", sticker_crop(), [], [], {"verdict": verdict}, track=track)
+    assert len(_renderer(ds)._group_tracks(_stickers(ds))) == 1
+
+
+def test_ng_sticker_removed_then_new_sticker_are_separate_tracks(tmp_path):
+    """NG 的貼紙被拿走、另放一張 OK（追蹤器當成不同物件）：兩格都在，NG 那格註記「已被移走」。"""
+    ds, sm, tray, trays, b = _order_with_ng(tmp_path)
+    b.is_missing = True
+    sm.resolve_wrong_item_removal(trays)
+    c = add_sticker(tray, poly(380, 120, 480, 180))
+    sticker_ocr(sm, trays, c, "牛丼小")
+    segs = _renderer(ds)._group_tracks(_stickers(ds))
+    assert [s[-1].data["verdict"] for s in segs] == ["NG", "OK"]
+    assert segs[0].next is None and segs[1].prev is None, "不同追蹤物件不能互相連結"
+    assert any("已被移走" in x for x in segs[0][-1].data.get("events", []))
+
+
+def test_trimming_never_frees_the_ng_crop(tmp_path):
+    """長訂單超過 max_entries 時會釋放最舊的貼紙裁切圖；NG（之後被同一位置的 OK 蓋過、不再是最新一筆）不能先被釋放。"""
+    ds = DebugSheet(make_cfg(tmp_path, max_entries=20), tmp_path, ROOT)
+    t = ds.track_uid(SimpleNamespace())
+    crop = lambda: np.zeros((40, 40, 3), np.uint8)   # noqa: E731
+    ng = ds.record_ocr("t1", "sticker", crop(), [], [], {"verdict": "NG"}, track=t)
+    sus = ds.record_ocr("t1", "sticker", crop(), [], [], {"verdict": "SUSPECT"}, track=ds.track_uid(SimpleNamespace()))
+    ds.record_ocr("t1", "sticker", crop(), [], [], {"verdict": "OK"}, track=t)
+    other = ds.track_uid(SimpleNamespace())
+    for _ in range(60):
+        ds.record_ocr("t1", "sticker", crop(), [], [], {"verdict": "OK"}, track=other)
+    assert ng.crop is not None and sus.crop is not None, "有問題的判定裁切圖不能被釋放"
+    assert sum(1 for e in ds._evidence["t1"] if e.crop is not None) < 30, "正常的重讀仍要被釋放，記憶體才有上限"
+
+
+# ---------------------------------------------------------------------------
+# 分頁：塞不下的格子往下一張圖放
+# ---------------------------------------------------------------------------
+def _fill(ds, n_ng=2, n_ok=28, tray="t1"):
+    """記下 n_ng 張 NG + n_ok 張 OK 貼紙（每張各自一個追蹤物件，各佔一格）。"""
+    def add(verdict, raw):
+        ds.record_ocr(tray, "sticker", sticker_crop(), [box(10, 30, 280, 90)], [(raw, 0.95)],
+                      {"verdict": verdict, "raw": raw, "matched": raw, "note": verdict},
+                      track=ds.track_uid(SimpleNamespace()))
+    for _ in range(n_ok):          # 先放 OK，NG 在時間上排最後，驗證「排序」而不是「先來後到」
+        add("OK", "牛丼小")
+    for _ in range(n_ng):
+        add("NG", "豚丼特盛")
+
+
+def test_overflow_tiles_move_to_next_page_with_problems_first(tmp_path):
+    ds = DebugSheet(make_cfg(tmp_path, tiles_per_page=24), tmp_path, ROOT)
+    _fill(ds, n_ng=2, n_ok=28)
+    pages, info = _renderer_for(ds).plan(ds._evidence["t1"])
+    assert len(pages) == 2 and info["hidden_tiles"] == 0
+    assert [len(p["segs"]) for p in pages] == [24, 6], "30 格：第 1 頁 24、第 2 頁 6，一格都不能丟"
+    assert [s[-1].data["verdict"] for s in pages[0]["segs"][:2]] == ["NG", "NG"], "NG 一定在第 1 頁最前面"
+    assert all(s[-1].data["verdict"] == "OK" for s in pages[1]["segs"])
+    assert pages[1]["offset"] == 24, "格子編號要跨頁連續（#25 起）"
+
+
+def _renderer_for(ds):
+    return ds._get_renderer()
+
+
+def test_every_page_has_the_same_name_format_and_one_shared_json(tmp_path):
+    ds = DebugSheet(make_cfg(tmp_path, tiles_per_page=24), tmp_path, ROOT)
+    _fill(ds, n_ng=2, n_ok=28)
+    p1 = Path(ds.finalize("t1", dict(SUMMARY)))
+    ds.shutdown()
+    folder = p1.parent
+    base = p1.name[: -len("_p01.jpg")]
+    assert p1.name == f"{base}_p01.jpg", "finalize 回傳第 1 頁的路徑"
+    names = sorted(p.name for p in folder.iterdir())
+    assert names == sorted([f"{base}_p01.jpg", f"{base}_p02.jpg", f"{base}.json"]), names
+    for name in (f"{base}_p01.jpg", f"{base}_p02.jpg"):
+        img = cv2.imdecode(np.fromfile(str(folder / name), np.uint8), cv2.IMREAD_COLOR)
+        assert img.shape == (3036, 4024, 3)
+    # 任何一頁都能找到同一份 json；json 不帶頁碼
+    assert DebugSheet.json_path_for(p1) == DebugSheet.json_path_for(folder / f"{base}_p02.jpg") == folder / f"{base}.json"
+    doc = json.loads((folder / f"{base}.json").read_text(encoding="utf-8"))
+    assert doc["pages"] == 2 and doc["files"] == [f"{base}_p01.jpg", f"{base}_p02.jpg"]
+    assert len([e for e in doc["entries"] if e["kind"] == "sticker"]) == 30, "json 要有全部 30 筆"
+    assert ds.last_timing["pages"] == 2 and ds.last_timing["path"] == str(p1)
+    assert not list(folder.glob("*.tmp"))
+
+
+def test_single_page_order_is_also_named_p01(tmp_path):
+    ds = DebugSheet(make_cfg(tmp_path), tmp_path, ROOT)
+    _fill(ds, n_ng=1, n_ok=3)
+    path = Path(ds.finalize("t1", dict(SUMMARY)))
+    ds.shutdown()
+    assert path.name.endswith("_p01.jpg")
+    assert sorted(p.suffix for p in path.parent.iterdir()) == [".jpg", ".json"]
+    assert ds.last_timing["pages"] == 1
+
+
+def test_page_number_is_fixed_two_digits(tmp_path):
+    base = tmp_path / "20261022_120000_t1_No1_OK.jpg"
+    names = [DebugSheet.page_path(base, n).name for n in (1, 2, 9, 10, 99)]
+    assert names == [f"20261022_120000_t1_No1_OK_p{n:02d}.jpg" for n in (1, 2, 9, 10, 99)], "固定 2 碼"
+    assert names == sorted(names), "固定 2 碼 → 字典序 = 頁序"
+    assert DebugSheet.json_path_for(DebugSheet.page_path(base, 99)).name == "20261022_120000_t1_No1_OK.json"
+
+    assert DebugSheet.json_path_for(DebugSheet.page_path(base, 1)) == DebugSheet.json_path_for(DebugSheet.page_path(base, 99))
+
+
+def _expect_value_error(fn, must_contain: str):
+    """不依賴 pytest 的 raises：必須丟 ValueError，而且訊息要提到上限。"""
+    try:
+        fn()
+    except ValueError as e:
+        assert must_contain in str(e), f"錯誤訊息要說明上限: {e}"
+        return
+    raise AssertionError("應該要丟 ValueError")
+
+
+def test_max_pages_caps_output_and_json_keeps_everything(tmp_path):
+    ds = DebugSheet(make_cfg(tmp_path, tiles_per_page=5, max_pages=2), tmp_path, ROOT)
+    _fill(ds, n_ng=1, n_ok=13)                       # 14 格，只放得下 10 格
+    pages, info = _renderer_for(ds).plan(ds._evidence["t1"])
+    assert len(pages) == 2 and info["hidden_tiles"] == 4
+    path = Path(ds.finalize("t1", dict(SUMMARY)))
+    ds.shutdown()
+    assert len(list(path.parent.glob("*.jpg"))) == 2
+    doc = json.loads(DebugSheet.json_path_for(path).read_text(encoding="utf-8"))
+    assert len([e for e in doc["entries"] if e["kind"] == "sticker"]) == 14
+
+
+def test_older_tickets_with_crops_go_to_following_pages(tmp_path):
+    ds = DebugSheet(make_cfg(tmp_path), tmp_path, ROOT)
+    for i in range(6):                               # 傳票解析失敗反覆重試，留了 6 筆；只有最新 4 筆還有圖
+        ds.record_ocr("t1", "ticket", np.full((300, 200, 3), 240, np.uint8), [box(10, 10, 100, 40)],
+                      [("牛丼小", 0.9)], {"order_number": "1", "rows": [], "accepted": False, "outcome": f"第{i}次"})
+    pages, info = _renderer_for(ds).plan(ds._evidence["t1"])
+    assert [len(p["tickets"]) for p in pages] == [3, 1], "第 1 頁最新 3 張，第 4 新的（還有圖）放第 2 頁"
+    assert info["hidden_tickets"] == 2, "沒有圖的 2 筆舊傳票只留在 json"
+    assert pages[0]["tickets"][-1].data["outcome"] == "第5次"
+
+
+def test_page_labels_only_appear_on_multi_page_and_glyphs_exist(tmp_path):
+    from PIL import Image, ImageDraw, ImageFont
+    import utils.debug_sheet as dbg
+
+    def drawn_texts(ds):
+        drawn, orig = [], dbg._TextLayer.flush
+
+        def spy(self):
+            drawn.append([s for _, _, s, _, _ in self._items])
+            return orig(self)
+        dbg._TextLayer.flush = spy
+        try:
+            ds.render_pages(ds._evidence["t1"], dict(SUMMARY))
+        finally:
+            dbg._TextLayer.flush = orig
+        return drawn
+
+    ds = DebugSheet(make_cfg(tmp_path, tiles_per_page=24), tmp_path, ROOT)
+    _fill(ds, n_ng=2, n_ok=28)
+    pages = drawn_texts(ds)
+    assert len(pages) == 2
+    assert "第 1 / 2 頁" in pages[0] and "第 2 / 2 頁" in pages[1]
+    assert any("續：第 2 頁" in t for t in pages[0]), "第 1 頁要提示續頁"
+    assert not any("續" in t for t in pages[1]), "最後一頁不提示續頁"
+
+    font = ImageFont.truetype(ds.font_path, 40)
+
+    def bitmap(ch):
+        im = Image.new("L", (64, 64), 0)
+        ImageDraw.Draw(im).text((6, 6), ch, font=font, fill=255)
+        return im.tobytes()
+    tofu = bitmap("\uffff")
+    missing = sorted({c for page in pages for t in page for c in t if not c.isspace() and bitmap(c) == tofu})
+    assert not missing, f"字型缺這些字: {missing}"
+
+    small = DebugSheet(make_cfg(tmp_path), tmp_path, ROOT)
+    _fill(small, n_ng=1, n_ok=2)
+    only = drawn_texts(small)
+    assert len(only) == 1 and not any("頁" in t for t in only[0]), "單頁不顯示頁碼"
+
+
+def test_config_max_pages_over_99_is_an_error_at_load(tmp_path):
+    import config
+
+    def edit(n):
+        return lambda d: d["debug_sheet"].update(max_pages=n)
+
+    assert config.load_config(str(_profile_copy(tmp_path / "a", edit=edit(99)))).debug_sheet.max_pages == 99
+    _expect_value_error(lambda: config.load_config(str(_profile_copy(tmp_path / "b", edit=edit(100)))), "99")
+
+
+# ---------------------------------------------------------------------------
+# 傳票：圖上的框只標編號（文字太多會擋住傳票），貼紙維持標文字
+# ---------------------------------------------------------------------------
+def _drawn_texts(ds, summary=None):
+    import utils.debug_sheet as dbg
+    drawn, orig = [], dbg._TextLayer.flush
+
+    def spy(self):
+        drawn.extend(s for _, _, s, _, _ in self._items)
+        return orig(self)
+    dbg._TextLayer.flush = spy
+    try:
+        ds.render_pages(ds._evidence["t1"], summary or dict(SUMMARY))
+    finally:
+        dbg._TextLayer.flush = orig
+    return drawn
+
+
+def _ticket_with_many_boxes(ds, n=12, linked=(2, 3)):
+    boxes = [box(20, 20 + i * 40, 300, 50 + i * 40) for i in range(n)]
+    rec = [(f"品名文字{i}", 0.9) for i in range(n)]
+    rows = [{"raw": "牛丼小2", "name": "牛丼･小", "score": 95.0, "qty": 2, "qty_src": "獨立數字框",
+             "status": "ok", "box_idx": list(linked)}]
+    ds.record_ocr("t1", "ticket", np.full((600, 400, 3), 245, np.uint8), boxes, rec,
+                  dict(order_number="1", rows=rows, accepted=True, outcome="主票確認"))
+
+
+def test_ticket_boxes_are_labeled_with_index_only(tmp_path):
+    ds = DebugSheet(make_cfg(tmp_path), tmp_path, ROOT, DebugContext(menu_variants=VARIANTS))
+    _ticket_with_many_boxes(ds)
+    texts = _drawn_texts(ds)
+    import re
+    assert not [t for t in texts if re.match(r"^\d+:.+ \d\.\d\d$", t)], "傳票的框不可標 `編號:文字 信心`"
+    assert {"0", "1", "5", "11"} <= set(texts), "框上只有編號"
+    assert "框 2、3" in texts, "右側每一列要標出它用到哪幾個框"
+
+
+def test_every_ticket_box_text_and_conf_is_listed_under_the_crop(tmp_path):
+    """圖上的框只標編號；每個框（不論有沒有歸到某一列）的 rec 文字與信心都要在傳票圖下方對照，資訊不能不見。
+    歸了列的框，列裡只有合併後的文字，看不到各框自己的信心。"""
+    ds = DebugSheet(make_cfg(tmp_path), tmp_path, ROOT, DebugContext(menu_variants=VARIANTS))
+    _ticket_with_many_boxes(ds, n=12, linked=(2, 3))
+    texts = _drawn_texts(ds)
+    for i in range(12):
+        assert f"{i}:品名文字{i}(0.90)" in texts, f"框 {i} 的文字與信心要列出來（含已歸列的 2、3）"
+    assert any(t.startswith("框編號對照") for t in texts)
+
+
+def test_ticket_box_legend_says_how_many_did_not_fit(tmp_path):
+    ds = DebugSheet(make_cfg(tmp_path), tmp_path, ROOT, DebugContext(menu_variants=VARIANTS))
+    _ticket_with_many_boxes(ds, n=1500, linked=())           # 多到放不下（400 個在整張面板上還放得下）
+    texts = _drawn_texts(ds)
+    note = [t for t in texts if t.startswith("…另 ") and t.endswith("個框見 .json")]
+    assert len(note) == 1, "放不下時要寫明還有幾個框、文字在 .json"
+    shown = [t for t in texts if t[:1].isdigit() and ":品名文字" in t]
+    assert 0 < len(shown) < 1500
+    assert len(shown) + int(note[0].split()[1]) == 1500, "顯示的 + 沒顯示的 = 全部，不能悄悄少"
+
+
+def test_ticket_without_row_linkage_lists_every_box(tmp_path):
+    """鈴茂的表格解析器沒有『列 -> 框』對應：全部的框都要在右側對照，否則圖上的編號沒有意義。"""
+    ds = DebugSheet(make_cfg(tmp_path), tmp_path, ROOT, DebugContext(menu_variants=VARIANTS))
+    _ticket_with_many_boxes(ds, n=5, linked=())
+    texts = _drawn_texts(ds)
+    assert any(t.startswith("框編號對照") for t in texts)
+    assert any("4:品名文字4(0.90)" in t for t in texts)
+
+
+def test_sticker_labels_keep_text_and_confidence(tmp_path):
+    ds = DebugSheet(make_cfg(tmp_path), tmp_path, ROOT, DebugContext(menu_variants=VARIANTS))
+    ds.record_ocr("t1", "sticker", sticker_crop(), [box(10, 30, 280, 90)], [("豚丼特盛", 0.95)],
+                  {"verdict": "NG", "raw": "豚丼特盛", "matched": "豚丼特盛", "note": "x"}, track=1)
+    assert "0:豚丼特盛 0.95" in _drawn_texts(ds), "貼紙不更改：仍標 編號:文字 信心"
+
+
+# ---------------------------------------------------------------------------
+# 版面：標題不重疊、文字不超出畫布、標頭不截斷、畫布尺寸可以改
+# ---------------------------------------------------------------------------
+def _tl(ds):
+    import utils.debug_sheet as dbg
+    return dbg._TextLayer(np.zeros((10, 10, 3), np.uint8), ds.font_path)
+
+
+def test_sticker_title_never_overlaps_its_ocr_tag(tmp_path):
+    """標題左邊（判定 #編號 種類 時間）與右邊（OCR×n）在任何格寬都不能撞在一起。
+    實際現場：NG 常被重讀（OCR×51）、UNREAD / CHECKING 的名稱又長，窄格子就疊在一起。"""
+    from utils.debug_sheet import SheetRenderer, VERDICT_STYLE
+    ds = DebugSheet(make_cfg(tmp_path), tmp_path, ROOT)
+    tl = _tl(ds)
+    for w in (180, 240, 330, 432, 544, 730, 1102, 2218):
+        for label in [v[1] for v in VERDICT_STYLE.values()]:
+            for idx in (1, 24, 96):
+                for tag in ("", "OCR×2", "OCR×51", "OCR×999"):
+                    text, fs, tag_fs = SheetRenderer._title_plan(tl, label, idx, "醬料包/物件", "15:50:29", tag, w)
+                    used = tl.width(text, fs) + ((16 + tl.width(tag, tag_fs)) if tag else 0)
+                    assert used <= w - 28 or fs == 18, f"w={w} {label} #{idx} {tag!r}: 左右兩邊會重疊 ({used} > {w - 28})"
+
+
+def _all_text_items(ds, summary=None, canvas=None):
+    """渲染並攔下每一頁所有文字 (x, y, 文字, 字級, 寬度, 畫布寬)。"""
+    import utils.debug_sheet as dbg
+    seen, orig = [], dbg._TextLayer.flush
+
+    def spy(self):
+        seen.extend((x, y, t, sz, self.width(t, sz), self.canvas.shape[1]) for x, y, t, sz, _ in self._items)
+        return orig(self)
+    dbg._TextLayer.flush = spy
+    try:
+        ds.render_pages(ds._evidence["t1"], summary or dict(SUMMARY))
+    finally:
+        dbg._TextLayer.flush = orig
+    return seen
+
+
+def test_no_text_runs_off_the_canvas(tmp_path):
+    """任何一段文字都不能超出畫布右緣（以前右上角的 profile 與標頭「應有」會被切掉）。"""
+    ds = DebugSheet(make_cfg(tmp_path), tmp_path, ROOT, DebugContext(menu_variants=VARIANTS, profile=(
+        "yoshinoya / parser=legacy / mode=single / 一段很長很長很長很長的描述文字用來確認會換行而不是被畫布邊緣切掉")))
+    _ticket_with_many_boxes(ds, n=28, linked=(2, 3))
+    _fill(ds, n_ng=3, n_ok=10)
+    long_sum = dict(SUMMARY, video_file="20261022_155102_131546_event_with_a_really_long_name.mp4",
+                    expected=[{f"品項名稱{i}": 1} for i in range(40)])
+    for x, y, t, sz, w, cw in _all_text_items(ds, long_sum):
+        assert x + w <= cw, f"{t!r} 超出畫布右緣: x={x} w={w} canvas={cw}"
+
+
+def test_header_wraps_items_instead_of_truncating(tmp_path):
+    from utils.debug_sheet import SheetRenderer
+    ds = DebugSheet(make_cfg(tmp_path), tmp_path, ROOT)
+    r = SheetRenderer(ds.ctx, ds.font_path)
+    base = np.zeros((r.H, r.W, 3), np.uint8)
+
+    def header(summary):
+        tl = _tl(ds)
+        tl.canvas = base.copy()
+        hh = r._draw_header(tl.canvas, tl, summary, 1, 5, 5, 1, 1)
+        return hh, [t for _, _, t, _, _ in tl._items]
+
+    hh_short, _ = header(dict(SUMMARY))
+    assert hh_short == r.HEADER_H, "項目少時標頭高度不變"
+    exp = [{f"品項{i:02d}": 2} for i in range(12)]
+    hh, texts = header(dict(SUMMARY, expected=exp))
+    joined = "".join(texts)
+    assert all(f"品項{i:02d}×2" in joined for i in range(12)), "12 個項目一個都不能少（以前第 11 個起被截成「…」）"
+    assert "共" not in joined
+    hh_huge, texts = header(dict(SUMMARY, expected=[{f"品項{i}": 1} for i in range(300)]))
+    assert any("共 300 項" in t for t in texts), "太多放不下時要寫明總數，不是只有「…」"
+    assert hh < hh_huge <= 700, "標頭依內容加高，但有上限"
+
+
+def test_canvas_size_only_scales_the_layout(tmp_path):
+    """改 canvas_w / canvas_h 不能讓版面擠壞：先照 4024 寬排好再縮放，所以結果 = 預設尺寸縮小。"""
+    def render(w, h):
+        ds = DebugSheet(make_cfg(tmp_path, canvas_w=w, canvas_h=h), tmp_path, ROOT, DebugContext(menu_variants=VARIANTS))
+        _ticket_with_many_boxes(ds, n=12, linked=(2, 3))
+        _fill(ds, n_ng=3, n_ok=10)
+        return ds.render_pages(ds._evidence["t1"], dict(SUMMARY))
+
+    big = render(4024, 3036)[0]
+    small = render(2576, 1944)[0]
+    wide = render(1920, 1080)[0]
+    assert big.shape == (3036, 4024, 3) and small.shape == (1944, 2576, 3) and wide.shape == (1080, 1920, 3)
+    ref = cv2.resize(big, (2576, 1944), interpolation=cv2.INTER_AREA).astype(np.int16)
+    assert np.abs(ref - small.astype(np.int16)).mean() < 3.0, "縮小的畫布應該只是預設版面縮小，而不是另一種擠壓過的版面"
+
+
+def test_text_stays_inside_canvas_at_small_and_odd_sizes(tmp_path):
+    for w, h in ((2576, 1944), (1920, 1080), (1280, 720)):
+        ds = DebugSheet(make_cfg(tmp_path, canvas_w=w, canvas_h=h), tmp_path, ROOT)
+        _ticket_with_many_boxes(ds, n=28, linked=(2, 3))
+        _fill(ds, n_ng=4, n_ok=20)
+        for x, y, t, sz, wd, cw in _all_text_items(ds):
+            assert x + wd <= cw, f"{w}x{h}: {t!r} 超出畫布"
+
+
+def test_no_text_is_drawn_twice(tmp_path):
+    """同一個位置同一段文字不能畫兩遍（疊在一起肉眼看不出來，但表示排版跑了兩次）。"""
+    ds = DebugSheet(make_cfg(tmp_path), tmp_path, ROOT, DebugContext(menu_variants=VARIANTS))
+    _ticket_with_many_boxes(ds, n=400, linked=())
+    _fill(ds, n_ng=2, n_ok=6)
+    items = [(x, y, t) for x, y, t, *_ in _all_text_items(ds)]
+    dup = {k for k in items if items.count(k) > 1}
+    assert not dup, f"重複繪製: {sorted(dup)[:5]}"

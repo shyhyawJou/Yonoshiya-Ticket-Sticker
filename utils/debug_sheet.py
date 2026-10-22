@@ -81,6 +81,10 @@ VERDICT_STYLE: Dict[str, Tuple[Tuple[int, int, int], str]] = {
 
 STATUS_COLOR = {"OK": C_OK, "NG": C_NG, "NGtoOK": C_PEND}
 
+# 「有問題」的判定：NG（錯誤品項成立）、SUSPECT（疑似，確認中）、UNKNOWN（讀不出菜名）。
+# 這些是除錯最需要的證據：圖上不能被併掉（見 SheetRenderer._group_tracks），記憶體吃緊時也不能被釋放。
+PROBLEM_VERDICTS = ("NG", "SUSPECT", "UNKNOWN")
+
 
 def _bgr(c: Tuple[int, int, int]) -> Tuple[int, int, int]:
     return (int(c[2]), int(c[1]), int(c[0]))
@@ -255,15 +259,79 @@ def _fit_into(img: np.ndarray, max_w: int, max_h: int, max_up: float = 2.5) -> T
     return cv2.resize(img, (nw, nh), interpolation=interp), sc
 
 
-def _fmt_counts(items: Optional[Sequence[dict]]) -> str:
-    """[{名稱: 數量}, ...] -> '名稱×數量, ...'；空 -> '-'"""
-    if not items:
-        return "-"
-    parts = []
-    for d in items:
+def _count_tokens(items: Optional[Sequence[dict]]) -> List[str]:
+    """[{名稱: 數量}, ...] -> ['名稱×數量', ...]"""
+    parts: List[str] = []
+    for d in items or []:
         for k, v in d.items():
             parts.append(f"{k}×{v}" if v is not None else f"{k}×?")
-    return ", ".join(parts) if parts else "-"
+    return parts
+
+
+def _fmt_counts(items: Optional[Sequence[dict]]) -> str:
+    """[{名稱: 數量}, ...] -> '名稱×數量, ...'；空 -> '-'"""
+    return ", ".join(_count_tokens(items)) or "-"
+
+
+def _wrap_tokens(tl: "_TextLayer", tokens: List[str], size: int, max_w: int, sep: str = ", ") -> List[str]:
+    """依「項目」換行：不會把『牛丼小×2』從中間切開。單一項目比一行還長才退回逐字換行。"""
+    lines: List[str] = []
+    cur = ""
+    for tok in tokens:
+        cand = tok if not cur else cur + sep + tok
+        if tl.width(cand, size) <= max_w:
+            cur = cand
+            continue
+        if cur:
+            lines.append(cur + sep.rstrip())
+            cur = ""
+        if tl.width(tok, size) > max_w:
+            parts = tl.wrap(tok, size, max_w)
+            lines.extend(parts[:-1])
+            cur = parts[-1]
+        else:
+            cur = tok
+    if cur:
+        lines.append(cur)
+    return lines or ["-"]
+
+
+def _flow_tokens(tl: "_TextLayer", tokens: List[Tuple[str, Tuple[int, int, int]]], x: int, y: int, w: int,
+                 y_max: int, sizes: Tuple[int, ...] = (24, 20, 17), draw: bool = True) -> Tuple[int, int, int]:
+    """把 (文字, 顏色) 一個一個排進 w 寬的區域，放不下就換行。
+
+    字級由大到小試，全部放得下就用該字級；都放不下就用最小字級盡量放。
+    回傳 (放不下的個數, 用到的最底 y, 用的字級)。每個 token 自己是一段文字、不會被從中間換行。
+    draw=False 只算排版不畫（先量一次，決定要不要留位置寫提示，再畫一次；不能畫兩遍）。
+    """
+    gap = 14
+    tokens = [(tl.clip(t, sizes[0], w), c) for t, c in tokens]
+
+    def layout(fs: int):
+        pos, cx, cy, lh = [], 0, 0, tl.line_h(fs)
+        for text, col in tokens:
+            tw = tl.width(text, fs)
+            if cx and cx + tw > w:
+                cx, cy = 0, cy + lh
+            pos.append((cx, cy, text, col))
+            cx += tw + gap
+        return pos, cy + lh
+
+    fs, pos = sizes[-1], []
+    for cand in sizes:
+        pos, total = layout(cand)
+        fs = cand
+        if total <= y_max - y:
+            break
+    drawn, bottom = 0, y
+    for cx, cy, text, col in pos:
+        if y + cy + tl.line_h(fs) > y_max:
+            break
+        if draw:
+            tl.add(x + cx, y + cy, text, fs, col)
+        drawn += 1
+        bottom = y + cy + tl.line_h(fs)
+    return len(tokens) - drawn, bottom, fs
 
 
 def _hms(t: Optional[float]) -> str:
@@ -272,9 +340,13 @@ def _hms(t: Optional[float]) -> str:
 
 def _draw_boxes(tile: np.ndarray, boxes: List[dict], scale: float, tl: _TextLayer,
                 origin: Tuple[int, int], colors: Optional[Dict[int, Tuple[int, int, int]]] = None,
-                label: bool = True, min_fs: int = 13, max_fs: int = 26) -> None:
-    """在已縮放貼上的 crop 上畫 det 框；label=True 時標 `序號 文字 信心`。
+                label: bool = True, min_fs: int = 13, max_fs: int = 26, label_mode: str = "full") -> None:
+    """在已縮放貼上的 crop 上畫 det 框。
 
+    label_mode：
+      "full"  = 標 `序號:文字 信心`（貼紙用，一張圖上只有一兩個框）。
+      "index" = 只標序號（傳票用：傳票一張就有幾十個框，文字標在圖上會互相疊、擋住傳票本身的字；
+                文字改在右側表格對照，見 SheetRenderer._draw_ticket_tile）。
     tile 是整張 canvas（座標用 origin 偏移），文字走 TextLayer（日文）。
     """
     ox, oy = origin
@@ -288,12 +360,24 @@ def _draw_boxes(tile: np.ndarray, boxes: List[dict], scale: float, tl: _TextLaye
         cv2.polylines(tile, [pts.reshape(-1, 1, 2)], True, _bgr(color), thick, cv2.LINE_AA)
         if label:
             bh = float(poly[:, 1].max() - poly[:, 1].min()) * scale
-            fs = int(np.clip(bh * 0.55, min_fs, max_fs))
-            txt = f"{i}:{b.get('text', '')} {float(b.get('conf', 0.0)):.2f}"
+            if label_mode == "index":
+                fs = int(np.clip(bh * 0.50, 17, 26))   # 只有編號：夠大才讀得到，又不至於擋住傳票上的字
+                txt = str(i)
+            else:
+                fs = int(np.clip(bh * 0.55, min_fs, max_fs))
+                txt = f"{i}:{b.get('text', '')} {float(b.get('conf', 0.0)):.2f}"
             lx = int(pts[:, 0].min())
             ly = int(pts[:, 1].min()) - tl.line_h(fs) - 1
             ly = max(oy, ly)
-            tl.add(lx, ly, txt, fs, color=(255, 255, 255), bg=color, bg_alpha=0.55, pad=1)
+            tl.add(lx, ly, txt, fs, color=(255, 255, 255), bg=color,
+                   bg_alpha=0.92 if label_mode == "index" else 0.55, pad=1)
+
+
+class _Seg(list):
+    """一格的證據（時間序）。本身就是 list，額外記「同一個追蹤物件的前一段 / 後一段」。"""
+    problem: bool = False
+    prev: "Optional[_Seg]" = None
+    next: "Optional[_Seg]" = None
 
 
 # ---------------------------------------------------------------------------
@@ -306,48 +390,122 @@ class SheetRenderer:
     FOOTER_H = 64
     MARGIN = 24
 
-    def __init__(self, ctx: DebugContext, font_path: Optional[str], canvas_w: int = 4024, canvas_h: int = 3036):
+    # 所有字級、間距、格子大小都是照這個寬度設計的。canvas_w / canvas_h 不是直接拿來排版，而是
+    # 「先照 REF_W 排好（高度依長寬比），最後縮放到指定尺寸」：改小畫布只會讓字跟檔案一起變小，
+    # 版面不會擠壞（以前字級固定、格子變窄，標題就會互相壓到）。
+    REF_W = 4024
+
+    def __init__(self, ctx: DebugContext, font_path: Optional[str], canvas_w: int = 4024, canvas_h: int = 3036,
+                 tiles_per_page: int = 24, max_pages: int = 4):
         self.ctx = ctx
         self.font_path = font_path
-        self.W, self.H = int(canvas_w), int(canvas_h)
+        self.out_w, self.out_h = int(canvas_w), int(canvas_h)
+        self.W = self.REF_W
+        self.H = max(1, round(self.REF_W * self.out_h / self.out_w))
+        self.tiles_per_page = max(1, int(tiles_per_page))
+        self.max_pages = max(1, int(max_pages))
         self._rev = ctx.sticker_to_tickets()
+        self._ticket_seq: Dict[int, int] = {}      # id(傳票證據) -> 第幾筆傳票（跨頁編號一致）
 
     # ------------------------------------------------------------------
+    def plan(self, entries: List[Evidence]) -> Tuple[List[dict], dict]:
+        """決定每一頁放什麼。塞不下的格子往後面的頁放，不丟掉。
+
+        * 貼紙 / 醬料包：全部先排序（NG、疑似、Unknown … OK 最後），再依 tiles_per_page 切頁，
+          所以有問題的永遠在最前面幾頁。
+        * 傳票：第 1 頁放最新 3 張；更舊的、還留有裁切圖的依序放到後面的頁（每頁 3 張）。
+          裁切圖已經被釋放的舊傳票沒有「圖」可放，只留在 .json。
+        * 最多 max_pages 頁，超過的格子只留在 .json，最後一頁會註明數量。
+        """
+        tickets = [e for e in entries if e.kind in ("ticket", "ticket_extra")]
+        items = [e for e in entries if e.kind in ("sticker", "known")]
+        segs = self._group_tracks(items)
+        segs.sort(key=lambda g: self._verdict_rank(g[-1].data.get("verdict", "")))
+
+        cap = self.tiles_per_page
+        first = tickets[-3:]
+        rest = [e for e in tickets[:-3] if e.crop is not None]
+        t_chunks: List[List[Evidence]] = []
+        while rest:
+            t_chunks.append(rest[-3:])
+            rest = rest[:-3]
+
+        n_pages = min(self.max_pages, max(1, -(-len(segs) // cap), 1 + len(t_chunks)))
+        shown_segs = segs[:cap * n_pages]
+        pages: List[dict] = []
+        for p in range(n_pages):
+            if p == 0:
+                page_tickets = first
+            else:
+                page_tickets = t_chunks[p - 1] if p - 1 < len(t_chunks) else []
+            pages.append({"tickets": page_tickets, "segs": shown_segs[p * cap:(p + 1) * cap], "offset": p * cap})
+        shown_tickets = sum(len(pg["tickets"]) for pg in pages)
+        info = {
+            "n_tickets": len(tickets), "n_tiles": len(segs), "n_reads": len(items),
+            "hidden_tickets": len(tickets) - shown_tickets,
+            "hidden_tiles": len(segs) - len(shown_segs),
+            "all_tickets": tickets,
+        }
+        return pages, info
+
+    def iter_pages(self, entries: List[Evidence], summary: Dict[str, Any]):
+        """逐頁渲染（generator）：寫完一頁就能釋放，不會同時握著好幾張 36MB 的畫布。
+
+        一筆訂單渲染成 1 張或多張圖：第 1 張放傳票與最重要的格子，塞不下的往後放。
+        """
+        pages, info = self.plan(entries)
+        self._ticket_seq = {id(e): i + 1 for i, e in enumerate(info["all_tickets"])}
+        for i, pg in enumerate(pages):
+            yield self._render_page(pg, summary, i + 1, len(pages), info)
+
+    def render_pages(self, entries: List[Evidence], summary: Dict[str, Any]) -> List[np.ndarray]:
+        return list(self.iter_pages(entries, summary))
+
     def render(self, entries: List[Evidence], summary: Dict[str, Any]) -> np.ndarray:
+        """只取第 1 張（相容舊呼叫端 / 測試）。"""
+        return self.render_pages(entries, summary)[0]
+
+    def _render_page(self, pg: dict, summary: Dict[str, Any], page: int, pages: int, info: dict) -> np.ndarray:
         canvas = np.empty((self.H, self.W, 3), np.uint8)
         canvas[:] = _bgr(C_BG)
         tl = _TextLayer(canvas, self.font_path)
 
-        tickets = [e for e in entries if e.kind in ("ticket", "ticket_extra")]
-        items = [e for e in entries if e.kind in ("sticker", "known")]
-
-        body_y0 = self.HEADER_H
+        tickets, segs = pg["tickets"], pg["segs"]
         body_y1 = self.H - self.FOOTER_H
-        self._draw_header(canvas, tl, summary, len(tickets), len(items))
+        # 標頭高度依內容決定（項目多就換行加高），傳回高度當作內容區的起點
+        body_y0 = self._draw_header(canvas, tl, summary, info["n_tickets"], info["n_tiles"], info["n_reads"],
+                                    page, pages)
 
         m = self.MARGIN
-        if tickets and items:
+        if tickets and segs:
             split = int(self.W * 0.44)
         elif tickets:
             split = self.W
         else:
             split = 0
         if tickets:
-            self._draw_ticket_panel(canvas, tl, tickets, (m, body_y0, split - m // 2, body_y1), summary)
-        else:
-            self._empty_panel(canvas, tl, (m, body_y0, (split if split else self.W // 3) - m // 2, body_y1),
-                              "沒有讀到傳票 (no ticket OCR)") if not items else None
-        if items:
+            # 只有第 1 頁提示「更舊的傳票沒有圖」（有圖的舊傳票已經排到後面幾頁）
+            hidden_t = info["hidden_tickets"] if page == 1 else 0
+            self._draw_ticket_panel(canvas, tl, tickets, (m, body_y0, split - m // 2, body_y1), summary, hidden_t)
+        if segs:
             x0 = split + m // 2 if tickets else m
-            self._draw_item_panel(canvas, tl, items, (x0, body_y0, self.W - m, body_y1), summary)
-        elif tickets:
-            pass
-        if not tickets and not items:
+            note = None
+            if page < pages:
+                note = f"（續：第 {page + 1} 頁）"
+            elif info["hidden_tiles"] > 0:
+                note = (f"(另有 {info['hidden_tiles']} 個物件未顯示：已達 max_pages={self.max_pages}，"
+                        f"完整紀錄見 .json)")
+            self._draw_item_panel(canvas, tl, segs, (x0, body_y0, self.W - m, body_y1), summary,
+                                  offset=pg["offset"], note=note)
+        elif page == 1 and not tickets:
             self._empty_panel(canvas, tl, (m, body_y0, self.W - m, body_y1),
                               "這筆訂單沒有任何 OCR / 物件判定紀錄")
 
         self._draw_footer(canvas, tl, summary)
-        return tl.flush()
+        img = tl.flush()
+        if (self.out_w, self.out_h) != (self.W, self.H):
+            img = cv2.resize(img, (self.out_w, self.out_h), interpolation=cv2.INTER_AREA)
+        return img
 
     # ------------------------------------------------------------------
     # header / footer
@@ -361,54 +519,91 @@ class SheetRenderer:
         x0, y0, x1, y1 = rect
         tl.add(x0 + 30, y0 + 30, msg, 40, C_DIM)
 
-    def _draw_header(self, canvas, tl: _TextLayer, s: Dict[str, Any], n_tickets: int, n_items: int):
+    def _draw_header(self, canvas, tl: _TextLayer, s: Dict[str, Any], n_tickets: int, n_tiles: int,
+                     n_reads: int = 0, page: int = 1, pages: int = 1) -> int:
+        """畫標頭並回傳標頭高度。項目一多就換行、把標頭加高，**不再截斷**成「…」。"""
         m = self.MARGIN
-        cv2.rectangle(canvas, (0, 0), (self.W, self.HEADER_H - 8), _bgr(C_PANEL), -1)
+        bw = 520
+        x = m + bw + 40
+        right_w = 500
+        rx = self.W - m - right_w
+        w_val = rx - 20 - (x + 330)               # 值欄位：標籤欄右邊 ~ 右欄左邊
+        VAL_FS, ROW_PITCH, SUB_PITCH = 38, 52, 46
+
+        # ---- 左欄：應有 / 已核對 / 缺少 / 錯誤。依項目換行，最多 3 / 2 行，再多才用「…（共 N 項）」----
+        rows = []
+        for label, key, color, max_lines in (
+            ("應有 expected", "expected", C_TEXT, 3),
+            ("已核對 achieved", "achieved", C_OK, 2),
+            ("缺少 missing", "missing", C_NG if s.get("missing") else C_DIM, 2),
+            ("錯誤 wrong", "wrong", C_NG if s.get("wrong") else C_DIM, 2),
+        ):
+            toks = _count_tokens(s.get(key))
+            lines = _wrap_tokens(tl, toks, VAL_FS, w_val)
+            if len(lines) > max_lines:
+                lines = lines[:max_lines]
+                suffix = f"…（共 {len(toks)} 項，見 .json）"
+                last = lines[-1]
+                while last and tl.width(last + suffix, VAL_FS) > w_val:
+                    last = last[:-1]
+                lines[-1] = last + suffix
+            rows.append((label, lines, color))
+        title_h = tl.line_h(58) + 6
+        left_h = (m - 4) + title_h + sum(ROW_PITCH + SUB_PITCH * (len(ls) - 1) for _, ls, _ in rows)
+
+        # ---- 右欄：頁碼 / 統計 / video / profile / 版本。每一項都依欄寬換行或 clip，不會被畫布邊緣切掉 ----
+        right = []                                   # (文字, 字級, 顏色, x 偏移, 後面空多少)
+        if pages > 1:
+            right.append((f"第 {page} / {pages} 頁", 44, C_PEND, 0, 8))
+        right.append((tl.clip(f"傳票 {n_tickets} 筆   貼紙/物件 {n_tiles} 格", 30, right_w), 30, C_INFO, 0, 0))
+        if n_reads and n_reads != n_tiles:
+            right.append((tl.clip(f"（OCR 讀取 {n_reads} 次，同一張重讀併成一格）", 24, right_w), 24, C_DIM, 0, 0))
+        right.append(("", 0, C_DIM, 0, 8))
+        video_lines = tl.wrap(s.get("video_file") or "-", 28, right_w - 90, max_lines=3)
+        profile_lines = tl.wrap(f"profile: {self.ctx.profile or '-'}", 28, right_w, max_lines=3)
+        sheet_line = f"sheet v{SHEET_VERSION}  {time.strftime('%Y-%m-%d %H:%M:%S')}"
+        right_h = (m - 4) + sum((tl.line_h(sz) if sz else 0) + gap for _, sz, _, _, gap in right) \
+            + max(len(video_lines) * 36, 40) + 8 + len(profile_lines) * tl.line_h(28) + tl.line_h(28)
+
+        hh = max(self.HEADER_H, int(max(left_h, right_h)) + 20)
+
+        # ---------------- 繪製 ----------------
+        cv2.rectangle(canvas, (0, 0), (self.W, hh - 8), _bgr(C_PANEL), -1)
         status = str(s.get("status", "?"))
         color = STATUS_COLOR.get(status, C_NEUTRAL)
-        # 大色塊：最後結果
-        bw, bh = 520, self.HEADER_H - 8 - 2 * m
+        bh = hh - 8 - 2 * m
         cv2.rectangle(canvas, (m, m), (m + bw, m + bh), _bgr(color), -1)
         fs = 120 if len(status) <= 3 else 96
         tl.add(m + (bw - tl.width(status, fs)) // 2, m + 18, status, fs, (255, 255, 255))
         tl.add(m + 24, m + bh - 92, "TIMEOUT 強制收尾" if s.get("timed_out") else "final_status", 36, (255, 255, 255))
         tl.add(m + 24, m + bh - 48, f"tray={s.get('tray_id', '?')}", 32, (255, 255, 255))
 
-        x = m + bw + 40
-        w_avail = self.W - x - m - 520
         y = m - 4
         t0, t1 = s.get("start_time"), s.get("end_time")
         title = (f"單號 {s.get('order_number') or '(未讀到)'}    "
                  f"{t0 or '?'}  →  {t1 or '?'}"
                  f"{'    (' + str(s['duration_sec']) + ' 秒)' if s.get('duration_sec') is not None else ''}")
         y += tl.add(x, y, title, 58, C_TEXT) + 6
-
-        lines = [
-            ("應有 expected", _fmt_counts(s.get("expected")), C_TEXT),
-            ("已核對 achieved", _fmt_counts(s.get("achieved")), C_OK),
-            ("缺少 missing", _fmt_counts(s.get("missing")), C_NG if s.get("missing") else C_DIM),
-            ("錯誤 wrong", _fmt_counts(s.get("wrong")), C_NG if s.get("wrong") else C_DIM),
-        ]
-        for label, value, vc in lines:
+        for label, lines, vc in rows:
             tl.add(x, y, label, 34, C_DIM)
-            wrapped = tl.wrap(value, 38, w_avail - 330, max_lines=1)
-            tl.add(x + 330, y - 2, wrapped[0], 38, vc)
-            y += 52
+            for k, ln in enumerate(lines):
+                tl.add(x + 330, y - 2 + k * SUB_PITCH, ln, VAL_FS, vc)
+            y += ROW_PITCH + SUB_PITCH * (len(lines) - 1)
 
-        # 右側：影片 / 統計
-        rx = self.W - m - 500
         ry = m - 4
-        tl.add(rx, ry, f"傳票 OCR ×{n_tickets}   貼紙/物件 ×{n_items}", 34, C_INFO)
-        ry += 50
-        vf = s.get("video_file") or ""
+        for text, sz, col, xo, gap in right:
+            if sz:
+                ry += tl.add(rx + xo, ry, text, sz, col)
+            ry += gap
         tl.add(rx, ry, "video", 30, C_DIM)
-        for ln in tl.wrap(vf or "-", 28, 500 - 90, max_lines=3):
+        for ln in video_lines:
             tl.add(rx + 90, ry, ln, 28, C_TEXT)
             ry += 36
-        ry += 8
-        tl.add(rx, ry, f"profile: {self.ctx.profile or '-'}", 30, C_DIM)
-        ry += 40
-        tl.add(rx, ry, f"sheet v{SHEET_VERSION}  {time.strftime('%Y-%m-%d %H:%M:%S')}", 28, C_DIM)
+        ry += 8 + (0 if len(video_lines) else 4)
+        for ln in profile_lines:
+            ry += tl.add(rx, ry, ln, 28, C_DIM)
+        tl.add(rx, ry, sheet_line, 28, C_DIM)
+        return hh
 
     def _draw_footer(self, canvas, tl: _TextLayer, s: Dict[str, Any]):
         y = self.H - self.FOOTER_H + 8
@@ -435,17 +630,15 @@ class SheetRenderer:
     # ------------------------------------------------------------------
     # 傳票
     # ------------------------------------------------------------------
-    def _draw_ticket_panel(self, canvas, tl, tickets: List[Evidence], rect, summary):
+    def _draw_ticket_panel(self, canvas, tl, tickets: List[Evidence], rect, summary, hidden: int = 0):
         x0, y0, x1, y1 = rect
-        shown = tickets[-3:] if len(tickets) > 3 else tickets      # 最多 3 張，保留最新
-        hidden = len(tickets) - len(shown)
         gap = 16
-        tile_h = (y1 - y0 - gap * (len(shown) - 1)) // len(shown)
-        for i, ev in enumerate(shown):
+        tile_h = (y1 - y0 - gap * (len(tickets) - 1)) // len(tickets)
+        for i, ev in enumerate(tickets):
             ty0 = y0 + i * (tile_h + gap)
-            self._draw_ticket_tile(canvas, tl, ev, (x0, ty0, x1, ty0 + tile_h), tickets.index(ev) + 1)
+            self._draw_ticket_tile(canvas, tl, ev, (x0, ty0, x1, ty0 + tile_h), self._ticket_seq.get(id(ev), i + 1))
         if hidden > 0:
-            tl.add(x0 + 10, y1 - 40, f"(另有 {hidden} 筆較舊的傳票 OCR 未顯示)", 28, C_PEND, bg=C_BG)
+            tl.add(x0 + 10, y1 - 40, f"(另有 {hidden} 筆較舊的傳票 OCR 沒有圖可顯示，見 .json)", 28, C_PEND, bg=C_BG)
 
     def _draw_ticket_tile(self, canvas, tl: _TextLayer, ev: Evidence, rect, seq: int):
         x0, y0, x1, y1 = rect
@@ -470,12 +663,14 @@ class SheetRenderer:
         for ri, r in enumerate(rows):
             for bi in r.get("box_idx") or []:
                 row_color[int(bi)] = ROW_PALETTE[ri % len(ROW_PALETTE)]
+        crop_bottom = iy
         if ev.crop is not None:
             img, sc = _fit_into(ev.crop, crop_w, crop_h, max_up=1.6)
             h, w = img.shape[:2]
+            crop_bottom = iy + h
             canvas[iy:iy + h, ix:ix + w] = img
             cv2.rectangle(canvas, (ix - 2, iy - 2), (ix + w + 1, iy + h + 1), _bgr(oc), 2)
-            _draw_boxes(canvas, ev.boxes, sc, tl, (ix, iy), colors=row_color or None)
+            _draw_boxes(canvas, ev.boxes, sc, tl, (ix, iy), colors=row_color or None, label_mode="index")
         else:
             tl.add(ix, iy, "(裁切圖已釋放)", 30, C_DIM)
 
@@ -502,7 +697,13 @@ class SheetRenderer:
             status = r.get("status", "ok")
             name = r.get("name")
             line1 = f"{ri + 1}. 「{r.get('raw', '')}」"
-            ty += tl.add(tx + 24, ty, tl.clip(line1, 34, tw - 24), 34, C_TEXT if status == "ok" else C_DIM)
+            bx = r.get("box_idx") or []
+            box_lab = ("框 " + "、".join(str(b) for b in bx)) if bx else ""
+            lab_w = tl.width(box_lab, 26) + 16 if box_lab else 0
+            row_y = ty
+            ty += tl.add(tx + 24, ty, tl.clip(line1, 34, tw - 24 - lab_w), 34, C_TEXT if status == "ok" else C_DIM)
+            if box_lab:      # 圖上的框只有編號，這裡告訴你這一列用到哪幾個框
+                tl.add(tx + tw - lab_w + 16, row_y + 6, box_lab, 26, C_DIM)
             if status == "ok":
                 sc_txt = f"{float(r.get('score', 0)):.0f}分" if r.get("score") is not None else ""
                 q = r.get("qty")
@@ -526,7 +727,7 @@ class SheetRenderer:
                 ty += tl.add(tx + 24, ty, tl.clip(f"× {why}{extra}", 30, tw - 24), 30, C_NG)
             ty += 8
 
-        # ---- 下方：整張票的結論 ----
+        # ---- 下方：整張票的結論（先算高度，上面的框對照要避開它）----
         by = y1 - 8
         notes: List[Tuple[str, Tuple[int, int, int]]] = []
         combos = d.get("combos") or []
@@ -544,6 +745,28 @@ class SheetRenderer:
             for ln in tl.wrap(text, 28, tw, max_lines=2):
                 lines.append((ln, c))
         by -= len(lines) * tl.line_h(28)
+
+        # ---- 框編號對照：圖上的框只標編號，每個框的 rec 文字與信心列在傳票圖的下方（那裡本來就是空的）----
+        # 全部的框都列（不只是沒歸到任何一列的）：歸了列的框，列裡只有合併後的文字，看不到各框自己的信心。
+        # 文字顏色 = 圖上那個框的顏色（歸了列 = 該列顏色，沒歸列 = 依信心），一眼對得上。
+        if ev.boxes:
+            ly = crop_bottom + 14
+            y_max = y1 - pad
+            if y_max - ly > tl.line_h(24) + tl.line_h(17):
+                ly += tl.add(ix, ly, "框編號對照（文字顏色 = 圖上框的顏色）", 24, C_DIM) + 4
+                toks = []
+                for i, bx in enumerate(ev.boxes):
+                    txt = str(bx.get("text", ""))
+                    txt = txt if len(txt) <= 14 else txt[:13] + "…"
+                    toks.append((f"{i}:{txt}({float(bx.get('conf', 0.0)):.2f})",
+                                 row_color.get(i) or conf_color(float(bx.get("conf", 0.0)))))
+                if _flow_tokens(tl, toks, ix, ly, crop_w, y_max, draw=False)[0]:
+                    # 放不下：讓出最後一行寫提示（其餘框的文字都在 .json）
+                    left, bottom, _ = _flow_tokens(tl, toks, ix, ly, crop_w, y_max - tl.line_h(22))
+                    tl.add(ix, bottom + 2, f"…另 {left} 個框見 .json", 22, C_PEND)
+                else:
+                    _flow_tokens(tl, toks, ix, ly, crop_w, y_max)
+
         for ln, c in lines:
             by += tl.add(tx, by, ln, 28, c)
 
@@ -562,30 +785,52 @@ class SheetRenderer:
     # ------------------------------------------------------------------
     # 貼紙 / 醬料包
     # ------------------------------------------------------------------
-    def _group_tracks(self, items: List[Evidence]) -> List[List[Evidence]]:
-        groups: Dict[Any, List[Evidence]] = {}
+    def _group_tracks(self, items: List[Evidence]) -> List["_Seg"]:
+        """把證據分組成「一格」。
+
+        同一個追蹤物件（同一張貼紙實體）的多次 OCR 併成一格，**但在「有問題 / 正常」之間切換時要拆開**。
+
+        為什麼要拆：NG 之後用 OK 貼紙把它蓋住，追蹤器會把新貼紙當成同一個物件重讀，判定從 NG 變 OK。
+        若併成一格只顯示最後一筆，NG 那張貼紙的裁切圖與 det 框就從圖上消失了（只剩一行小字歷史），
+        但這筆訂單其實有發生過錯誤（CSV 記為 NGtoOK）。拆開之後 NG 一格、OK 一格，互相註明。
+
+        只在 problem <-> 正常 切換時拆：OK / 沒讀到字 / 對不到追蹤物件 之間的重讀仍然併成一格，
+        同一張貼紙讀很多次不會把圖面塞滿。
+        """
+        by_track: Dict[Any, List[Evidence]] = {}
         order: List[Any] = []
         for e in items:
             key = e.track if e.track is not None else ("u", e.uid)
-            if key not in groups:
-                groups[key] = []
+            if key not in by_track:
+                by_track[key] = []
                 order.append(key)
-            groups[key].append(e)
-        return [groups[k] for k in order]
+            by_track[key].append(e)
+
+        out: List[_Seg] = []
+        for key in order:
+            segs: List[_Seg] = []
+            for e in by_track[key]:
+                is_problem = e.data.get("verdict") in PROBLEM_VERDICTS
+                if segs and (segs[-1].problem == is_problem):
+                    segs[-1].append(e)
+                else:
+                    seg = _Seg([e])
+                    seg.problem = is_problem
+                    if segs:                       # 同一個追蹤物件的前後兩段互相連結，圖上才能互相註明
+                        seg.prev, segs[-1].next = segs[-1], seg
+                    segs.append(seg)
+            out.extend(segs)
+        return out
 
     @staticmethod
     def _verdict_rank(v: str) -> int:
         return {"NG": 0, "SUSPECT": 1, "UNKNOWN": 2, "UNREAD": 3, "UNTRACKED": 4, "OK": 5}.get(v, 9)
 
-    def _draw_item_panel(self, canvas, tl: _TextLayer, items: List[Evidence], rect, summary):
+    def _draw_item_panel(self, canvas, tl: _TextLayer, segs: List["_Seg"], rect, summary,
+                         offset: int = 0, note: Optional[str] = None):
+        """畫這一頁的貼紙 / 物件格。segs 已經分組、排序、切好頁；編號 = offset + 頁內順序，跨頁連續。"""
         x0, y0, x1, y1 = rect
-        groups = self._group_tracks(items)
-        # NG 排前面，同類保持時間順序
-        groups.sort(key=lambda g: self._verdict_rank(g[-1].data.get("verdict", "")))
-        cap = 24
-        hidden = max(0, len(groups) - cap)
-        groups = groups[:cap]
-        n = len(groups)
+        n = len(segs)
         W, H = x1 - x0, y1 - y0
         gap = 14
         best = (1, n)
@@ -599,12 +844,34 @@ class SheetRenderer:
         cols, rows = best
         cw = (W - gap * (cols - 1)) // cols
         ch = (H - gap * (rows - 1)) // rows
-        for i, g in enumerate(groups):
+        for i, g in enumerate(segs):
             r, c = divmod(i, cols)
             cx0, cy0 = x0 + c * (cw + gap), y0 + r * (ch + gap)
-            self._draw_item_tile(canvas, tl, g, (cx0, cy0, cx0 + cw, cy0 + ch), i + 1)
-        if hidden:
-            tl.add(x1 - 520, y1 - 40, f"(另有 {hidden} 個物件未顯示)", 28, C_PEND, bg=C_BG)
+            self._draw_item_tile(canvas, tl, g, (cx0, cy0, cx0 + cw, cy0 + ch), offset + i + 1)
+        if note:
+            tl.add(x1 - 10 - tl.width(note, 30), y1 - 44, note, 30, C_PEND, bg=C_BG)
+
+    @staticmethod
+    def _title_plan(tl: _TextLayer, vlabel: str, idx: int, kind_txt: str, hms_txt: str, tag: str,
+                    w: int) -> Tuple[str, int, int]:
+        """貼紙格的標題列：左邊「判定 #編號 種類 時間」、右邊「OCR×n」。
+
+        格子窄（格數多 / 畫布小）或判定名稱長（UNREAD、CHECKING、UNKNOWN…）時，左右兩邊會撞在一起。
+        依序嘗試：縮小字級 → 去掉時間 → 去掉種類，挑第一個「左 + 右 + 間隔」放得下的，保證不重疊。
+        回傳 (左邊文字, 字級, 右邊標籤字級)。
+        """
+        avail = w - 28
+        full = f"{vlabel}   #{idx} {kind_txt}  {hms_txt}"
+        no_time = f"{vlabel}   #{idx} {kind_txt}"
+        short = f"{vlabel} #{idx}"
+        options = ([(full, fs) for fs in (34, 30, 26, 22)] + [(no_time, fs) for fs in (26, 22)]
+                   + [(short, 22), (short, 18)])
+        for text, fs in options:
+            tag_fs = max(18, fs - 6)
+            need = tl.width(text, fs) + ((16 + tl.width(tag, tag_fs)) if tag else 0)
+            if need <= avail:
+                return text, fs, tag_fs
+        return short, 18, 18
 
     def _draw_item_tile(self, canvas, tl: _TextLayer, group: List[Evidence], rect, idx: int):
         x0, y0, x1, y1 = rect
@@ -618,10 +885,12 @@ class SheetRenderer:
         title_h = 54
         cv2.rectangle(canvas, (x0, y0), (x1, y0 + title_h), _bgr(vcolor), -1)
         kind_txt = "醬料包/物件" if last.kind == "known" else "貼紙"
-        tl.add(x0 + 14, y0 + 6, f"{vlabel}   #{idx} {kind_txt}  {_hms(last.t)}", 34, (255, 255, 255))
-        if len(group) > 1:
-            tag = f"OCR×{len(group)}"
-            tl.add(x1 - 14 - tl.width(tag, 30), y0 + 9, tag, 30, (255, 255, 255))
+        tag = f"OCR×{len(group)}" if len(group) > 1 else ""
+        left_txt, tfs, tag_fs = self._title_plan(tl, vlabel, idx, kind_txt, _hms(last.t), tag, w)
+        tl.add(x0 + 14, y0 + 6, left_txt, tfs, (255, 255, 255))
+        if tag:
+            tl.add(x1 - 14 - tl.width(tag, tag_fs), y0 + 6 + (tl.line_h(tfs) - tl.line_h(tag_fs)) // 2, tag,
+                   tag_fs, (255, 255, 255))
 
         pad = 12
         crop_box_h = int((y1 - y0 - title_h) * 0.48)
@@ -711,6 +980,18 @@ class SheetRenderer:
         if exp is not None:
             chk = d.get("checked") or []
             out.append((f"待核對 {len(exp)} 項 / 已核對 {len(chk)}", C_DIM, -4))
+        # 同一個追蹤物件前後判定不同（例如 NG 之後被 OK 貼紙蓋住）：兩格互相註明
+        nxt = getattr(group, "next", None)
+        prv = getattr(group, "prev", None)
+        if nxt:
+            nd = nxt[-1].data
+            out.append((f"之後這個位置的追蹤物件改判為 {nd.get('verdict')}"
+                        f"「{nd.get('raw') or nd.get('item_name') or '?'}」（{_hms(nxt[-1].t)}）："
+                        f"原本的貼紙可能被蓋住或換掉", C_PEND, -2))
+        if prv:
+            pd = prv[-1].data
+            out.append((f"這個位置先前判為 {pd.get('verdict')}「{pd.get('raw') or pd.get('item_name') or '?'}」"
+                        f"（{_hms(prv[-1].t)}），之後被讀成這張", C_PEND, -2))
         for evt in (d.get("events") or [])[-3:]:
             out.append((f"事件 {evt}", C_PEND, -2))
         if len(group) > 1:
@@ -746,6 +1027,8 @@ class DebugSheet:
         self.save_json = bool(getattr(cfg, "save_json", True))
         self.mode = str(getattr(cfg, "mode", "all"))
         self.max_entries = int(getattr(cfg, "max_entries", 80))
+        self.tiles_per_page = max(1, int(getattr(cfg, "tiles_per_page", 24)))
+        self.max_pages = max(1, int(getattr(cfg, "max_pages", 4)))   # 上限 99 在載入設定時檢查（config.py）
         self.crop_max_side = int(getattr(cfg, "crop_max_side", 1600))
         self.slow_record_s = float(getattr(cfg, "slow_record_ms", 50.0)) / 1000.0
         self.slow_render_s = float(getattr(cfg, "slow_render_s", 5.0))
@@ -770,6 +1053,7 @@ class DebugSheet:
         if self.enabled:
             logger.info(
                 f"[debug_sheet] 啟用 mode={self.mode} canvas={self.canvas_w}x{self.canvas_h} "
+                f"每頁 {self.tiles_per_page} 格、最多 {self.max_pages} 頁 "
                 f"輸出={self.out_root}/<日期>/{self.folder}/ font={self.font_path}"
             )
 
@@ -866,14 +1150,17 @@ class DebugSheet:
                 for old in with_crop[:-4]:
                     old.crop = None
             if len(lst) > self.max_entries:
-                # 釋放最舊、而且不是該追蹤物件最新一筆的貼紙裁切圖，文字紀錄保留
+                # 釋放最舊、而且不是該追蹤物件最新一筆的貼紙裁切圖，文字紀錄保留。
+                # 「有問題」的判定（NG / 疑似 / Unknown）不釋放：NG 之後常被同一個位置的 OK 讀取蓋過，
+                # 它就不再是「最新一筆」，不保護的話長訂單裡最先被釋放的就是它。
                 latest_of_track = {}
                 for e in lst:
                     if e.track is not None:
                         latest_of_track[e.track] = e.uid
                 for e in lst:
                     if (e.crop is not None and e.kind in ("sticker", "known")
-                            and latest_of_track.get(e.track) != e.uid):
+                            and latest_of_track.get(e.track) != e.uid
+                            and e.data.get("verdict") not in PROBLEM_VERDICTS):
                         e.crop = None
                         break
         return ev
@@ -969,7 +1256,7 @@ class DebugSheet:
                 self.dropped += 1
                 logger.warning(f"[debug_sheet] 渲染佇列已滿，丟棄這張總覽圖（累積 {self.dropped}）: {name}")
                 return None
-            return str(path)
+            return str(self.page_path(path, 1))
         except Exception as e:
             logger.warning(f"[debug_sheet] finalize 失敗（略過）: {e!r}")
             return None
@@ -992,11 +1279,34 @@ class DebugSheet:
             finally:
                 self._queue.task_done()
 
-    def render_to_array(self, entries: List[Evidence], summary: Dict[str, Any]) -> np.ndarray:
-        """同步渲染（測試與離線重畫用）。"""
+    def _get_renderer(self) -> SheetRenderer:
         if self._renderer is None:
-            self._renderer = SheetRenderer(self.ctx, self.font_path, self.canvas_w, self.canvas_h)
-        return self._renderer.render(entries, summary)
+            self._renderer = SheetRenderer(self.ctx, self.font_path, self.canvas_w, self.canvas_h,
+                                           self.tiles_per_page, self.max_pages)
+        return self._renderer
+
+    def render_pages(self, entries: List[Evidence], summary: Dict[str, Any]) -> List[np.ndarray]:
+        """同步渲染所有頁（測試與離線重畫用）。塞不下的格子會依序放到後面的頁。"""
+        return self._get_renderer().render_pages(entries, summary)
+
+    def render_to_array(self, entries: List[Evidence], summary: Dict[str, Any]) -> np.ndarray:
+        """只取第 1 頁（相容舊呼叫端）。"""
+        return self.render_pages(entries, summary)[0]
+
+    @staticmethod
+    def page_path(path: Path, page: int) -> Path:
+        """每一頁都帶固定 2 碼頁碼，格式一致：<名稱>_p01.jpg、<名稱>_p02.jpg…（單頁訂單也是 _p01）。
+
+        path 是不含頁碼的基底（<名稱>.jpg）。頁數上限 99，由 max_pages 設定保證（config.py 載入時檢查）。
+        .json 是整筆訂單共用的一份，不帶頁碼（見 json_path_for）。
+        """
+        return path.with_name(f"{path.stem}_p{page:02d}{path.suffix}")
+
+    @staticmethod
+    def json_path_for(sheet_path) -> Path:
+        """任何一頁的圖片路徑 -> 這筆訂單共用的 .json 路徑（去掉檔名最後固定 4 個字元的 _pNN）。"""
+        p = Path(sheet_path)
+        return p.with_name(p.stem[:-4] + ".json")
 
     def _write_one(self, entries: List[Evidence], summary: Dict[str, Any], path: Path,
                    cost: Optional[dict] = None, t_enq: Optional[float] = None) -> None:
@@ -1005,31 +1315,45 @@ class DebugSheet:
         queue_wait = (t0 - t_enq) if t_enq is not None else 0.0
 
         self._shrink_entries(entries)
-        img = self.render_to_array(entries, summary)
-        t1 = time.perf_counter()
-
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(path.name + ".tmp")
-        ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), self.quality])
-        if not ok:
-            raise RuntimeError("cv2.imencode 失敗")
-        t2 = time.perf_counter()
 
-        # 先寫 .tmp 再改名：rclone / aibox_uploader 掃資料夾時不會撿到寫一半的檔案
-        with open(tmp, "wb") as f:
-            f.write(buf.tobytes())
-        os.replace(tmp, path)
-        t3 = time.perf_counter()
+        render_s = encode_s = write_s = 0.0
+        paths: List[Path] = []
+        total_bytes = 0
+        shape = None
+        t_mark = time.perf_counter()
+        # 逐頁渲染、編碼、寫檔：寫完一頁就釋放，記憶體只握一張畫布
+        for page_no, img in enumerate(self._get_renderer().iter_pages(entries, summary), 1):
+            t_a = time.perf_counter()
+            render_s += t_a - t_mark
+            ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), self.quality])
+            if not ok:
+                raise RuntimeError("cv2.imencode 失敗")
+            t_b = time.perf_counter()
+            encode_s += t_b - t_a
+            page_path = self.page_path(path, page_no)
+            tmp = page_path.with_name(page_path.name + ".tmp")
+            # 先寫 .tmp 再改名：rclone / aibox_uploader 掃資料夾時不會撿到寫一半的檔案
+            with open(tmp, "wb") as f:
+                f.write(buf.tobytes())
+            os.replace(tmp, page_path)
+            write_s += time.perf_counter() - t_b
+            paths.append(page_path)
+            total_bytes += len(buf)
+            shape = shape or img.shape
+            t_mark = time.perf_counter()
+        n_pages = len(paths)
 
+        t_j = time.perf_counter()
         if self.save_json:
-            self._dump_json(entries, summary, path.with_suffix(".json"))
-        t4 = time.perf_counter()
+            self._dump_json(entries, summary, path.with_suffix(".json"), [p.name for p in paths])
+        json_s = time.perf_counter() - t_j
 
-        render_s, encode_s, write_s, json_s = t1 - t0, t2 - t1, t3 - t2, t4 - t3
-        total_s = t4 - t0
+        total_s = time.perf_counter() - t0
         main_total = float(cost.get("total", 0.0)) + float(cost.get("finalize", 0.0))
         self.last_timing = {
-            "path": str(path), "bytes": len(buf), "entries": len(entries),
+            "path": str(paths[0]), "paths": [str(p) for p in paths], "pages": n_pages,
+            "bytes": total_bytes, "entries": len(entries),
             "queue_wait_s": queue_wait, "render_s": render_s, "encode_s": encode_s,
             "write_s": write_s, "json_s": json_s, "bg_total_s": total_s,
             "main_n": int(cost.get("n", 0)), "main_total_s": main_total,
@@ -1046,9 +1370,10 @@ class DebugSheet:
         tot["total_max"] = max(tot["total_max"], total_s)
 
         by = " ".join(f"{k}={v * 1000:.1f}ms" for k, v in sorted(cost.get("by", {}).items(), key=lambda kv: -kv[1]))
+        pages_txt = f"（共 {n_pages} 頁）" if n_pages > 1 else ""
         logger.info(
-            f"[debug_sheet][timing] 單號={summary.get('order_number')} {summary.get('status')} {path.name} "
-            f"{img.shape[1]}x{img.shape[0]} {len(buf) / 1e6:.2f}MB 證據{len(entries)}筆\n"
+            f"[debug_sheet][timing] 單號={summary.get('order_number')} {summary.get('status')} {paths[0].name}{pages_txt} "
+            f"{shape[1]}x{shape[0]} {total_bytes / 1e6:.2f}MB 證據{len(entries)}筆\n"
             f"    主迴圈(影響辨識): 累計 {main_total * 1000:.1f}ms / 記錄 {cost.get('n', 0)} 次"
             f"，單次最大 {float(cost.get('max', 0.0)) * 1000:.1f}ms({cost.get('max_label', '-')})"
             f"，finalize {float(cost.get('finalize', 0.0)) * 1000:.1f}ms"
@@ -1056,20 +1381,23 @@ class DebugSheet:
             f"    背景(獨立 thread): 佇列等待 {queue_wait:.2f}s + 渲染 {render_s:.2f}s + 編碼 {encode_s:.2f}s"
             f" + 寫檔 {write_s:.2f}s + json {json_s:.2f}s = {total_s:.2f}s"
             f"（佇列深度 {cost.get('queue_depth', 0)}）\n"
-            f"    累計 {tot['n']} 張：背景平均 {tot['total_sum'] / tot['n']:.2f}s / 最大 {tot['total_max']:.2f}s，"
+            f"    累計 {tot['n']} 筆訂單：背景平均 {tot['total_sum'] / tot['n']:.2f}s / 最大 {tot['total_max']:.2f}s，"
             f"渲染平均 {tot['render_sum'] / tot['n']:.2f}s / 最大 {tot['render_max']:.2f}s"
         )
         if total_s > self.slow_render_s:
             logger.warning(
-                f"[debug_sheet][timing] 背景出圖偏慢 {total_s:.1f}s（門檻 {self.slow_render_s:g}s）："
+                f"[debug_sheet][timing] 背景出圖偏慢 {total_s:.1f}s（{n_pages} 頁，門檻 {self.slow_render_s:g}s）："
                 f"渲染 {render_s:.1f}s 編碼 {encode_s:.1f}s 寫檔 {write_s:.1f}s。"
-                f"持續偏慢請考慮 mode: ng_only 或調低 jpeg_quality"
+                f"持續偏慢請考慮 mode: ng_only、調低 jpeg_quality 或 max_pages"
             )
 
     @staticmethod
-    def _dump_json(entries: List[Evidence], summary: Dict[str, Any], path: Path) -> None:
+    def _dump_json(entries: List[Evidence], summary: Dict[str, Any], path: Path,
+                   files: Optional[List[str]] = None) -> None:
         doc = {
             "version": SHEET_VERSION,
+            "pages": len(files or []) or 1,
+            "files": files or [],
             "summary": summary,
             "entries": [
                 {

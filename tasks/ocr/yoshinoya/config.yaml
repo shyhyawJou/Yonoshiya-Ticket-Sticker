@@ -177,6 +177,8 @@ debug_sheet:
   font_path: ''
   max_entries: 80
   crop_max_side: 1600
+  tiles_per_page: 24
+  max_pages: 4
   slow_record_ms: 50.0
   slow_render_s: 5.0
 ocr_routes:

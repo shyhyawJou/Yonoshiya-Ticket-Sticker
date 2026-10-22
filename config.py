@@ -308,12 +308,17 @@ class DebugSheetCfg:
                     （NG / NGtoOK）或有錯誤品項、缺品項才出圖，省磁碟。
     root_dir:       留空 = 沿用 csv_log.root_dir，圖片會跟當天的影片放在同一個日期資料夾。
     folder:         日期資料夾底下的子資料夾名稱。
-    canvas_w/h:     總覽圖尺寸，預設 4024 x 3036（跟相機原圖同尺寸）。
+    canvas_w/h:     輸出圖尺寸，預設 4024 x 3036。版面先照 4024 寬排好再縮放到這個尺寸（改小只讓字與檔案變小，
+                    不會讓渲染變快），建議長寬比維持 4:3。
     jpeg_quality:   JPEG 品質。
     save_json:      同名 .json 一併存（結構化的判定資料，方便 grep / 重新繪圖）。
     font_path:      日文字型，留空 = 專案內的 tasks/ocr/NotoSansJP-Bold.otf。
     max_entries:    單筆訂單最多保留幾筆 OCR 紀錄的裁切圖（超過就丟最舊的貼紙裁切圖，文字紀錄保留）。
     crop_max_side:  背景出圖前先把裁切圖縮到最長邊不超過這個值（主迴圈只複製、不縮圖，縮圖不佔辨識時間）。
+    tiles_per_page: 每張圖最多放幾格貼紙 / 醬料包（一格 = 一個追蹤物件；NG 後被 OK 蓋住會拆成兩格）。
+                    放不下的往下一張圖放，不丟掉；有問題的（NG / 疑似 / Unknown）排在最前面。
+    max_pages:      一筆訂單最多輸出幾張圖，防止極端訂單吃光磁碟與 CPU。超過的格子只留在 .json。
+                    範圍 1~99（頁碼固定 2 碼 _p01~_p99），設超過 99 會在載入設定時直接報錯。
     slow_record_ms: 主迴圈裡單次「記錄」超過幾毫秒就記 WARNING（這部分會直接拖慢辨識）。
     slow_render_s:  背景一張圖（渲染 + 編碼 + 寫檔）超過幾秒就記 WARNING。
     每張圖輸出時都會有一行 [debug_sheet][timing]，分開列出主迴圈與背景各花多久。
@@ -329,6 +334,8 @@ class DebugSheetCfg:
     font_path: str = ""
     max_entries: int = 80
     crop_max_side: int = 1600
+    tiles_per_page: int = 24
+    max_pages: int = 4
     slow_record_ms: float = 50.0
     slow_render_s: float = 5.0
 
@@ -794,6 +801,10 @@ def load_config(config_path: str, overrides=None) -> Config:
         if _mode not in ("all", "ng_only"):
             logger.warning(f"[config] debug_sheet.mode={_mode!r} 不認得（只有 all / ng_only），改用 all")
             _mode = "all"
+        # 頁碼固定 2 碼（_p01~_p99），所以 max_pages 不能超過 99：直接報錯，不悄悄改值。
+        _max_pages = max(1, int(ds.get("max_pages", DebugSheetCfg.max_pages)))
+        if _max_pages > 99:
+            raise ValueError(f"debug_sheet.max_pages={_max_pages} 超過上限 99（頁碼固定 2 碼 _p01~_p99），請改成 99 以下")
         debug_sheet_cfg = DebugSheetCfg(
             enabled=bool(ds.get("enabled", DebugSheetCfg.enabled)),
             mode=_mode,
@@ -806,6 +817,8 @@ def load_config(config_path: str, overrides=None) -> Config:
             font_path=str(ds.get("font_path") or ""),
             max_entries=int(ds.get("max_entries", DebugSheetCfg.max_entries)),
             crop_max_side=int(ds.get("crop_max_side", DebugSheetCfg.crop_max_side)),
+            tiles_per_page=max(1, int(ds.get("tiles_per_page", DebugSheetCfg.tiles_per_page))),
+            max_pages=_max_pages,
             slow_record_ms=float(ds.get("slow_record_ms", DebugSheetCfg.slow_record_ms)),
             slow_render_s=float(ds.get("slow_render_s", DebugSheetCfg.slow_render_s)),
         )
