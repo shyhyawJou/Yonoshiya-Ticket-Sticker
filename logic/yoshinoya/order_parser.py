@@ -145,6 +145,9 @@ class OrderParser:
         self.folded = FoldedMatcher(menu_index)
         # 最近一次 parse() 找到的菜單區域下界，crop 座標的兩個端點；給畫面 overlay 用
         self._menu_bottom_line = None
+        # 最近一次 parse() 每一列的比對細節（原始文字 / 比對到的菜名 / 分數 / 數量與來源 / 被丟棄的原因 /
+        # 該列用到的 det 框 index），給 utils/debug_sheet 的除錯總覽圖用。只讀，不影響解析結果。
+        self.last_debug_rows: List[dict] = []
 
     def pop_menu_bottom_line(self):
         """取出最近一次 parse() 的菜單區域下界 ((x0, y0), (x1, y1))，沒找到為 None。
@@ -167,6 +170,7 @@ class OrderParser:
         parsed_items: List[ParsedItem] = []
         order_number: Optional[str] = None
         self._menu_bottom_line = None
+        self.last_debug_rows = []
         nn_x = None  # 擺正後的數量欄中心 X 座標
         nn_w = None  # 擺正後的數量欄寬度
 
@@ -375,6 +379,7 @@ class OrderParser:
                 continue
 
             valid_items.append({
+                'idx': idx,   # zipped_data 的 index；is_flip 時要換算回 dt_boxes 的原始 index（除錯圖用）
                 'text': text,
                 'score': score,
                 'orig_box': orig_box,
@@ -435,6 +440,18 @@ class OrderParser:
             matched_str, match_score = self.folded.resolve(
                 merged_text, self.menus_ticket, self.fuzzy_matcher
             )
+
+            n_boxes = len(flip_dt)
+            dbg_row = {
+                "raw": merged_text,
+                "name": matched_str,
+                "score": float(match_score) if matched_str is not None else 0.0,
+                "qty": None,
+                "qty_src": "",
+                "status": "no_match" if matched_str is None else "low_score",
+                "box_idx": [(n_boxes - 1 - it['idx']) if is_flip else it['idx'] for it in row],
+            }
+            self.last_debug_rows.append(dbg_row)
 
             if matched_str is not None:
                 if match_score > 40:
@@ -526,6 +543,7 @@ class OrderParser:
                     # 正常列只要任一條不成立就會保留（有前導數量、有數字框、
                     # 數量欄讀得到、或名稱命中等價層），行為跟修改前一致。
                     if qty_source is None and match_score < WEAK_MATCH_SCORE:
+                        dbg_row.update(status="ghost_dropped", qty=match_num)
                         logger.warning(
                             f"[幽靈列防護]: 丟棄疑似版面文字的列 -> '{merged_text}' "
                             f"(勉強對到 '{matched_str}' score={match_score:.1f} "
@@ -539,6 +557,7 @@ class OrderParser:
                         f"'{matched_str}' (score={match_score:.1f}) ... "
                         f"數量: {match_num} (來源={qty_source or '無，預設1'})"
                     )
+                    dbg_row.update(status="ok", qty=match_num, qty_src=qty_source or "無，預設1")
                     parsed_items.append((matched_str, match_num))
 
         logger.info(f"[訂單解析結果]: {parsed_items}, 編號: {order_number}")

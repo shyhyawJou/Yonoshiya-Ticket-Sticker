@@ -294,6 +294,45 @@ class CloudUploadCfg:
     retry_sec: int = 300
 
 
+@dataclass
+class DebugSheetCfg:
+    """訂單除錯總覽圖（utils/debug_sheet.py）。
+
+    一筆訂單收尾時，把這筆訂單看過的傳票 / 貼紙 / 醬料包的裁切圖、OCR det 框、
+    rec 文字、模糊比對結果、menus_mapping 對應名稱與 OK/NG 判定，全部排進
+    一張 canvas_w x canvas_h 的圖，存在 <root_dir>/<YYYYMMDD>/<folder>/。
+    跟 dla_guard 一樣整段可以不寫，全部欄位都有預設值。
+
+    enabled:        false = 完全不收集、不渲染。
+    mode:           "all" = 每筆訂單都出圖；"ng_only" = 只有最後不是 OK 的訂單
+                    （NG / NGtoOK）或有錯誤品項、缺品項才出圖，省磁碟。
+    root_dir:       留空 = 沿用 csv_log.root_dir，圖片會跟當天的影片放在同一個日期資料夾。
+    folder:         日期資料夾底下的子資料夾名稱。
+    canvas_w/h:     總覽圖尺寸，預設 4024 x 3036（跟相機原圖同尺寸）。
+    jpeg_quality:   JPEG 品質。
+    save_json:      同名 .json 一併存（結構化的判定資料，方便 grep / 重新繪圖）。
+    font_path:      日文字型，留空 = 專案內的 tasks/ocr/NotoSansJP-Bold.otf。
+    max_entries:    單筆訂單最多保留幾筆 OCR 紀錄的裁切圖（超過就丟最舊的貼紙裁切圖，文字紀錄保留）。
+    crop_max_side:  背景出圖前先把裁切圖縮到最長邊不超過這個值（主迴圈只複製、不縮圖，縮圖不佔辨識時間）。
+    slow_record_ms: 主迴圈裡單次「記錄」超過幾毫秒就記 WARNING（這部分會直接拖慢辨識）。
+    slow_render_s:  背景一張圖（渲染 + 編碼 + 寫檔）超過幾秒就記 WARNING。
+    每張圖輸出時都會有一行 [debug_sheet][timing]，分開列出主迴圈與背景各花多久。
+    """
+    enabled: bool = True
+    mode: str = "all"
+    root_dir: str = ""
+    folder: str = "debug_sheet"
+    canvas_w: int = 4024
+    canvas_h: int = 3036
+    jpeg_quality: int = 85
+    save_json: bool = True
+    font_path: str = ""
+    max_entries: int = 80
+    crop_max_side: int = 1600
+    slow_record_ms: float = 50.0
+    slow_render_s: float = 5.0
+
+
 def _parse_hhmm(value, default: str) -> str:
     """YAML 1.1 會把沒加引號的 1:00 / 10:30 當成 60 進位整數（= 60 / 630），這裡轉回 HH:MM。
     （有前導零的 01:00 不會被轉，本來就是字串。）"""
@@ -334,6 +373,7 @@ class Config:
     dla_guard: DlaGuardCfg = field(default_factory=DlaGuardCfg)
     order_guard: OrderGuardCfg = field(default_factory=OrderGuardCfg)
     cloud_upload: CloudUploadCfg = field(default_factory=CloudUploadCfg)
+    debug_sheet: DebugSheetCfg = field(default_factory=DebugSheetCfg)
     # 該部署「真正會出現」的詞彙。與 menus_ticket/menus_sticker 分開，
     # 因為後者來自 menus_mapping.yaml（吉野家 1235 筆），拿來當小場景的
     # 模糊比對候選會大量錯配。留空則退回舊行為。
@@ -748,6 +788,28 @@ def load_config(config_path: str, overrides=None) -> Config:
             retry_sec=int(cu.get("retry_sec", CloudUploadCfg.retry_sec)),
         )
 
+        # 除錯總覽圖：舊 config 沒這一段也能載入，整段用 dataclass 的預設值
+        ds = base.get("debug_sheet") or {}
+        _mode = str(ds.get("mode", DebugSheetCfg.mode)).strip().lower()
+        if _mode not in ("all", "ng_only"):
+            logger.warning(f"[config] debug_sheet.mode={_mode!r} 不認得（只有 all / ng_only），改用 all")
+            _mode = "all"
+        debug_sheet_cfg = DebugSheetCfg(
+            enabled=bool(ds.get("enabled", DebugSheetCfg.enabled)),
+            mode=_mode,
+            root_dir=str(ds.get("root_dir") or ""),
+            folder=str(ds.get("folder", DebugSheetCfg.folder)),
+            canvas_w=int(ds.get("canvas_w", DebugSheetCfg.canvas_w)),
+            canvas_h=int(ds.get("canvas_h", DebugSheetCfg.canvas_h)),
+            jpeg_quality=int(ds.get("jpeg_quality", DebugSheetCfg.jpeg_quality)),
+            save_json=bool(ds.get("save_json", DebugSheetCfg.save_json)),
+            font_path=str(ds.get("font_path") or ""),
+            max_entries=int(ds.get("max_entries", DebugSheetCfg.max_entries)),
+            crop_max_side=int(ds.get("crop_max_side", DebugSheetCfg.crop_max_side)),
+            slow_record_ms=float(ds.get("slow_record_ms", DebugSheetCfg.slow_record_ms)),
+            slow_render_s=float(ds.get("slow_render_s", DebugSheetCfg.slow_render_s)),
+        )
+
         # Camera
         ca = base["camera_params"]
         bright_ctrl = base["birghtness_controller"]
@@ -785,6 +847,7 @@ def load_config(config_path: str, overrides=None) -> Config:
             dla_guard=dla_guard_cfg,
             order_guard=order_guard_cfg,
             cloud_upload=cloud_upload_cfg,
+            debug_sheet=debug_sheet_cfg,
             vocab_ticket=vocab_ticket,
             vocab_sticker=vocab_sticker,
             mode=mode,

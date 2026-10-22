@@ -21,6 +21,7 @@ from loguru import logger
 from logic.models import Tray, TrayState
 from logic.order_requirements import OrderRequirements
 from logic.readers.base import find_task_item
+from logic.readers.debug_hooks import NO_DEBUG
 
 
 def _is_subsequence(short: str, long: str) -> bool:
@@ -65,9 +66,11 @@ class StickerReader:
                 f"[wrong_confirm] 強證據一次成立：比對分數 >= {self.wrong_item_strong_score:g}"
                 f" 且 rec 信心 >= {self.wrong_item_strong_conf:g}"
             )
+        # 除錯總覽圖的收集 hooks，由 TrayStateMachine 注入；沒注入時是 no-op（見 readers/debug_hooks.py）
+        self.debug = NO_DEBUG
 
     def apply_sticker_result(self, tray: Tray, tray_id: str, dt_boxes, rec_res, is_flip, task_bbox,
-                             target=None):
+                             target=None, frame_crop=None):
         matched_item = None
         match_status = "UNRECOGNIZED"
 
@@ -85,6 +88,7 @@ class StickerReader:
         strong = match_status == "WRONG_ITEM" and self.is_strong_wrong(tray, matched_item)
         self.settle(tray, tray_id, target_ts, matched_item, match_status,
                     confirm=self.wrong_item_confirm, raw_text=raw_text, strong=strong)
+        self.debug.sticker(tray, tray_id, target_ts, frame_crop, dt_boxes, rec_res, matched_item, match_status)
 
     def is_strong_wrong(self, tray: Tray, matched_item) -> bool:
         """這次讀到的錯誤品名是不是強證據，可以不等滿 wrong_item_confirm 次就成立。

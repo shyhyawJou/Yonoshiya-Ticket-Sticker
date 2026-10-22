@@ -4,6 +4,8 @@ from typing import Dict, List, Optional
 import re
 import time
 from collections import Counter
+from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import cv2
@@ -13,6 +15,7 @@ from utils.mqtt_bus import MqttBus
 from utils.schema import Detection
 from utils.csv_writer import CsvWriter
 from utils.perf_stats import LOOP_PROFILER
+from utils.debug_sheet import DebugContext, DebugSheet
 
 from config import Config, OrderGuardCfg
 from ocr_engine import StandaloneRecDLA
@@ -224,6 +227,22 @@ class LogicEngine:
         self.tracker.STABLE_CONFIRM_CLASSES = set(cfg.object_class_items)
         self.tracker.pending_buffer.item_resolver = cfg.object_class_items.get
 
+        # 除錯總覽圖：一筆訂單收尾時把傳票 / 貼紙 / 醬料包的裁切圖、det 框、rec 文字、
+        # 模糊比對與 mapping 結果排成一張圖（見 utils/debug_sheet.py）。只讀不寫，
+        # 舊 config / 測試替身沒有 debug_sheet 這一段時等於停用。
+        self.debug_sheet = DebugSheet(
+            getattr(cfg, "debug_sheet", None) or SimpleNamespace(enabled=False),
+            root_dir=getattr(getattr(cfg, "csv_log", None), "root_dir", "/mnt/reserved/record/stream"),
+            project_dir=Path(__file__).resolve().parent,
+            context=DebugContext(
+                menu_variants=self.menu_variants,
+                object_class_items=dict(getattr(cfg, "object_class_items", None) or {}),
+                profile=(f"{getattr(cfg, 'profile_name', '?')} / parser={getattr(cfg, 'ticket_parser', '?')}"
+                         f" / mode={self.mode}"),
+            ),
+            crop_fn=lambda frame, xywhr: self.mmr.crop_by_angle(frame, *xywhr)[0],
+        )
+
         # tray 狀態機（易變層）：操作 tracker.trays，但不擁有它
         self.state_machine = TrayStateMachine(
             object_class_items=cfg.object_class_items,
@@ -241,6 +260,7 @@ class LogicEngine:
             wrong_item_confirm=int(getattr(cfg.stability, "wrong_item_confirm", 0) or 0),
             wrong_item_strong_score=float(getattr(cfg.stability, "wrong_item_strong_score", 0) or 0),
             wrong_item_strong_conf=float(getattr(cfg.stability, "wrong_item_strong_conf", 0.9) or 0),
+            debug_sheet=self.debug_sheet,
         )
 
         # CSV log 跟影片放在同一個日期資料夾底下 (<root>/<日期>/csv_logs/)，
@@ -285,22 +305,26 @@ class LogicEngine:
     # 上面每一種結束 / 重置都印 [訂單結束]（_log_order_end），兩行之間就是這筆訂單的全部 log。
     # ------------------------------------------------------------
     def reset(self, tray_id: str):
+        self.debug_sheet.discard(tray_id)     # App 重置 = 這筆訂單作廢，不出總覽圖
         # single 模式只有一筆訂單，a / b / all 結果相同（見 SingleOrderTracker.reset）
         self._end_open_orders(f"App reset a ({tray_id})", None if self.mode != "tray" else [tray_id])
         self.tracker.reset(tray_id)
         self.on_recording_stop(reason=f"reset:{tray_id}")
 
     def reset_all(self):
+        self.debug_sheet.discard()
         self._end_open_orders("App reset all")
         self.tracker.reset_all()
         self.on_recording_stop(reason="reset_all")
 
     def reset_tray_states(self, tray_id: str):
+        self.debug_sheet.discard(tray_id)
         self._end_open_orders(f"App reset b ({tray_id})", None if self.mode != "tray" else [tray_id])
         self.tracker.reset_tray_states(tray_id)
         self.on_recording_stop(reason=f"reset_tray_states:{tray_id}")
 
     def remove_tray(self, tray_id: str, ts_utc: str) -> bool:
+        self.debug_sheet.discard(tray_id)     # 正常收尾時 finalize 已經取走證據，這裡只清空殼 / 異常殘留
         self.on_recording_stop(reason=f"tray_removed:{tray_id}")
         return self.tracker.remove_tray(tray_id, ts_utc)
 
@@ -314,6 +338,8 @@ class LogicEngine:
         """
         self._end_open_orders(f"切換模式 ({reason})")
         self.on_recording_stop(reason=reason)
+        self.debug_sheet.discard()
+        self.debug_sheet.shutdown()   # 佇列裡已經收尾的訂單要把圖寫完
 
     def _mark_order_starts(self) -> None:
         """[訂單開始]：tray 第一次出現傳票（ticket_mat 模式是護貝板被遮住且有傳票）。
@@ -391,6 +417,7 @@ class LogicEngine:
         """
         ts_utc = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime())
         tray_movements: dict = {}
+        self.debug_sheet.set_frame(frame)     # 醬料包裁切圖用；只留參考，update() 結束就放掉
 
         tray_dets: List[Detection] = []
         ticket_dets: List[Detection] = []
@@ -429,6 +456,7 @@ class LogicEngine:
         tasks = self.state_machine.generate_tasks(self.trays) # 一般貼紙:才需要送 OCR
 
         self._finalize_missing_trays(frame, ts_utc)
+        self.debug_sheet.set_frame(None)
 
         return tasks, tray_movements
 
@@ -535,6 +563,7 @@ class LogicEngine:
         if self._has_order_content(tray):
             row = self._build_csv_row(tray_id, tray, frame, ts_utc)
             self.csv.log(row)
+            self._finalize_debug_sheet(tray_id, tray, row, timed_out)
             result = row["final_status"]
             for key, label in (("missing_item", "缺"), ("wrong_item", "錯誤")):
                 if row[key]:
@@ -554,6 +583,30 @@ class LogicEngine:
         # 一定要在 remove_tray 之後：remove_tray 會經過 reset_tray_states，那裡會把閘門打開
         if timed_out:
             self.tracker.hold_tickets_until_clear(tray_id)
+
+    def _finalize_debug_sheet(self, tray_id: str, tray, row: dict, timed_out: bool) -> None:
+        """把這筆訂單的總覽圖排進背景渲染佇列。用的是剛寫進 CSV 的同一份 row，兩邊結論一定一致。"""
+        if not self.debug_sheet.enabled:
+            return
+        try:
+            achieved = Counter(tray.confirmed_counts) | Counter(tray.checked_items)
+            started = tray.order_started_mono
+            self.debug_sheet.finalize(tray_id, {
+                "status": row["final_status"],
+                "tray_id": tray_id,
+                "order_number": row["order_number"],
+                "start_time": row["start_time"],
+                "end_time": row["end_time"],
+                "duration_sec": int(time.monotonic() - started) if started is not None else None,
+                "expected": row["expected_item"],
+                "achieved": [{k: v} for k, v in achieved.items()],
+                "missing": row["missing_item"],
+                "wrong": row["wrong_item"],
+                "timed_out": bool(timed_out),
+                "video_file": row["video_file"],
+            })
+        except Exception as e:   # 除錯功能不能影響收尾
+            logger.warning(f"[debug_sheet] 收尾出圖失敗（略過）: {e!r}")
 
     def _finish_reason(self, timed_out: bool) -> str:
         if timed_out:

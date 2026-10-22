@@ -5,3 +5,4 @@ paho-mqtt
 pyclipper
 rapidfuzz
 numpy < 2
+pillow

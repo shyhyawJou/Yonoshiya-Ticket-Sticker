@@ -19,6 +19,7 @@ from loguru import logger
 from logic.models import TrayState
 from logic.order_requirements import OrderRequirements
 from logic.readers.base import TicketParser, find_task_item
+from logic.readers.debug_hooks import NO_DEBUG
 from utils.clip_video import get_now_iso_str
 
 
@@ -48,6 +49,8 @@ class TicketReader:
         self.max_item_qty = int(max_item_qty or 0)
         # 主票確認（TICKET_READY）當下開始事件錄影
         self.on_recording_start = on_recording_start or (lambda reason="": None)
+        # 除錯總覽圖的收集 hooks，由 TrayStateMachine 注入；沒注入時是 no-op（見 readers/debug_hooks.py）
+        self.debug = NO_DEBUG
 
     def ticket_contributors(self, tray, exclude) -> list:
         """這筆訂單已經確認過的每一張紙：主票 + 已合併的候選票（不含 exclude）"""
@@ -158,7 +161,14 @@ class TicketReader:
                 payload["unattached_modifiers"] = list(self.requirements.last_unattached_modifiers)
             self.bus.publish_det_status(payload)
             tray.record_session_id = self.on_recording_start(reason=f"ticket_confirmed:{tray_id}")
+            self.debug.ticket(tray_id, "ticket", frame_crop, dt_boxes, rec_res, order_number, parsed_items,
+                              accepted=True, outcome="主票確認 → TICKET_READY", tray=tray)
         else:
+            self.debug.ticket(tray_id, "ticket", frame_crop, dt_boxes, rec_res, order_number, parsed_items,
+                              accepted=False,
+                              outcome=(f"異常作廢: {anomaly}，重新偵測" if anomaly
+                                       else "解析失敗：沒有解析出任何品項，重新偵測"),
+                              tray=tray)
             if tray.ticket:
                 tray.ticket.stable_frames = 0
             tray.state = TrayState.WAITING_TICKET
@@ -183,6 +193,9 @@ class TicketReader:
 
         parsed_items, order_number = self.order_parser.parse(frame_crop, dt_boxes, rec_res, is_flip)
 
+        dbg_ev = self.debug.ticket(tray_id, "ticket_extra", frame_crop, dt_boxes, rec_res, order_number,
+                                   parsed_items, accepted=False, outcome="(處理中)", tray=tray)
+
         # --- 1. 主號（連字號前那段）不同 = 別筆訂單 ---
         # 50、50-01、50-02 是同一筆訂單（-01、-02 是加點單）。讀不到單號或主票
         # 單號未確認（'000'）時無從判斷，一樣淘汰。
@@ -190,6 +203,7 @@ class TicketReader:
         order_key = order_number_key(tray.order_number)
         if new_key is None or order_key is None or new_key[0] != order_key[0]:
             logger.warning(f"[tray_state_machine] 第二張 ticket 單號 {order_number} 與目前訂單 {tray.order_number} 不同，忽略合併")
+            self.debug.set(dbg_ev, outcome=f"忽略: 單號 {order_number} 與目前訂單 {tray.order_number} 不同（別筆訂單 / 單號未確認）")
             tray.extra_tickets.remove(target)  # 直接淘汰，避免每幀重送 OCR
             return
 
@@ -221,6 +235,7 @@ class TicketReader:
             anchor.missing_count = 0
             anchor.is_missing = False
             anchor.has_notified_missing = False
+            self.debug.set(dbg_ev, outcome="同一張票被移動：位置接回既有傳票，不加品項")
             tray.extra_tickets.remove(target)
             return
 
@@ -228,6 +243,7 @@ class TicketReader:
             # 確定是另一張紙但一個品項都沒讀到：當成讀取失敗淘汰、重新偵測。
             # 合併一份空內容會把它標成已處理，之後就再也不會重讀。
             logger.warning(f"[tray_state_machine] 第二張 ticket 單號 {order_number} 沒有解析出品項，淘汰後重新偵測")
+            self.debug.set(dbg_ev, outcome="淘汰: 另一張紙但沒有解析出任何品項")
             tray.extra_tickets.remove(target)
             return
 
@@ -239,6 +255,7 @@ class TicketReader:
                 f"[ticket_guard] tray={tray_id} 第二張 ticket 內容異常（{anomaly}），淘汰後重新偵測。"
                 f"單號={order_number} 解析={parsed_items}"
             )
+            self.debug.set(dbg_ev, outcome=f"淘汰: 內容異常（{anomaly}）")
             tray.extra_tickets.remove(target)
             return
 
@@ -263,6 +280,7 @@ class TicketReader:
 
         if tray.state == TrayState.COMPLETED:
             tray.state = TrayState.WAITING_STICKERS  # 加了新品項，不再算完成
+        self.debug.set(dbg_ev, tray=tray, accepted=True, outcome=f"合併品項：{reason}")
 
         logger.info(f"[tray_state_machine] ticket 單號 {order_number} 品項追加合併完成, 並發送資訊: {tray.expected_items_display}")
         # 直接複用 TICKET_READY，整包覆寫 expected_items，前端不用新增事件處理

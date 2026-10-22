@@ -165,6 +165,20 @@ csv_log:
   folder: csv_logs
   video_category: event
   max_video_size: null
+debug_sheet:
+  enabled: true
+  mode: all
+  root_dir: ''
+  folder: debug_sheet
+  canvas_w: 4024
+  canvas_h: 3036
+  jpeg_quality: 85
+  save_json: true
+  font_path: ''
+  max_entries: 80
+  crop_max_side: 1600
+  slow_record_ms: 50.0
+  slow_render_s: 5.0
 ocr_routes:
   order_ticket: det
   order_sticker: det

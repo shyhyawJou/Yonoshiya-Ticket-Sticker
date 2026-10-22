@@ -34,6 +34,7 @@ from logic.geometry import PolygonXYXY
 from logic.models import Tray, TrayState
 from logic.order_requirements import OrderRequirements
 from logic.readers.base import TicketParser, find_task_item
+from logic.readers.debug_hooks import ReaderDebugHooks
 from logic.readers.sticker import StickerReader, blocks_completion
 from logic.readers.sticker_matcher import StickerMatcher
 from logic.readers.ticket import TicketReader
@@ -56,6 +57,7 @@ class TrayStateMachine:
         wrong_item_confirm: int = 0,
         wrong_item_strong_score: float = 0.0,
         wrong_item_strong_conf: float = 0.9,
+        debug_sheet=None,
     ):
         from logic.known_class_items import CLASS_TO_ITEM_NAME
         self.object_class_items = dict(CLASS_TO_ITEM_NAME if object_class_items is None else object_class_items)
@@ -84,6 +86,16 @@ class TrayStateMachine:
             wrong_item_strong_score=wrong_item_strong_score,
             wrong_item_strong_conf=wrong_item_strong_conf,
         )
+
+        # 除錯總覽圖（utils/debug_sheet.py）：兩個 reader 與本類別共用同一份收集 hooks。
+        # 只讀不寫、錯誤全部吞掉；debug_sheet=None 或停用時全部是 no-op，不影響任何判定。
+        self.debug = debug_sheet
+        self.debug_hooks = ReaderDebugHooks(
+            debug_sheet, order_parser, sticker_matcher, self.requirements,
+            confirm_fn=lambda: self.sticker_reader.wrong_item_confirm,
+        )
+        self.ticket_reader.debug = self.debug_hooks
+        self.sticker_reader.debug = self.debug_hooks
 
     def set_ocr_busy(self, trays: Dict[str, Tray], tray_id: str, item_type: str, bbox: PolygonXYXY,
                      target=None):
@@ -221,7 +233,7 @@ class TrayStateMachine:
 
         elif item_type == "sticker" and tray.state == TrayState.CHECKING_STICKERS:
             self.sticker_reader.apply_sticker_result(tray, tray_id, dt_boxes, rec_res, is_flip,
-                                                     task_bbox, target)
+                                                     task_bbox, target, frame_crop=frame_crop)
 
     def resolve_effective_combo(self, tray, counts) -> Counter:
         """CSV / 報表用的「最能解釋現場」的組合假設，見 OrderRequirements.resolve_effective_combo"""
@@ -259,7 +271,8 @@ class TrayStateMachine:
                     item_name, tray.expected_items, tray.checked_items
                 )
                 logger.info(f"[tray state machine] 已知物件 {matched_item}, 匹配狀況: {match_status}")
-                self.sticker_reader.settle(tray, tray_id, ts, matched_item, match_status) 
+                self.sticker_reader.settle(tray, tray_id, ts, matched_item, match_status)
+                self.debug_hooks.known(tray, tray_id, ts, item_name, matched_item, match_status)
 
     def resolve_wrong_item_removal(self, trays: Dict[str, Tray]) -> None:
         """
@@ -296,9 +309,11 @@ class TrayStateMachine:
                     resolved_any = True
                     if ts.is_wrong_item:
                         logger.info(f"[tray_state_machine] 錯誤菜單已移除 tray={tray_id}")
+                        self.debug_hooks.event(tray_id, ts, f"錯誤品項 {ts.item_name} 已被移走")
                     else:
                         # 確認中就離開：沒成立，什麼都不記，只是不再擋完成
                         logger.info(f"[wrong_confirm] tray={tray_id} 疑似錯誤的貼紙在成立前離開，不記錯誤 {ts.wrong_reads}")
+                        self.debug_hooks.event(tray_id, ts, "疑似錯誤的貼紙在成立前離開，不記錯誤")
 
             if not resolved_any:
                 continue
@@ -366,6 +381,7 @@ class TrayStateMachine:
                     continue
 
                 item_name = ts.item_name
+                self.debug_hooks.event(tray_id, ts, f"已核對的 {item_name} 離開畫面")
 
                 # ---------------------------------------------
                 # checked_items 是「目前存在數」

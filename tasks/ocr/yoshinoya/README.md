@@ -287,6 +287,63 @@ csv_log:
 
 每完成一筆訂單寫一列，UTF-8-BOM（給 Excel 直接開）。
 
+### `debug_sheet` — 訂單除錯總覽圖（選填）
+
+整段可以不寫，不寫就是下表的預設值，所以機器上執行期會被改寫的 config.yaml 不需要為它改動。
+
+一筆訂單收尾時，把這筆訂單看過的傳票、貼紙、醬料包的裁切圖、OCR det 框、rec 文字、模糊比對結果、
+`menus_mapping.yaml` 對應名稱與 OK/NG 判定，排進**一張** 4024 x 3036 的圖，只看這張就知道這筆訂單每個環節的結果。
+圖的標頭結論跟 CSV 同一份資料。輸出在 `<root_dir>/<YYYYMMDD>/debug_sheet/<時間>_<tray>_No<單號>_<狀態>.jpg`，
+旁邊有同名 `.json`（結構化的判定資料，可以 grep）。
+
+```yaml
+debug_sheet:
+  enabled: true
+  mode: all             # all | ng_only
+  root_dir: ''          # 留空 = 沿用 csv_log.root_dir
+  folder: debug_sheet
+  canvas_w: 4024
+  canvas_h: 3036
+  jpeg_quality: 85
+  save_json: true
+  font_path: ''         # 留空 = tasks/ocr/NotoSansJP-Bold.otf
+  max_entries: 80
+  crop_max_side: 1600
+  slow_record_ms: 50.0
+  slow_render_s: 5.0
+```
+
+| key | 預設 | 意義 | 調整建議 |
+| --- | --- | --- | --- |
+| `enabled` | `true` | `false` = 完全不收集、不渲染（主迴圈只多一次布林判斷） | 懷疑它影響辨識時先關掉比對 |
+| `mode` | `all` | `all` = 每筆訂單都出圖；`ng_only` = 只有最後不是 OK（NG / NGtoOK）、或有缺少品項、或有錯誤品項的訂單才出圖。寫錯會退回 `all` 並記 WARNING | 磁碟吃緊或只關心出問題的單時用 `ng_only` |
+| `root_dir` | `''` | 輸出基準路徑，留空 = `csv_log.root_dir`，圖會跟當天的影片放在同一個日期資料夾 | 一般不用改 |
+| `folder` | `debug_sheet` | 日期資料夾底下的子資料夾名稱。crontab 的 rclone 會跟著整個日期資料夾一起搬走 | |
+| `canvas_w` / `canvas_h` | `4024` / `3036` | 總覽圖尺寸，跟相機原圖同尺寸。版面是依比例排的，改小可以加快渲染但字會變小 | |
+| `jpeg_quality` | `85` | JPEG 品質（1~100）。**只影響檔案大小與編碼時間**，不影響渲染 | 磁碟吃緊先調這個，70 左右仍可讀 |
+| `save_json` | `true` | 同名 `.json` 一併存（判定、比對分數、候選、事件，不含圖） | |
+| `font_path` | `''` | 日文字型，留空 = `tasks/ocr/NotoSansJP-Bold.otf`。需要 `pillow`；沒裝或找不到字型時圖仍會出，但日文會變 `?`，開機 log 會有 `[debug_sheet] 沒有可用的 Pillow / 日文字型` | |
+| `max_entries` | `80` | 單筆訂單最多保留幾筆 OCR 紀錄的裁切圖，超過就釋放最舊的貼紙裁切圖（文字紀錄保留）。傳票另外只留最新 4 張的圖 | 單筆訂單貼紙特別多時才需要調 |
+| `crop_max_side` | `1600` | 出圖前把裁切圖縮到最長邊不超過這個值（縮圖在背景 thread，不佔辨識時間） | 調小可加快渲染 |
+| `slow_record_ms` | `50.0` | 主迴圈裡單次「記錄」超過幾毫秒就記 WARNING。這部分會直接拖慢辨識 | |
+| `slow_render_s` | `5.0` | 背景一張圖（渲染 + 編碼 + 寫檔）超過幾秒就記 WARNING | |
+
+這一段**改完要重啟 app 才會生效**，而且不會被 App 的指令改寫。
+
+**會不會拖慢辨識**：收集（縮圖以外）都在主迴圈，每筆訂單累計約 6~13 ms；渲染、編碼、寫檔在獨立 thread。
+每張圖輸出時 log 會有一段 `[debug_sheet][timing]`，主迴圈與背景分開列。要量這台機器的真實數字（不需要相機與模型）：
+
+```sh
+python3 tools/debug_sheet_bench.py                     # 預設：10 張貼紙、3 個醬料包、5 筆訂單
+python3 tools/debug_sheet_bench.py --stickers 20 --orders 10
+```
+
+上面的 6~13 ms 與背景渲染 0.5~1.2 秒是開發機 x86 的數字，**邊緣機要自己量**。要先看版面長怎樣：
+`python3 tools/debug_sheet_demo.py /tmp/sample.jpg`（用合成資料，不需要硬體）。
+
+注意：App 按 reset 作廢的訂單不會出圖；單張圖最多畫最新 3 張傳票、24 個貼紙 / 物件。
+crontab 的雲端上傳（`aibox_uploader/`）**預設不會上傳這個資料夾**（它的 `image.dirs` 預設只有 `full_screen`，設定在 `aibox_uploader/aibox_uploader.py`），這裡的 `cloud_upload.folders` 也只管 app 內建上傳。檔名已符合上傳器的規則（只含英數與 `._-`、以日期開頭），要上傳時把 `debug_sheet` 加進它的 `dirs` 即可；但這些圖在 Dashboard 上會被當成哪一類媒體、容量與流量是否可接受，我沒有驗證過。
+
 ### `cloud_upload` — 雲端上傳（app 內建，v3.3.0 起關閉）
 
 v3.3.0 起上傳改由 crontab 執行 `aibox_uploader/aibox_uploader.sh`，這一段維持 `enabled: false`。
