@@ -2,7 +2,8 @@ import cv2
 import math
 import numpy as np
 from AI import RTMDET
-from utils.schema import Detection  
+from utils import dla_guard
+from utils.schema import Detection
 from typing import List, Tuple
 from loguru import logger
 
@@ -18,7 +19,8 @@ class Rotated_RTMDET:
                  iou_thresh=0.35,
                  partial_agnostic_ids: Tuple[int, ...] = (3, 4, 5, 6, 7, 8)) -> None:
 
-        self.model = RTMDET(path)
+        # 經 dla_guard：檔案有問題只記 log，檔案正常卻載不進去（APU 沒起來）才重開機
+        self.model = dla_guard.load(RTMDET, path, "物件偵測 RTMDET")
         self.input_wh = [448, 448]
         self.mean = np.asarray([103.53, 116.28, 123.675], 'float32')
         self.std = np.asarray([57.375, 57.12, 58.395], 'float32')     

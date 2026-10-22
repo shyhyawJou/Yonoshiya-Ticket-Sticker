@@ -1,0 +1,58 @@
+# menus_mapping.yaml  (suzumo)
+# 由 tools/build_menus_mapping.py 產生，2026-09-10
+#
+# 取代原本沿用的吉野家版本（1235 筆菜名，鈴茂的 7 個品名一個都不在裡面）。
+#
+# 程式裡的用途（DLA_on_720/config.py:195-203, logic_engine.py:83）:
+#   menus_ticket  = 所有 mapping[].name
+#   menus_sticker = 所有 sub_items 的聯集
+#   special_cases = {name: sub_items}   套餐拆成要核對的子項目
+#
+# 對應依據（images/ 標註實測，可用 tools/build_menus_mapping.py --explain 重現）:
+#   サラダ:味噌汁 貼紙數 60:60 完全相等 -> 套餐貼兩張貼紙
+#   のり弁当 票據 79 / 貼紙 81         -> 一對一
+#   箸/醤油/おしぼり/紅しょうが/ドレッシング 完全沒有貼紙
+#     -> 由 MMRotate 類別辨識身份，見檔案末端的 object_class_items
+
+mapping:
+  - name: "のり弁当"
+    sub_items:
+    - "のり弁当"
+  - name: "サラダ・味噌汁セ"
+    sub_items:
+    - "サラダ"
+    - "味噌汁"
+  - name: "箸"
+    sub_items:
+    - "箸"
+  - name: "醤油"
+    sub_items:
+    - "醤油"
+  - name: "おしぼり"
+    sub_items:
+    - "おしぼり"
+  - name: "紅しょうが"
+    sub_items:
+    - "紅しょうが"
+  - name: "ドレッシング"
+    sub_items:
+    - "ドレッシング"
+
+# ---------------------------------------------------------------------
+# NUC run.py 的 runtime_config 會讀取以下兩節，用於前端品項核對。
+# DLA 的 loader 與核對流程仍為各自的實作。
+# ---------------------------------------------------------------------
+
+# 沒有貼紙、由 MMRotate 類別直接辨識身份的品項
+object_class_items:
+  chopsticks: "箸"
+  soy_sauce: "醤油"
+  wet_wipes: "おしぼり"
+  ginger: "紅しょうが"
+  salad_sauce: "ドレッシング"
+
+# 只會出現在貼紙上的詞（貼紙 OCR 的候選詞彙；另見 vocab_sticker.txt）
+sticker_words:
+  - "のり弁当"
+  - "サラダ"
+  - "味噌汁"

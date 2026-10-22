@@ -13,7 +13,7 @@ from utils.mqtt_bus import MqttBus
 from utils.schema import Detection
 from utils.csv_writer import CsvWriter
 
-from config import Config
+from config import Config, OrderGuardCfg
 from ocr_engine import StandaloneRecDLA
 from mmr_engine import Rotated_RTMDET
 
@@ -27,7 +27,7 @@ from logic.sticker_matcher import StickerMatcher
 
 # === Step 3 重構：tray 資料結構 / 追蹤 / 狀態機 ===
 from logic.models import Tray, TrayState, TrackedItem  # noqa: F401  (對外相容：舊呼叫端可能 import 這些名稱)
-from logic.image_utils import encode_image_base64, preprocess_for_diff, compute_change_ratio
+from logic.image_utils import encode_image_base64
 from logic.tray_tracker import TrayTracker
 from logic.single_order_tracker import SingleOrderTracker
 from logic.preset_roi_tracker import PresetRoiTracker
@@ -68,16 +68,32 @@ class LogicEngine:
         #### 2026/06/24 by Chris
         self.menus_ticket = [normalize_text(m, ignore_space=True) for m in cfg.menus_ticket]
         self.menus_sticker = [normalize_text(m, ignore_space=True) for m in cfg.menus_sticker]
+        # 部署詞彙（config includes 的 vocab_ticket / vocab_sticker）。
+        # 有設就用它當模糊比對候選；沒設則退回 menus_*（舊行為）。
+        self.vocab_ticket = [normalize_text(m, ignore_space=True)
+                             for m in getattr(cfg, "vocab_ticket", [])]
+        self.vocab_sticker = [normalize_text(m, ignore_space=True)
+                              for m in getattr(cfg, "vocab_sticker", [])]
         self.menus_with_digits = {
             m for m in self.menus_ticket
             if re.search(r'[1-9]', m)
         }
-        self.special_cases: Dict[str, List[str]] = {
+        # 傳票名稱 -> 多個「貼紙組合」變體，由 config.load_config 建好
+        # （代表菜名已折疊、同名多列已保留成多個變體）。
+        #
+        # 舊版在這裡用 dict comprehension 從 cfg.menus_mapping 現建，同名後者
+        # 覆蓋前者，導致 menus_mapping.yaml 裡 28 組變體只有最後一列生效。
+        # 保留 fallback 是為了讓舊的 config 物件（或測試替身）也還能跑。
+        self.menu_variants: Dict[str, List[List[str]]] = getattr(cfg, "menu_variants", None) or {
             normalize_text(sc.name, ignore_space=True): [
-                normalize_text(sub, ignore_space=True) for sub in sc.sub_items
+                [normalize_text(sub, ignore_space=True) for sub in sc.sub_items]
             ]
             for sc in cfg.menus_mapping
         }
+        # 菜名等價層（同菜異寫）。舊 config 沒有這兩個索引時為 None，
+        # 比對會自動退回「只用代表菜名清單」的舊行為。
+        self.ticket_index = getattr(cfg, "ticket_index", None)
+        self.sticker_index = getattr(cfg, "sticker_index", None)
         self.rec_pred = StandaloneRecDLA(
             rec_path=rec_path,
             dict_path=dict_path
@@ -92,15 +108,24 @@ class LogicEngine:
         )
 
         # 訂單 OCR 解析 / 貼紙比對：穩定層，與 tray 概念解耦
-        self.order_parser = OrderParser(
+        parser_class = OrderParser
+        parser_options = {"vocab_ticket": self.vocab_ticket or None}
+        if cfg.ticket_parser == "legacy":
+            from logic.order_parser_yoshinoya import OrderParser as LegacyParser
+            parser_class = LegacyParser
+            parser_options = {"menu_index": self.ticket_index}
+        self.order_parser = parser_class(
             menus_ticket=self.menus_ticket,
             menus_with_digits=self.menus_with_digits,
             fuzzy_matcher=self.fuzzy_matcher,
             rec_pred=self.rec_pred,
+            **parser_options,
         )
         self.sticker_matcher = StickerMatcher(
             menus_sticker=self.menus_sticker,
             fuzzy_matcher=self.fuzzy_matcher,
+            vocab_sticker=self.vocab_sticker or None,
+            menu_index=self.sticker_index,
         )
 
         # === 參數讀取設定 ===
@@ -117,15 +142,19 @@ class LogicEngine:
         self.iou_candidate = cfg.placement.iou_candidate
         self.drift_iou_thresh = cfg.placement.drift_iou_thresh
 
-        #### 為了檢察物件是否有堆疊所設立的參數
-        self.content_guard_min_freeze_frames = int(getattr(cfg.stability, "content_guard_min_freeze_frames", 10))
-        self.content_guard_check_interval = int(getattr(cfg.stability, "content_guard_check_interval", 8))
-        self.content_guard_change_ratio_thresh = float(getattr(cfg.stability, "content_guard_change_ratio_thresh", 0.15))
-        self.content_guard_pixel_diff_thresh = float(getattr(cfg.stability, "content_guard_pixel_diff_thresh", 20.0))
-        self.content_guard_confirm_count = int(getattr(cfg.stability, "content_guard_confirm_count", 3))
-        ####
-
         self.ticket_leave_frame = int(cfg.stability.ticket_leave_frame)
+
+        # 訂單防護：超時收尾 + 傳票數量異常重讀。舊 config 物件 / 測試替身沒有
+        # 這個屬性時用預設值（超時 600 秒、單品上限 20）。
+        self.order_guard = getattr(cfg, "order_guard", None) or OrderGuardCfg()
+        self.order_timeout_sec = float(self.order_guard.timeout_sec or 0)
+        logger.info(
+            f"[order_guard] 訂單超時={self.order_timeout_sec:g}s（0=關閉）, "
+            f"傳票單品數量上限={self.order_guard.max_item_qty}（0=關閉）"
+        )
+        self.still_shift_ratio = float(getattr(cfg.stability, "still_shift_ratio", 0.0) or 0.0)
+        if self.still_shift_ratio > 0:
+            logger.info(f"[still] 靜止判定啟用：相鄰兩幀位移超過框短邊 {self.still_shift_ratio:.1%} 就重新累積穩定幀數")
 
         # === mode 切換：決定 trays 字典由哪個 tracker 擁有與維護 ===
         # "tray"   -> TrayTracker：偵測/追蹤 tray 盤位置，可同時存在多筆訂單
@@ -144,6 +173,7 @@ class LogicEngine:
                 ticket_leave_frame=self.ticket_leave_frame,
                 ticket_exclude_roi_polygon=cfg.preset_roi.ticket_roi.to_polygon_xyxy(),
                 finalize_mode="ticket_leave",
+                still_shift_ratio=self.still_shift_ratio,
             )
             logger.info("LogicEngine 啟動於 [single] 模式：單一訂單，不追蹤 tray 盤")
         elif self.mode == "preset_roi":
@@ -156,6 +186,7 @@ class LogicEngine:
                 ticket_leave_frame=self.ticket_leave_frame,
                 ticket_roi_polygon=cfg.preset_roi.ticket_roi.to_polygon_xyxy(),
                 finalize_mode="ticket_mat", # "ticket_leave" | "ticket_mat"
+                still_shift_ratio=self.still_shift_ratio,
             )
             logger.info("LogicEngine 啟動於 [preset_roi] 模式：單一訂單，依 ticket 是否在預設 ROI 內判斷生命週期")
         else:
@@ -168,22 +199,40 @@ class LogicEngine:
                 k_container_new=self.K_new,
                 roi_shrink=self.roi_strink,
                 sticker_missing_frame=self.sticker_missing_frame,
+                still_shift_ratio=self.still_shift_ratio,
             )
             logger.info("LogicEngine 啟動於 [tray] 模式：追蹤多筆 tray 盤")
 
+        self.tracker.STABLE_CONFIRM_CLASSES = set(cfg.object_class_items)
+        self.tracker.pending_buffer.item_resolver = cfg.object_class_items.get
+
         # tray 狀態機（易變層）：操作 tracker.trays，但不擁有它
         self.state_machine = TrayStateMachine(
+            object_class_items=cfg.object_class_items,
             bus=bus,
             order_parser=self.order_parser,
             sticker_matcher=self.sticker_matcher,
-            special_cases=self.special_cases,
+            menu_variants=self.menu_variants,
+            menu_distinct=getattr(cfg, "menu_distinct", None),
+            # 傳票修飾列（換湯…）。舊 config 或測試替身沒有這個屬性時為 None，
+            # 狀態機會把所有相關流程當 no-op。
+            modifier_knowledge=getattr(cfg, "modifier_knowledge", None),
             n_settle_frame=self.N,
             on_recording_start=self.on_recording_start,
+            max_item_qty=self.order_guard.max_item_qty,
+            wrong_item_confirm=int(getattr(cfg.stability, "wrong_item_confirm", 0) or 0),
+            wrong_item_strong_score=float(getattr(cfg.stability, "wrong_item_strong_score", 0) or 0),
+            wrong_item_strong_conf=float(getattr(cfg.stability, "wrong_item_strong_conf", 0.9) or 0),
         )
 
-        self.csv = CsvWriter(log_dir="/mnt/reserved/csv_uploaded")
-
-        self.last_order_number: Dict[str, Optional[str]] = {}
+        # CSV log 跟影片放在同一個日期資料夾底下 (<root>/<日期>/csv_logs/)，
+        # 以後要對照某一天的影片就不用再跨兩個目錄找。
+        self.csv = CsvWriter(
+            root_dir=cfg.csv_log.root_dir,
+            folder=cfg.csv_log.folder,
+            max_video_size=cfg.csv_log.max_video_size,
+            video_category=cfg.csv_log.video_category,
+        )
 
     # ------------------------------------------------------------
     # 對外相容 API：trays 字典實際上由 TrayTracker 持有
@@ -192,8 +241,27 @@ class LogicEngine:
     def trays(self) -> Dict[str, Tray]:
         return self.tracker.trays
 
-    # ------------------------------------------------------------
-    # tray 生命週期操作，委派給 TrayTracker
+    # ============================================================
+    # 訂單生命週期：「結束 / 重置一筆訂單」的入口全部在這一區
+    # ============================================================
+    # 訂單只有一個開始點（傳票確認 -> TrayStateMachine 發 TICKET_READY、開錄影），
+    # 結束 / 重置則有下面幾種來源。新增來源時請接到這裡的方法，不要在別處
+    # 自己清 tray 或停錄影。
+    #
+    # * 正常收尾：護貝板重新露出（preset_roi）、傳票離開（single）、tray 消失（tray）
+    #     update() -> _finalize_missing_trays -> _close_order
+    #     有訂單內容才寫 CSV -> remove_tray（停錄影 + tracker 重置）
+    # * 訂單超時：order_guard.timeout_sec
+    #     同上，最後關上接單閘門（ROI 內傳票消失 ticket_leave_frame 幀才重新接單）
+    # * App 重置：cmd/reset type a / b / all -> reset / reset_tray_states / reset_all
+    #     不寫 CSV（作業員按 reset 就是要重來）-> tracker 重置 + 停錄影，接單閘門打開
+    # * App 切換模式：cmd/no_tray_setting -> TaskContext.switch_mode -> shutdown()
+    #     不寫 CSV、不發事件，只停錄影；新的 LogicEngine 從空白開始
+    # * 錄影 watchdog（app.py，timeout_sec + 30 秒）只是保險，只停影片、不碰訂單
+    #
+    # tracker 重置一律換全新的 Tray（不逐欄清），對 App 的事件也由 tracker 發：
+    #   single / preset_roi：每次重置發 TRAY_RESET + WAITING_TICKET，收尾再加 TRAY_REMOVED
+    #   tray：reset a / all 刪掉 tray、reset b 換新 Tray，都不發事件；收尾刪 tray 並發 TRAY_REMOVED
     # ------------------------------------------------------------
     def reset(self, tray_id: str):
         self.tracker.reset(tray_id)
@@ -210,7 +278,43 @@ class LogicEngine:
     def remove_tray(self, tray_id: str, ts_utc: str) -> bool:
         self.on_recording_stop(reason=f"tray_removed:{tray_id}")
         return self.tracker.remove_tray(tray_id, ts_utc)
-        
+
+    def shutdown(self, reason: str) -> None:
+        """
+        這個 LogicEngine 要被整個丟掉之前呼叫（目前只有切換模式）。
+
+        進行中的訂單不寫 CSV、不發事件（新的 LogicEngine 會從空白開始，App 那邊
+        本來就會重新收到狀態），只把事件錄影停掉 —— 不停的話，新的 LogicEngine
+        不知道有這支影片，會一路錄到 app.py 的 watchdog 才停。
+        """
+        self.on_recording_stop(reason=reason)
+
+    def refresh_preset_roi(self) -> None:
+        """
+        cfg.preset_roi 被改掉之後(App 的 cmd/preset_roi,或開機的自動校正),
+        把新的多邊形推給 tracker。
+
+        tracker 是常駐物件,建構時就把 ticket_roi 攤平成多邊形存了一份,
+        之後每幀比對都用那一份、不會回頭重讀 cfg —— 所以這裡一定要主動同步,
+        不然設定檔改了、畫面上的框也動了,判斷用的卻還是舊座標。
+
+        只換座標、不重建 LogicEngine,是為了讓現場調 ROI 不會順手把進行中的
+        訂單狀態一起清掉(重建就等於 reset)。
+        """
+        preset_roi = getattr(self.cfg, "preset_roi", None)
+        if preset_roi is None:
+            return
+
+        polygon = preset_roi.ticket_roi.to_polygon_xyxy()
+
+        # preset_roi 模式看「在 ROI 內」;single 模式反過來看「在 ROI 外」,
+        # 兩者存的欄位名稱不同,但都是同一個 ticket_roi。
+        if hasattr(self.tracker, "ticket_roi_polygon"):
+            self.tracker.ticket_roi_polygon = polygon
+        if getattr(self.tracker, "ticket_exclude_roi_polygon", None) is not None:
+            self.tracker.ticket_exclude_roi_polygon = polygon
+
+        logger.info(f"[ROI] tracker 的 ticket_roi 已更新為 {polygon}")
 
     def set_ocr_busy(self, tray_id: str, item_type: str, bbox: PolygonXYXY):
         """由 app.py 確認已將任務送給 OCR 後呼叫，正式鎖定狀態"""
@@ -242,14 +346,7 @@ class LogicEngine:
             elif d.cls_name == "order_sticker":
                 sticker_dets.append(d)
                 # logger.info(f"[logic engine] sticker det: {d}")
-            elif d.cls_name in {
-                "sesame_front",
-                "sesame_back",
-                "wafusauce_front",
-                "wafusauce_back",
-                "cream_front",
-                "cream_back",
-            }:
+            elif d.cls_name in self.cfg.object_class_items:
                 sticker_dets.append(d)
                 # pass
             elif d.cls_name == "ticket_mat":
@@ -265,7 +362,6 @@ class LogicEngine:
         # 它會幫你發送 -1 給前端，把狀態從 COMPLETED 退回 WAITING_STICKERS，
         # 並將貼紙標記為 has_notified_missing = True，讓 tracker 下一幀可以乾淨移除。
         self.state_machine.handle_missing_items(self.trays)
-        # self._monitor_checked_stickers(frame) # 新增:偵測已核對貼紙是否被內容置換 ()
         self.state_machine.resolve_known_class_items(self.trays)  # 醬料包:直接比對,不進 OCR
         self.state_machine.resolve_wrong_item_removal(self.trays)
         self.state_machine.resolve_missing_extra_tickets(self.trays)
@@ -293,7 +389,6 @@ class LogicEngine:
         """
         self.state_machine.apply_ocr_result(
             self.trays, tray_id, item_type, frame_crop, dt_boxes, rec_res, is_flip, task_bbox,
-            last_order_number=self.last_order_number.get(tray_id),
         )
 
         # === single 模式專屬修正 ===
@@ -317,107 +412,141 @@ class LogicEngine:
     # 這段用到 mmr（影像裁切）與 csv（落地紀錄），屬於基礎設施依賴，
     # 不放進 TrayTracker 或 TrayStateMachine，留在 Facade 這一層。
     # ------------------------------------------------------------
+    @staticmethod
+    def _has_order_content(tray) -> bool:
+        """
+        這次收尾到底有沒有一筆「真的存在過」的訂單。
+
+        finalize_mode == "ticket_mat" 只要「mat 被遮住 + ROI 內出現 ticket」
+        就會把訂單流程打開，所以手擦過、傳票只是經過、或傳票 OCR 一直沒成功
+        的情況，一樣會走到收尾。那種空殼收尾如果照樣寫一列進 CSV，就會得到
+        單號空白、品項空白、只有時間軸在跑的垃圾列（而且時間軸是接在上一列
+        結束的瞬間，因為 start_time_str 是上一次 reset 時刷新的）。
+
+        只要單號、應有品項、已核對品項、錯誤品項四者全空，就認定這次收尾
+        沒有任何訂單內容，不落 CSV。
+        """
+        # confirmed_counts 跟 checked_items 都看：問的是「曾經有內容」，
+        # 而 checked_items 在餐點被收走後會清空，單看它會低估。
+        return bool(
+            tray.order_number
+            or tray.expected_items
+            or tray.checked_items
+            or tray.confirmed_counts
+            or tray.wrong_item_history
+        )
+
+    def _is_order_timed_out(self, tray, now_mono: float) -> bool:
+        """訂單從 TICKET_READY 起超過 order_timeout_sec 還沒收尾"""
+        if self.order_timeout_sec <= 0 or tray.order_started_mono is None:
+            return False
+        return now_mono - tray.order_started_mono >= self.order_timeout_sec
+
     def _finalize_missing_trays(self, frame: np.ndarray, ts_utc: str):
-        trays_to_remove = []
+        """每幀找出該收尾的訂單：tracker 判定結束（missing_count 超過門檻）或超時。"""
+        now_mono = time.monotonic()
+        ending = []   # (tray_id, timed_out)；先收集再收尾，收尾會改動 trays 字典
         for tray_id, tray in self.trays.items():
-            if tray.missing_count > self.tray_missing_frame:
-                trays_to_remove.append(tray_id)
-
-                # 記住這筆訂單的編號，供下次重新鎖定時比對是否為同一張舊單
-                if tray.order_number:
-                    self.last_order_number[tray_id] = tray.order_number
-                    
-                final_tray_capture_b64 = ""
-                ticket_capture_b64 = ""
-
-                last_xywhr = tray.xywhr
-                if last_xywhr is not None:
-                    cx, cy, w, h, r = last_xywhr
-                    warped_img, _, M = self.mmr.crop_by_angle(frame, cx, cy, w, h, r)
-                    final_tray_capture_b64 = encode_image_base64(warped_img)
-
-                ticket_capture = tray.ticket_crop
-                if ticket_capture is not None:
-                    ticket_capture_b64 = encode_image_base64(ticket_capture)
-
-                expected_counts = Counter(tray.expected_items)
-                expected_list = [{item: count} for item, count in expected_counts.items()]
-
-                missing_counts = Counter(tray.expected_items) - Counter(tray.checked_items)
-                missing_list = [{item: count} for item, count in missing_counts.items()]
-
-                wrong_counts = Counter(tray.wrong_item_history)
-                wrong_list = [{item: count} for item, count in wrong_counts.items()]
-
-                final_status = (
-                    "NGtoOK" if tray.state == TrayState.COMPLETED and tray.ever_had_wrong_item
-                    else "OK" if tray.state == TrayState.COMPLETED
-                    else "NG"
+            # 超時收尾：preset_roi 模式唯一的正常出口是護貝板重新露出。作業員一直
+            # 沒露出時，這筆訂單永遠不會結束，之後放進同一格的傳票會被當成同一張
+            # 主票（IoU 對得上）而不送 OCR，那些訂單就整筆消失在 CSV 裡。
+            # 超時就照一般收尾寫 CSV、重置、停錄影，下一張傳票才能開新單。
+            timed_out = self._is_order_timed_out(tray, now_mono)
+            if timed_out:
+                logger.error(
+                    f"[order_timeout] tray={tray_id} 單號={tray.order_number} 訂單已進行 "
+                    f"{now_mono - tray.order_started_mono:.0f}s（上限 {self.order_timeout_sec:g}s），"
+                    f"仍未收尾，強制收尾寫入 CSV。state={tray.state.name} start={tray.start_time_str}"
                 )
 
-                video_file = self.get_video_filename(tray.record_session_id) if tray.record_session_id else ""
+            if timed_out or tray.missing_count > self.tray_missing_frame:
+                ending.append((tray_id, timed_out))
 
-                log_payload = {
-                    "tray_id": tray_id,
-                    "order_number": tray.order_number,
-                    "start_time": tray.start_time_str,
-                    "end_time": ts_utc,
-                    "final_status": final_status,
-                    "expected_item": expected_list,
-                    "expected_item_count": len(expected_list),
-                    "missing_item": missing_list,
-                    "wrong_item": wrong_list,
-                    "ticket_capture": ticket_capture_b64,
-                    "final_tray_capture": final_tray_capture_b64,
-                    "video_file": video_file,
-                }
-                self.csv.log(log_payload)
+        for tray_id, timed_out in ending:
+            self._close_order(tray_id, frame, ts_utc, timed_out)
 
-        for tid in trays_to_remove:
-            self.remove_tray(tid, ts_utc)
+    def _close_order(self, tray_id: str, frame: np.ndarray, ts_utc: str, timed_out: bool) -> None:
+        """一筆訂單正常結束：有內容才寫 CSV -> remove_tray（停錄影 + tracker 重置）-> 超時就關接單閘門"""
+        tray = self.trays[tray_id]
 
-    def _monitor_checked_stickers(self, frame: np.ndarray) -> None:
-        for tray_id, tray in self.trays.items():
-            for ts in tray.stickers:
-                if not ts.is_checked or ts.is_ocr_busy:
-                    continue
+        if self._has_order_content(tray):
+            self.csv.log(self._build_csv_row(tray_id, tray, frame, ts_utc))
+        else:
+            # 空殼收尾：照樣重置 tray，但不寫 CSV
+            logger.warning(
+                f"[CSV] tray={tray_id} 收尾時沒有任何訂單內容"
+                f"(單號/應有/已核對/錯誤品項全空)，不寫入 CSV。"
+                f"start={tray.start_time_str} end={ts_utc}"
+            )
 
-                if ts.geo_stable_frames < self.content_guard_min_freeze_frames:
-                    ts.content_ref_image = None
-                    ts.content_check_counter = 0
-                    ts.content_mismatch_streak = 0
-                    continue
+        self.remove_tray(tray_id, ts_utc)
 
-                cx, cy, w, h, r = ts.xywhr
-                if w < 5 or h < 5:
-                    continue
+        # 一定要在 remove_tray 之後：remove_tray 會經過 reset_tray_states，那裡會把閘門打開
+        if timed_out:
+            self.tracker.hold_tickets_until_clear(tray_id)
 
-                if ts.content_ref_image is None:
-                    warped_img, _ , M = self.mmr.crop_by_angle(frame, cx, cy, w, h, r)
-                    ts.content_ref_image = preprocess_for_diff(warped_img)
-                    ts.content_check_counter = 0
-                    ts.content_mismatch_streak = 0
-                    # cv2.imwrite("ori_crop_img_0.jpg", ts.content_ref_image)
-                    continue
+    def _build_csv_row(self, tray_id: str, tray, frame: np.ndarray, ts_utc: str) -> dict:
+        """把一筆結束的訂單整理成 CSV 的一列（欄位見 utils/csv_writer.py）"""
+        # final_tray_capture_b64 = ""
+        # ticket_capture_b64 = ""
 
-                ts.content_check_counter += 1
-                if ts.content_check_counter < self.content_guard_check_interval:
-                    continue
-                ts.content_check_counter = 0
+        # last_xywhr = tray.xywhr
+        # if last_xywhr is not None:
+        #     cx, cy, w, h, r = last_xywhr
+        #     warped_img, _, M = self.mmr.crop_by_angle(frame, cx, cy, w, h, r)
+        #     final_tray_capture_b64 = encode_image_base64(warped_img)
 
-                warped_img, _ , M = self.mmr.crop_by_angle(frame, cx, cy, w, h, r)
-                current_processed = preprocess_for_diff(warped_img)
-                change_ratio = compute_change_ratio(
-                    ts.content_ref_image, current_processed,
-                    pixel_diff_thresh=self.content_guard_pixel_diff_thresh
-                )
-                # cv2.imwrite("curr_crop_img_1.jpg", current_processed)
-                logger.error(f"[logic engine] change_ratio: {change_ratio:.3f}, thresh: {self.content_guard_change_ratio_thresh}")
+        # ticket_capture = tray.ticket_crop
+        # if ticket_capture is not None:
+        #     ticket_capture_b64 = encode_image_base64(ticket_capture)
 
-                if change_ratio > self.content_guard_change_ratio_thresh:
-                    ts.content_mismatch_streak += 1
-                else:
-                    ts.content_mismatch_streak = 0
+        # 收尾要回答的是「這筆訂單曾經核對到哪」，不是「現在畫面上還剩什麼」。
+        # checked_items 的定義是「當下仍看得到的已確認實體」，餐點被收走時
+        # handle_missing_items() 會刻意把它扣掉；而現場習慣驗完就先收餐，
+        # 收尾一定發生在扣完之後 —— 用它記帳就會寫出 final_status=OK 卻
+        # 同時列出缺少品項的矛盾紀錄。
+        # confirmed_counts 是只增不減的歷史最高確認數（見
+        # TrayStateMachine._update_confirmed_count），也是 TRAY_COMPLETED /
+        # resolve_wrong_item_removal 判斷完成用的同一份依據，CSV 跟著用
+        # 同一份，報表才不會跟前端看到的結果打架。
+        # 再取跟當下 checked 的逐項最大值（Counter 的 | 是逐項 max），
+        # 純粹是保險：任何沒走 _update_confirmed_count 的路徑（例如
+        # confirmed 被 expected 上限夾住）都不會讓收尾少算。
+        achieved_counts = Counter(tray.confirmed_counts) | Counter(tray.checked_items)
 
-                if ts.content_mismatch_streak >= self.content_guard_confirm_count:
-                    self.state_machine.reopen_sticker_for_recheck(tray, tray_id, ts)
+        # 多變體訂單（同一個傳票名稱對到多種貼紙組合）不能用聯集記帳，
+        # 否則「其實不會來的品項」會被記成 missing。取最能解釋現場的那一版。
+        # 這裡餵 achieved_counts 而不是當下的 checked，否則餐點收走後
+        # 每個變體的 shortfall 都一樣大，挑出來的「最能解釋現場」那一版
+        # 會退化成隨便挑一個，連 expected_item 欄都會記錯。
+        expected_counts = self.state_machine.resolve_effective_combo(tray, achieved_counts)
+        expected_list = [{item: count} for item, count in expected_counts.items()]
+
+        missing_counts = expected_counts - achieved_counts
+        missing_list = [{item: count} for item, count in missing_counts.items()]
+
+        wrong_counts = Counter(tray.wrong_item_history)
+        wrong_list = [{item: count} for item, count in wrong_counts.items()]
+
+        final_status = (
+            "NGtoOK" if tray.state == TrayState.COMPLETED and tray.ever_had_wrong_item
+            else "OK" if tray.state == TrayState.COMPLETED
+            else "NG"
+        )
+
+        video_file = self.get_video_filename(tray.record_session_id) if tray.record_session_id else ""
+
+        return {
+            "tray_id": tray_id,
+            "order_number": tray.order_number,
+            "start_time": tray.start_time_str,
+            "end_time": ts_utc,
+            "final_status": final_status,
+            "expected_item": expected_list,
+            "expected_item_count": len(expected_list),
+            "missing_item": missing_list,
+            "wrong_item": wrong_list,
+            # "ticket_capture": ticket_capture_b64,
+            # "final_tray_capture": final_tray_capture_b64,
+            "video_file": video_file,
+        }

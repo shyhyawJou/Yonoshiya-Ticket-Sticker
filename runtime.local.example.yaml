@@ -1,0 +1,3 @@
+profile: suzumo
+# This local file selects the machine's brand only.
+# Put every operational setting in tasks/ocr/<brand>/config.yaml.

@@ -46,7 +46,8 @@ class OverlayRenderer:
                 continue
 
             pts = np.array(roi.points, dtype=np.int32).reshape(-1, 1, 2)
-            color = tuple(roi.color) if roi.color else (0, 255, 255)  # 預設黃色(BGR)
+            # 設定檔存的是 RGB(跟 App 約定的格式), cv2 要 BGR, 轉換交給 RoiCfg
+            color = roi.to_bgr(default=(0, 255, 255))  # 預設黃色
 
             cv2.polylines(frame, [pts], isClosed=True, color=color, thickness=3)
 
@@ -107,14 +108,26 @@ class OverlayRenderer:
                 box_color = (0, 0, 255) if is_bad else (0, 255, 0)
                 cv2.polylines(vis_frame, [transformed_pts], isClosed=True, color=box_color, thickness=2)
 
-        # plot checked stickers
+        # 傳票的菜單區域下界（OrderParser 找到的表格底線），紅線以下的文字不算品項
+        menu_bottom_line = ocr_data.get("menu_bottom_line")
+        if menu_bottom_line is not None:
+            pts = np.array(menu_bottom_line, dtype="float32").reshape(-1, 1, 2)
+            p0, p1 = cv2.transform(pts, M_inv_affine).reshape(2, 2).astype(int)
+            cv2.line(vis_frame, tuple(int(v) for v in p0), tuple(int(v) for v in p1), (0, 0, 255), 3)
+
+        # plot checked stickers（綠 OK）/ 已成立的錯誤品項與 Unknown（紅 NG，醬料包判錯也算）
         for sticker in self.task.logic.trays[tray_id].stickers:
             if sticker.is_checked:
-                bbox = np.array(sticker.bbox).astype(int)
-                xy = np.array(sticker.xywhr[:2]).astype(int)
-                cv2.polylines(vis_frame, bbox.reshape(-1, 4, 2), True, (0, 255, 0), 2)
-                cv2.putText(vis_frame, 'OK', xy + [-50, 30], cv2.FONT_HERSHEY_SIMPLEX,
-                            3, (0, 255, 0), 7)
+                label, color = 'OK', (0, 255, 0)
+            elif sticker.is_wrong_item or sticker.is_unknown_item:
+                label, color = 'NG', (0, 0, 255)
+            else:
+                continue
+            bbox = np.array(sticker.bbox).astype(int)
+            xy = np.array(sticker.xywhr[:2]).astype(int)
+            cv2.polylines(vis_frame, bbox.reshape(-1, 4, 2), True, color, 2)
+            cv2.putText(vis_frame, label, xy + [-50, 30], cv2.FONT_HERSHEY_SIMPLEX,
+                        3, color, 7)
 
         return vis_frame, True
 

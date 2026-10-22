@@ -21,7 +21,7 @@ from __future__ import annotations
 from typing import Dict, List
 
 from loguru import logger
-from logic.geometry import get_polygon_centroid, is_center_in_polygon, iou_poly_poly, shrink_rect, is_geometrically_frozen
+from logic.geometry import get_polygon_centroid, is_center_in_polygon, iou_poly_poly, shrink_rect, center_shift_ratio, PolygonXYXY
 from logic.models import Tray, TrackedItem
 from logic.known_class_items import STABLE_CONFIRM_CLASSES
 from logic.sticker_pending_buffer import StickerPendingBuffer
@@ -39,10 +39,11 @@ class TrayTracker:
         roi_shrink: float,
         sticker_missing_frame: int,
         k_sticker_new: int = 3,  # 需連續幾幀確認才建立 STABLE_CONFIRM_CLASSES 這幾類貼紙
-
+        still_shift_ratio: float = 0.0,   # >0 才啟用靜止判定，見 _advance_stable
 
     ):
         self.bus = bus
+        self.still_shift_ratio = still_shift_ratio
         self.iou_assign = iou_assign
         self.iou_candidate = iou_candidate
         self.drift_iou_thresh = drift_iou_thresh
@@ -76,24 +77,34 @@ class TrayTracker:
         logger.info(f"[RESET-all] 已刪除 all 餐盤")
 
     def reset_tray_states(self, tray_id: str):
-        """軟重置：保留餐盤位置，每個餐盤回到 WAITING_TICKET"""
+        """軟重置：保留餐盤（id / 位置 / 建立時間），訂單狀態整個換新、回到 WAITING_TICKET。
+
+        跟 SingleOrderTracker 一樣換一個全新的 Tray，不逐欄清。以前逐欄清的版本
+        漏了單號、已確認數量、第二張票、錯誤品項紀錄，全部會殘留到下一單。
+        """
         if tray_id not in self.trays:
             logger.warning(f"[RESET-B] 找不到餐盤 ID: {tray_id}，略過")
             return
 
-        # 延遲 import 避免與 models 之間不必要的耦合順序問題
-        from logic.models import TrayState
-
-        tray = self.trays[tray_id]
-        tray.state = TrayState.WAITING_TICKET
-        tray.missing_count = 0
-        tray.drift_count = 0
-        tray.expected_items = []
-        tray.checked_items = []
-        tray.ticket = None
-        tray.stickers = []
-        tray.pending_stickers = []  # 軟重置一併清空候選中的貼紙，避免殘留舊資料
+        old = self.trays[tray_id]
+        self.trays[tray_id] = Tray(
+            id=old.id,
+            rect=old.rect,
+            xywhr=old.xywhr,
+            start_time_str=old.start_time_str,
+            ticket_crop=None,
+        )
         logger.info(f"[RESET-B] 已重置餐盤 {tray_id} 狀態")
+
+    def hold_tickets_until_clear(self, tray_id: str) -> None:
+        """
+        訂單超時收尾後由 LogicEngine 呼叫（介面跟 SingleOrderTracker 一致）。
+
+        tray 模式收尾會把整個 tray 刪掉，盤子還在的話要再累積 k_container_new
+        幀才會重建成新 tray，這段期間沒有東西可以擋。盤上那張票之後仍會被
+        重新讀成一筆新訂單 —— tray 模式目前沒有上線，先不處理。
+        """
+        logger.warning(f"[order_timeout] tray={tray_id} 超時收尾（tray 模式沒有接單閘門）")
 
     def remove_tray(self, tray_id: str, ts_utc: str) -> bool:
         if tray_id in self.trays:
@@ -198,6 +209,22 @@ class TrayTracker:
 
         self.tray_candidates = next_candidates
 
+    def _advance_stable(self, item: TrackedItem, new_bbox: PolygonXYXY, label: str) -> None:
+        """與 SingleOrderTracker._advance_stable 相同：still_shift_ratio > 0 時，
+        中心位移超過框短邊的這個比例就算還在動、穩定幀數歸零，否則 +1。
+        必須在呼叫端把 item.bbox 換成新框之前呼叫。"""
+        if self.still_shift_ratio > 0:
+            shift = center_shift_ratio(item.bbox, new_bbox)
+            if shift > self.still_shift_ratio:
+                if item.stable_frames > 0:
+                    logger.info(
+                        f"[still] {label} 累積 {item.stable_frames} 幀後移動"
+                        f"（位移 {shift:.1%} > {self.still_shift_ratio:.1%}），穩定幀數歸零"
+                    )
+                item.stable_frames = 0
+                return
+        item.stable_frames += 1
+
     def update_ticket_and_stickers(self, ticket_dets: list, sticker_dets: list, ticket_mat_dets: list = None) -> None:
         """
         2-1. 更新每個 tray 的 ticket 追蹤與穩定度
@@ -220,7 +247,7 @@ class TrayTracker:
                     tray.ticket = TrackedItem(bbox=t_rect, xywhr=t_xywhr)
                 else:
                     if iou_poly_poly(t_rect, tray.ticket.bbox) > 0.7:
-                        tray.ticket.stable_frames += 1
+                        self._advance_stable(tray.ticket, t_rect, f"ticket@{tray.id}")
                         tray.ticket.bbox = t_rect
                         tray.ticket.xywhr = t_xywhr
                     else:
@@ -251,11 +278,7 @@ class TrayTracker:
 
                 if best_idx != -1 and best_iou > 0.1:
                     ts_obj = tray.stickers[best_idx]
-                    if is_geometrically_frozen(ts_obj.bbox, s_rect):
-                        ts_obj.geo_stable_frames += 1
-                    else:
-                        ts_obj.geo_stable_frames = 0
-                    ts_obj.stable_frames += 1
+                    self._advance_stable(ts_obj, s_rect, f"sticker({ts_obj.cls_name})@{tray.id}")
                     ts_obj.bbox = s_rect
                     ts_obj.xywhr = s_xywhr
                     matched_sticker_indices.add(best_idx)
@@ -299,7 +322,6 @@ class TrayTracker:
                     ts.stable_frames = 0
                 if not ts.is_ocr_busy:
                     ts.missing_count += 1
-                    ts.geo_stable_frames = 0
 
                 # 門檻到了，標記為消失，交由 StateMachine 處理業務與發送 MQTT
                 if ts.missing_count > self.sticker_missing_frame:

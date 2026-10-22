@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import fcntl
+import os
 import sys
 import signal
 import time
@@ -13,6 +15,8 @@ from loguru import logger
 
 from utils.clip_video import Clip, PeriodicClipRecorder
 from utils.frame_writer import AsyncFrameWriter
+from utils import clock_guard
+from utils.disk_guard import DiskGuard
 
 from stream_vision.streamer import Mjpeg_Streamer
 from depth import ORBBEC_CAMERA
@@ -21,6 +25,20 @@ from manager.camera_controller import CameraController
 from manager.task_context import TaskContext
 from manager.overlay_renderer import OverlayRenderer
 from manager.command_dispatcher import CommandDispatcher
+from manager.cloud_uploader import CloudUploader
+from logic.auto_roi_calibrator import AutoRoiCalibrator
+from config import PresetRoiCfg
+
+PROJECT_DIR = Path(__file__).resolve().parent
+
+# 所有落地資料的共同基準路徑：影片、全螢幕/裁切圖、CSV 與 log 都掛在
+# <RECORD_ROOT>/<YYYYMMDD>/<類別>/ 底下，同一筆訂單的素材才會待在一起。
+RECORD_ROOT = Path("/mnt/reserved/record/stream")
+
+# log 在日期資料夾底下的子目錄名。刻意跟 csv_logs 一樣用獨立子目錄，
+# 因為 rclone 夜間搬檔要能用 --exclude "<這個名字>/**" 把「今天還開著的檔」
+# 排除掉（見 install_crontab.sh 的說明）。
+LOG_SUBDIR = "stream_log"
 
 
 class StreamManager:
@@ -49,9 +67,9 @@ class StreamManager:
         self.tmp_frame = None
 
         # --- 錄影 ---
-        self.save_dir = Path("/mnt/reserved/record/stream")
+        self.save_dir = RECORD_ROOT
         self.video_record_size = (1280, 960)
-        self.event_record_max_seconds = 600 # 600 秒如果 event 都沒觸發 stop 就主動觸發
+        self.event_record_max_seconds = 600 # 600 秒如果 event 都沒觸發 stop 就主動觸發（載入設定後會依 order_guard 調整）
         self._event_record_start_time = None
         self.event_recorder = Clip(
             root_dir=str(self.save_dir),      # 跟 fullscreen/ocr 同一層基準路徑
@@ -80,10 +98,30 @@ class StreamManager:
                 postroll_frames=0,
             ),
             periods=[
-                (11, 12), (12, 13), (13, 14), (14, 15), (15, 16),
-                (16, 17), (17, 18), (18, 19), (19, 20),
+                (11, 12), (12, 13), (13, 14), (17, 18), (18, 19), (19, 20),
             ],
         )
+
+        # 人工錄影
+        self.manual_recorder = Clip(
+            root_dir=str(self.save_dir),
+            enable=True,
+            tag="record",
+            category="record",
+            crf=23,
+            bitrate=4,
+            fps=15,
+            frame_size=None,
+            preroll_frames=0,
+            postroll_frames=0,
+        )
+
+        # --- 殘留錄影掃描 ---
+        # 沒成功轉成影片的 JPEG 資料夾（被 kill、斷電、encode 被跳過）以前會一直
+        # 卡在當日資料夾裡等人工清。這裡開機先掃一次，之後每隔一段時間在背景補掃。
+        self.orphan_scan_interval = 1800    # 30 分鐘
+        self._last_orphan_scan = None    # time.monotonic() 的值；None = 還沒掃過
+        self._orphan_scan_thread = None
 
         # --- 存圖 ---
         self.frame_writer = AsyncFrameWriter(max_queue_size=30)
@@ -98,9 +136,19 @@ class StreamManager:
         )
         self.task.bus.on_command(self._handle_cmd)
 
+        # 錄影 watchdog 只是保險：訂單本身有 order_guard.timeout_sec 超時收尾
+        # （寫 CSV + 重置 + 停錄影），這裡刻意多留 30 秒，正常情況一定是訂單先收。
+        # 以前只有這一道、而且只停影片不收訂單，超時後的訂單全部進不了 CSV。
+        order_timeout = float(self.task.cfg.order_guard.timeout_sec or 0)
+        if order_timeout > 0:
+            self.event_record_max_seconds = order_timeout + 30
+
         # --- 相機 ---
         self.camera = self._build_camera_controller()
         self.depth_cam = ORBBEC_CAMERA(self.task.cfg.runtime.depth_cam.cfg)
+
+        # --- preset_roi 自動校正（開機一次性，見 logic/auto_roi_calibrator.py）---
+        self.roi_calibrators = self._build_roi_calibrators()
 
         # --- 畫面繪製 ---
         self.overlay = OverlayRenderer(self.task)
@@ -119,6 +167,19 @@ class StreamManager:
         )
         self.streamer.start()
 
+        # 開機先補一次上次沒收尾乾淨的錄影（丟到背景做，不擋啟動）
+        self._schedule_orphan_scan(time.monotonic())
+
+        # --- 雲端上傳（config 的 cloud_upload；不阻塞，失敗只停用上傳）---
+        self.cloud_uploader = CloudUploader(
+            self.task.cfg.cloud_upload, self.task.cfg.csv_log, self.base_dir
+        )
+        self.cloud_uploader.start()
+
+        # --- 磁碟用量監控：/mnt/reserved 滿了 log/影片/CSV 會一起寫不進去，快滿先警告 ---
+        self.disk_guard = DiskGuard(mount_path=RECORD_ROOT.parents[1], record_root=RECORD_ROOT)
+        self.disk_guard.start()
+
         logger.info(f"StreamManager v{ver} 初始化成功!")
 
     def _build_camera_controller(self) -> CameraController:
@@ -136,10 +197,136 @@ class StreamManager:
             video_record_size=self.video_record_size,
         )
     
+    def _build_roi_calibrators(self) -> dict:
+        """
+        為設定檔裡每一個 preset_roi 區域各準備一個自動校正器。
+
+        該 ROI 的 source == "auto" 時開機就 arm，一次性跑完就停；
+        source == "manual" 時仍然建立物件（只是不啟動），這樣現場想臨時
+        自動對一次，發 cmd/preset_roi {"action": "auto", "name": "..."}
+        就能觸發，不用改設定檔重開。
+
+        每個 ROI 各自一份、各自盯自己設定的類別（auto.class_name），
+        所以以後 packing_roi 想用別的標記物自動對位，不用動這裡的程式。
+        """
+        preset_roi = getattr(self.task.cfg, "preset_roi", None)
+        if preset_roi is None:
+            return {}
+
+        calibrators = {}
+        for roi_name in PresetRoiCfg.ROI_FIELDS:
+            roi = getattr(preset_roi, roi_name, None)
+            if roi is None:
+                continue
+
+            calibrators[roi_name] = AutoRoiCalibrator(
+                frame_width=self.task.cfg.runtime.camera.width,
+                frame_height=self.task.cfg.runtime.camera.height,
+                class_name=roi.auto.class_name,
+                roi_name=roi_name,
+                padding_ratio=roi.auto.padding_ratio,
+                confirm_frames=roi.auto.confirm_frames,
+                stable_iou=roi.auto.stable_iou,
+                timeout_frames=roi.auto.timeout_frames,
+            )
+            if roi.source == "auto":
+                calibrators[roi_name].arm()
+            else:
+                logger.info(f"[AUTO ROI] {roi_name}.source = manual，沿用設定檔既有的座標")
+
+        return calibrators
+
+    def apply_preset_roi(self, name: str, points, color=None, persist: bool = True,
+                         source: str = "mqtt") -> bool:
+        """
+        套用一組 preset_roi 座標（App 的 cmd/preset_roi 或自動校正都走這裡）。
+
+        實際邏輯在 TaskContext（它才擁有 cfg 與 logic），這裡只負責上
+        data_lock —— 呼叫端可能是 MQTT callback thread，而 logic 正被主迴圈用著。
+        """
+        with self.data_lock:
+            roi = self.task.apply_preset_roi(
+                name=name, points=points, color=color, persist=persist, source=source
+            )
+        return roi is not None
+
+    def _feed_roi_calibrators(self, detections) -> None:
+        """把這一幀的偵測結果餵給還在跑的校正器；定案後直接套用並寫回設定檔。"""
+        for roi_name, calibrator in self.roi_calibrators.items():
+            if not calibrator.is_active:
+                continue
+
+            try:
+                points = calibrator.feed(detections)
+            except Exception:
+                logger.error(
+                    f"[AUTO ROI] {roi_name} 校正失敗，停止自動校正:\n{traceback.format_exc()}"
+                )
+                calibrator.cancel()
+                continue
+
+            if points is None:
+                continue
+
+            roi = getattr(self.task.cfg.preset_roi, roi_name, None)
+            self.apply_preset_roi(
+                name=roi_name,
+                points=points,
+                persist=roi.auto.persist if roi is not None else True,
+                source=f"auto:{calibrator.class_name}",
+            )
+
+    def arm_roi_calibration(self, name: str = "ticket_roi", reason: str = "") -> None:
+        calibrator = self.roi_calibrators.get(name)
+        if calibrator is None:
+            logger.error(
+                f"[AUTO ROI] 設定檔的 preset_roi 底下沒有 '{name}'，無法自動校正"
+                f"（現有的: {sorted(self.roi_calibrators)}）"
+            )
+            return
+        logger.info(f"[AUTO ROI] 收到 {name} 重新校正要求 ({reason})")
+        calibrator.arm()
+
+    def cancel_roi_calibration(self, name: str = "ticket_roi", reason: str = "") -> None:
+        calibrator = self.roi_calibrators.get(name)
+        if calibrator is not None and calibrator.is_active:
+            calibrator.cancel(reason=reason)
+
+    def start_manual_recording(self, reason: str = "user") -> None:
+        with self.data_lock:
+            if self.manual_recorder.is_running:
+                logger.warning("[RECORD] 已經在錄影中，忽略 start")
+                return
+            self.manual_recorder.start()
+
+        start_ts = time.time()
+        logger.info(f"[manual_recorder] 開始錄影 ({reason})")
+        # path 這時候還不確定 (實際檔名要等第一幀寫入時才會定案，
+        # 見 Clip._run)，所以只帶 start_time，App 端用 start_time 算
+        # elapsed 就好，不依賴 path。
+        self.task.bus.publish_record_status(recording=True, start_time=start_ts, reason=reason)
+
+    def stop_manual_recording(self, reason: str = "user") -> None:
+        with self.data_lock:
+            if not self.manual_recorder.is_running:
+                logger.warning("[RECORD] 目前沒有在錄影，忽略 stop")
+                return
+            self.manual_recorder.stop(save_video=True)
+            video_path = self.manual_recorder.video_path  # stop 之後這個一定已經確定了
+
+        logger.info(f"[manual_recorder] 結束錄影 ({reason})")
+        self.task.bus.publish_record_status(
+            recording=False,
+            path=str(video_path) if video_path else None,
+            reason=reason,
+        )
+
     def start_event_recording(self, reason: str = "") -> None:
         with self.data_lock:
-            self.event_recorder.start()
-            session_id = self.event_recorder.get_current_session_id()
+            # 一定要用 start() 的回傳值：錄影被拒絕(上一支還在 encode)時它會回
+            # None，而 get_current_session_id() 會給出上一段的 session，CSV 就會
+            # 指到上一單的影片。
+            session_id = self.event_recorder.start()
         logger.info(f"[event_recorder] 開始錄影 ({reason}), session={session_id}")
         return session_id
     
@@ -189,6 +376,44 @@ class StreamManager:
                 )
             finally:
                 self._event_record_start_time = None
+
+    def _recover_orphan_clips(self) -> None:
+        """
+        逐一請每個 recorder 清理 / 補救自己 category 底下沒轉成影片的殘留資料夾。
+
+        每個 Clip 只掃自己的 category（event / record / continuous），所以
+        full_screen、ocr_cut 這種純圖片資料夾不會被碰到；正在錄影或正在
+        encode 的 recorder 會自己跳過，不會跟現役的 ffmpeg 搶硬體編碼器。
+        """
+        for recorder in (
+            self.event_recorder,
+            self.manual_recorder,
+            self.continuous_recorder.clip,
+        ):
+            try:
+                recorder.recover_orphan_clips()
+            except Exception:
+                logger.error(
+                    f"[{recorder.tag}] 殘留錄影掃描失敗:\n{traceback.format_exc()}"
+                )
+
+    def _schedule_orphan_scan(self, now_ts: float) -> None:
+        """時間到了就在背景跑一次殘留錄影掃描（上一輪還沒跑完就跳過這次）"""
+        # None = 還沒掃過：開機那一次一定要跑（monotonic 從開機起算，不能拿 0 當起點比）
+        if (self._last_orphan_scan is not None
+                and now_ts - self._last_orphan_scan < self.orphan_scan_interval):
+            return
+
+        if self._orphan_scan_thread is not None and self._orphan_scan_thread.is_alive():
+            return
+
+        self._last_orphan_scan = now_ts
+        self._orphan_scan_thread = threading.Thread(
+            target=self._recover_orphan_clips,
+            name="orphan-clip-scan",
+            daemon=True,
+        )
+        self._orphan_scan_thread.start()
 
     def start_camera(self) -> None:
         self.camera.start()
@@ -248,9 +473,15 @@ class StreamManager:
                 
                 record_frame = cv2.resize(frame, self.video_record_size)
                 now_ts = time.time()
+                # 經過時間一律用 monotonic：跳電後 RTC 回到預設時間、chrony 校時把時鐘
+                # 往前撥一年多時，用牆上時鐘算會讓 watchdog 以為已錄了一年、立刻強制收尾
+                # （2026-10-02 現場：start_time=2025-05-30 的那筆 NGtoOK）。
+                mono_ts = time.monotonic()
                 self.event_recorder.feed(record_frame, now_ts) # 事件觸發影片
+                self.manual_recorder.feed(record_frame, now_ts)   # 人工觸發錄影
                 # self.continuous_recorder.feed(record_frame, now_ts) # 時間內持續寫入影片
-                self._check_event_record_timeout(now_ts)
+                self._check_event_record_timeout(mono_ts) # 檢查事件觸發錄影是否超時 (10分鐘)
+                self._schedule_orphan_scan(mono_ts) # 檢查有沒有壞檔, 有的話嘗試補救
 
                 for ocr_result in task_ctx.drain_ocr_results():
                     metadata = ocr_result["metadata"]
@@ -265,8 +496,16 @@ class StreamManager:
                             is_flip=ocr_result["is_flip"],
                             task_bbox=metadata["bbox"]
                         )
+                        # 傳票的菜單區域下界（吉野家 parser 才有），跟著這份 OCR 結果給 overlay 畫
+                        pop_line = getattr(logic.order_parser, "pop_menu_bottom_line", None)
+                        ocr_result["menu_bottom_line"] = pop_line() if pop_line else None
 
                 out, detections = mmr.detect(frame, self.show_box)
+
+                # preset_roi 自動校正：只在開機後那一小段（或收到 action=auto）
+                # 期間會真的做事，定案/逾時之後 is_active 就永遠是 False，
+                # 熱路徑上只剩每個 ROI 一次屬性判斷。
+                self._feed_roi_calibrators(detections)
 
                 with self.data_lock:
                     tasks, movements = logic.update(frame, detections)
@@ -279,7 +518,7 @@ class StreamManager:
                         if warped_img.size == 0 or w < 10 or h < 10:
                             continue
 
-                        self._save_frame(warped_img, f"{str(self.save_dir)}/{self.event_recorder.date}/ocr_cut")
+                        # self._save_frame(warped_img, f"{str(self.save_dir)}/{self.event_recorder.date}/ocr_cut")
                         self._save_frame(self.tmp_frame, f"{str(self.save_dir)}/{self.event_recorder.date}/full_screen")
 
                         metadata = {
@@ -366,12 +605,23 @@ class StreamManager:
         self._running = False
         time.sleep(0.5)
 
+        # 先停上傳：進行中的上傳會被中斷，不留背景執行緒拖住關機
+        if getattr(self, "cloud_uploader", None) is not None:
+            self.cloud_uploader.stop()
+        if getattr(self, "disk_guard", None) is not None:
+            self.disk_guard.stop()
+
         if self.frame_writer:
             self.frame_writer.stop(wait=True)
         if self.event_recorder.is_running:
             with self.data_lock:
                 self.event_recorder.stop(save_video=True)
             logger.info("[event_recorder] cleanup 強制停止錄影")
+        if self.manual_recorder.is_running:
+            with self.data_lock:
+                self.manual_recorder.stop(save_video=True)
+            logger.info("[manual_recorder] cleanup 強制停止錄影")
+            self.task.bus.publish_record_status(recording=False, reason="cleanup")
 
         self.continuous_recorder.stop(save_video=True, wait_for_encode=True, encode_timeout=5.0,)
         logger.info("[continuous_recorder] cleanup 強制停止錄影 (最多等 5 秒)")
@@ -383,24 +633,122 @@ class StreamManager:
         logger.info("Cleaned up.")
 
 
+def _resolve_log_sink() -> str:
+    """決定 log 檔要寫哪裡，回傳給 loguru 的路徑樣板。
+
+    正常情況：
+        <RECORD_ROOT>/<YYYYMMDD>/stream_log/<YYYYMMDD>.log
+    跟影片 (event/continuous/record)、截圖 (full_screen/ocr_cut) 與
+    csv_logs 放在同一個日期資料夾底下，事後要查某一天的狀況不必跨目錄找。
+
+    路徑裡的 {time} 由 loguru 在「每次建立檔案」時重新格式化，**目錄部分也算**，
+    所以午夜 rotation 會自動換到隔天的日期資料夾，不需要自己排程搬檔。
+
+    /mnt/reserved 是獨立掛載的分割區。沒掛上時不應該讓整個 app 起不來，
+    也不該在 rootfs 上偷偷造一個同名目錄把磁碟寫爆 —— 退回專案內的
+    logs/stream_log，並留一行警告。
+    """
+    pattern = Path("{time:YYYYMMDD}") / LOG_SUBDIR / "{time:YYYYMMDD}.log"
+    mount_root = RECORD_ROOT.parents[1]   # /mnt/reserved
+
+    if mount_root.is_dir():
+        try:
+            RECORD_ROOT.mkdir(parents=True, exist_ok=True)
+            return str(RECORD_ROOT / pattern)
+        except OSError as e:
+            logger.warning(f"[log] 無法寫入 {RECORD_ROOT} ({e})，log 改寫到專案目錄")
+    else:
+        logger.warning(f"[log] {mount_root} 未掛載，log 改寫到專案目錄")
+
+    fallback_dir = PROJECT_DIR / "logs" / LOG_SUBDIR
+    fallback_dir.mkdir(parents=True, exist_ok=True)
+    return str(fallback_dir / "{time:YYYYMMDD}.log")
+
+
+# 單例鎖：同一台機器上只准跑一份 app.py
+# ----------------------------------------------------------------------
+# /run 是 tmpfs，重開機自動清空；鎖由 kernel 綁在 fd 上，process 結束
+# （含當掉、被 kill）就自動釋放，不會留下殘鎖需要手動清。
+LOCK_PATH = "/run/yoshinoya_ai.lock"
+EXIT_ALREADY_RUNNING = 3   # yoshinoya_ai.service 用 RestartPreventExitStatus 認這個碼
+
+_lock_fd = None  # 必須保持開著：fd 一關，鎖就沒了
+
+
+def acquire_single_instance_lock() -> bool:
+    """搶單例鎖。拿不到就回 False，呼叫端應該直接結束。
+
+    為什麼需要這個
+    --------------
+    2026-09-29 現場的 MQTT 互踢（`Client client already connected, closing old
+    connection.` 一個下午 181 次、app 這邊連續 `reason: 7`）根因是**同時有兩份
+    app.py 在跑**：service 起了一份，手動除錯或 App 的 AI 啟動鈕又帶起一份。
+    兩份用同一個 MQTT client id，於是在 broker 上互踢。
+
+    把 client id 改成唯一值只會讓症狀消失 —— 兩份會各自連上，然後繼續搶
+    HikRobot 相機、DLA/APU 與 /mnt/reserved 的寫入，反而更難發現。所以擋在
+    這裡：第二份連相機、模型、MQTT 都不去碰就結束。
+    """
+    global _lock_fd
+    try:
+        _lock_fd = open(LOCK_PATH, "a+")
+    except OSError as e:
+        # 鎖檔開不起來不該讓 app 起不來（例如 /run 不可寫的異常環境）
+        logger.warning(f"[單例] 無法開啟鎖檔 {LOCK_PATH}（{e}），跳過單例檢查")
+        return True
+
+    try:
+        fcntl.flock(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        _lock_fd.seek(0)
+        other = _lock_fd.read().strip() or "?"
+        logger.error(
+            f"[單例] 已有另一份 AI 程式在執行 (pid={other})，本次啟動放棄。"
+            f" 要手動除錯請先 systemctl stop yoshinoya_ai"
+            f"（或 systemctl mask --runtime yoshinoya_ai，重開機後自動失效）。"
+        )
+        return False
+
+    _lock_fd.seek(0)
+    _lock_fd.truncate()
+    _lock_fd.write(str(os.getpid()))
+    _lock_fd.flush()
+    return True
+
+
 def main():
 
-    log_dir = Path(__file__).resolve().parent / "logs" / "stream_log"
-    log_dir.mkdir(parents=True, exist_ok=True)
-
+    # 先接上 stderr，這樣 _resolve_log_sink() 的退回警告才看得到
     logger.remove()
-    logger.add(
-        str(log_dir / "{time:YYYYMMDD}.log"),
-        level='INFO',
-        rotation="00:00"
-    )
     logger.add(
         sys.stderr,
         level='INFO'
     )
 
-    task = "ocr"
-    version = "0.0"
+    # 單例檢查刻意排在「接上檔案 sink 之前」：搶不到鎖的那份只會對 stderr
+    # 說一句就走（service 的 journal / 手動執行的終端機都看得到），不會去開
+    # 正在被另一份寫入的當日 log 檔，也就不可能在午夜剛好觸發 rotation、
+    # 把人家的 log 檔改名。
+    if not acquire_single_instance_lock():
+        sys.exit(EXIT_ALREADY_RUNNING)
+
+    # 開機時鐘還沒校正就先等（最多 120 秒）。排在接上檔案 sink 之前：
+    # 時間不對時 log 路徑的日期也是錯的，會開出一個 20250530/ 的 log 檔。
+    clock_ok, clock_waited = clock_guard.wait_for_valid_clock(timeout_sec=120)
+
+    logger.add(
+        _resolve_log_sink(),
+        level='INFO',
+        rotation="00:00"
+    )
+    clock_guard.report(clock_ok, clock_waited)
+
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--profile", choices=["yoshinoya", "suzumo"])
+    task = parser.parse_args().profile or "ocr"
+    # 目前僅供人工辨識：StreamManager 沒有用這個參數，也沒有經 MQTT 對外發布
+    version = "3.3.1"
 
     manager = None
 

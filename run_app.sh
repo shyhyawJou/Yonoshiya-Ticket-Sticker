@@ -37,4 +37,4 @@ chmod 666 /dev/bus/usb/*/* 2>/dev/null
 
 # --- 3. 設定環境變數並啟動 ---
 export MVCAM_COMMON_RUNENV="/usr/lib"
-python3 app.py
+python3 app.py "$@"

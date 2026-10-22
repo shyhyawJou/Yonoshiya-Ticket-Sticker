@@ -39,6 +39,7 @@ class StickerPendingBuffer:
     """
 
     def __init__(self, k_new: int, iou_thresh: float = 0.1):
+        self.item_resolver = resolve_item_name
         self.k_new = k_new
         self.iou_thresh = iou_thresh
 
@@ -57,7 +58,7 @@ class StickerPendingBuffer:
             若這次匹配後候選數已達門檻,回傳應升級成正式 TrackedItem
             的 dict(bbox / xywhr / cls_name);否則回傳 None。
         """
-        item_key = resolve_item_name(cls_name)
+        item_key = self.item_resolver(cls_name)
         best_idx, best_iou = -1, 0.0
 
         for idx, pending in enumerate(pending_list):

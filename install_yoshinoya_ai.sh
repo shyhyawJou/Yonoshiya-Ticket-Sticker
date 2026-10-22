@@ -1,6 +1,6 @@
 set -euo pipefail
 
-unzip -o ocr_mmr_dla.zip -d /home/root
+# unzip -o ocr_mmr_dla.zip -d /home/root
 
 pip3 install \
     shapely \

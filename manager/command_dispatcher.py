@@ -28,6 +28,7 @@ class CommandDispatcher:
             "img_reverse_xy": self._on_img_reverse_xy,
             "snapshot": self._on_snapshot,
             "record": self._on_manual_recording,
+            "preset_roi": self._on_preset_roi,
         }
 
     def _flip_roi_points(self, points, width: int, height: int, flip_x: bool, flip_y: bool):
@@ -127,16 +128,54 @@ class CommandDispatcher:
         else:
             logger.warning(f"[RECORD] MQTT 收到未知 action: {payload}")
 
+    def _on_preset_roi(self, payload: dict) -> None:
+        """
+        App 設定預設 ROI（跟前端溝通好的 cmd/preset_roi）:
+
+            {"action": "set", "name": "ticket_roi",
+             "points": [[400,1400],[1600,1400],[1600,2800],[400,2800]],
+             "color": [0, 255, 255]}
+
+        - name  : config.yaml preset_roi 底下的 key（App 的選項與現值都從那裡唯讀載入）
+        - points: 左上/右上/右下/左下，座標系 = runtime.camera.width/height 取像解析度
+        - color : 顯示顏色 RGB 0~255（選填，不給就保留原本顏色）
+
+        AI 收到後自己寫回 config.yaml，App 不寫檔。另外支援
+        {"action": "auto", "name": "ticket_roi"}：重跑一次自動校正
+        （用設定檔 preset_roi.<name>.auto.class_name 那個類別的偵測框框出 ROI），
+        現場搬動相機後不用改設定檔也不用重啟程式。
+        """
+        m = self.manager
+        action = str(payload.get("action", "set")).strip().lower()
+        name = str(payload.get("name") or "ticket_roi").strip()
+
+        if action == "auto":
+            m.arm_roi_calibration(name=name, reason="mqtt")
+            return
+
+        if action != "set":
+            logger.warning(f"[ROI] 不支援的 action: {payload}")
+            return
+
+        if "points" not in payload:
+            logger.error(f"[ROI] set 指令缺少 'points' 欄位，略過: {payload}")
+            return
+
+        # 手動設定就代表現場要的是這一組座標，順手把這個 ROI 還在跑的自動校正
+        # 停掉，不然幾幀後自動校正定案，會把 App 剛設好的座標又蓋回去。
+        m.cancel_roi_calibration(name=name, reason="改為採用 App 手動設定的 ROI")
+
+        m.apply_preset_roi(
+            name=name,
+            points=payload["points"],
+            color=payload.get("color"),
+            source="mqtt",
+        )
+
     def _on_reset(self, payload: dict) -> None:
         m = self.manager
         reset_type = payload.get("type")
         tray_id = payload.get("tray_id")
-
-        # 用原始畫面 (未經錄影壓縮) 存檔，檔名含日期時間避免覆蓋
-        if getattr(m, "tmp_frame", None) is not None:
-            m._save_frame(m.tmp_frame, "reset_capture")
-        else:
-            logger.warning("[RESET] tmp_frame 尚未就緒，略過截圖")
 
         logger.info(f"[RESET] 收到重置指令 (type: '{reset_type}')...")
         with m.data_lock:

@@ -1,33 +1,95 @@
+"""
+order_parser.py
+===============
+票據 OCR 結果 -> (品名, 數量) 列表 + 票據編號。
+
+2026-09-10 改版摘要
+-------------------
+舊版的三個具體問題（實測證據見 tools/eval_ticket_parsing.py 的輸出）：
+
+1. 候選詞庫錯誤。舊版拿 cfg.menus_ticket（menus_mapping.yaml 的 1235 筆
+   吉野家菜名）當候選，但本部署的票據只會出現 images/日文ticket.txt 的
+   8 個詞。即使 OCR 文字完全正確：
+       のり弁当 / 箸 / 醤油 / おしぼり / 紅しょうが -> None（整列被丟棄）
+       サラダ・味噌汁セ -> 'サラダみそ汁セット' (58.8)  ← 錯配
+       ドレッシング     -> 'ごまドレッシング'  (85.7)  ← 錯配
+   -> 現在改由 cfg 注入該部署真正的詞彙（vocab_ticket），並用
+      match_restricted（fuzz.ratio + 與第二名的差距門檻）取代
+      token_set_ratio，後者對「候選是 OCR 文字的超集」過度寬容。
+
+2. 數量沒有欄位限制。舊版取「與列中心 Y 最近的純數字框」，同一列的
+   金額欄（100 / 0）與訂單編號都可能被選中。
+   -> 現在先用「数量」表頭定出欄位 X 閘門，只接受落在閘門內的數字。
+
+3. 取不到數量時預設 1。舊版 match_num 初始化為 1，且用 `if match_num == 1`
+   當作「還沒取到」的旗標，讓「真的是 1」與「不知道」無法區分。
+   -> 現在取不到就是 None（未確認），並在 parse() 回傳值與 last_rows 中
+      明確標示，由呼叫端決定如何處理。
+
+保留：SkewCorrector 去斜、quad_validator 形狀檢查、predict_quantity
+（數字受限辨識）當第二層 fallback —— 這三個都是既有且在 edge 上已驗證的能力。
+"""
+
 from __future__ import annotations
 
-import re
-from typing import List, Optional, Set, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 from loguru import logger
-from rapidfuzz import fuzz, process
 
 from logic.text_utils import FuzzyMatcher
+from logic.ticket_layout import (
+    QUANTITY_RE, TicketRow, build_items, find_order_number, find_qty_column,
+    parse_rows, to_legacy_items,
+)
 from utils.skew_corrector import SkewCorrector
 from utils.quad_validator import validate_and_fix_boxes, find_angle_outliers
 
-ParsedItem = Tuple[str, int]  # (menu_name, quantity)
+# 數量可能是 None（未確認）。呼叫端務必檢查，不可直接當 1 使用。
+ParsedItem = Tuple[str, Optional[int]]
 
 
 class OrderParser:
     def __init__(
         self,
         menus_ticket: List[str],
-        menus_with_digits: Set[str],
+        menus_with_digits,
         fuzzy_matcher: FuzzyMatcher,
         rec_pred,  # StandaloneRecDLA
+        vocab_ticket: Optional[Sequence[str]] = None,
+        min_name_score: float = 62.0,
+        min_name_margin: float = 8.0,
+        enable_qty_rec_fallback: bool = True,
+        min_box_score: float = 0.5,
     ):
         self.menus_ticket = menus_ticket
         self.menus_with_digits = menus_with_digits
         self.fuzzy_matcher = fuzzy_matcher
         self.rec_pred = rec_pred
-        self.abc = 0
 
+        # vocab_ticket 為該部署真正會出現的詞彙；未提供時退回 menus_ticket
+        # （舊行為），但會警告，因為大詞庫在小場景下錯配率很高。
+        if vocab_ticket:
+            self.vocab_ticket = list(vocab_ticket)
+        else:
+            self.vocab_ticket = list(menus_ticket)
+            logger.warning(
+                "[OrderParser] 未提供 vocab_ticket，退回使用 menus_ticket "
+                f"({len(self.vocab_ticket)} 筆)。小場景建議在 config 的 includes 下"
+                "設定 vocab_ticket 指向該部署的詞彙檔，以降低錯配。"
+            )
+
+        self.min_name_score = min_name_score
+        self.min_name_margin = min_name_margin
+        self.enable_qty_rec_fallback = enable_qty_rec_fallback
+        self.min_box_score = min_box_score
+
+        # 最近一次解析的完整結果，供呼叫端取得「未確認」等細節而不必改簽章
+        self.last_rows: List[TicketRow] = []
+        self.last_order_number: Optional[str] = None
+        self.last_qty_column = None
+
+    # ------------------------------------------------------------------
     def parse(
         self,
         frame_crop: np.ndarray,
@@ -35,210 +97,157 @@ class OrderParser:
         rec_res: list,
         is_flip: bool,
     ) -> Tuple[List[ParsedItem], Optional[str]]:
-        """
-        解析一張訂單影像的 OCR 結果 (已整合傾斜校正與菜名數字防禦機制)。
-        """
-        parsed_items: List[ParsedItem] = []
-        order_number: Optional[str] = None
-        nn_x = None  # 擺正後的數量欄中心 X 座標
-        nn_w = None  # 擺正後的數量欄寬度
+        """回傳 ((品名, 數量|None) 列表, 票據編號|None)。
 
-        flip_res = list(reversed(rec_res)) if is_flip else rec_res
-        flip_dt = list(reversed(dt_boxes)) if is_flip else dt_boxes
+        注意：frame_crop / dt_boxes 由 AsyncOCR._worker_loop 事先旋轉成
+        一致的正立座標系，且 is_flip 已被設為 False，因此這裡不再處理翻轉。
+        """
+        rows, order_number = self.parse_detailed(frame_crop, dt_boxes, rec_res, is_flip)
+        items = to_legacy_items(rows)
+        logger.info(f"[訂單解析結果]: {items}, 編號: {order_number}")
+        return items, order_number
 
-        # 傾斜校正 1：初始化校正器
-        skew = SkewCorrector.from_dt_boxes(flip_dt)
+    # ------------------------------------------------------------------
+    def parse_detailed(
+        self,
+        frame_crop: np.ndarray,
+        dt_boxes: list,
+        rec_res: list,
+        is_flip: bool = False,
+    ) -> Tuple[List[TicketRow], Optional[str]]:
+        """完整版：回傳每一列的 TicketRow（含未確認狀態與原始 OCR 文字）。"""
+        self.last_rows, self.last_order_number, self.last_qty_column = [], None, None
+
+        if dt_boxes is None or len(dt_boxes) == 0 or not rec_res:
+            logger.warning("[OrderParser] 沒有文字框，無法解析")
+            return [], None
+
+        # 1. 去斜：讓後續的「同一列」判斷在一致的直角座標系上進行
+        skew = SkewCorrector.from_dt_boxes(dt_boxes)
         logger.info(f"[傾斜校正] 估計角度: {skew.theta_deg:.2f} 度")
+        corrected = skew.correct_boxes(dt_boxes)
 
-        # 傾斜校正 2：一次性批次將所有 Bbox 擺正，避免在後續迴圈重複運算消耗 CPU
-        corrected_dt_boxes = skew.correct_boxes(flip_dt)
+        # 2. 形狀檢查：菱形/斗笠形狀的框座標不可信，直接剔除
+        corrected, bad_idx = validate_and_fix_boxes(corrected, log_fn=logger.warning)
+        bad = set(bad_idx) | set(find_angle_outliers(corrected, max_dev_deg=20.0))
+        if bad:
+            logger.warning(f"[形狀異常框] 剔除 {len(bad)} 個，index={sorted(bad)}")
 
-        # 檢察 bbox 有沒有變成菱形或斗笠形狀
-        corrected_dt_boxes, bad_box_indices = validate_and_fix_boxes(
-            corrected_dt_boxes, log_fn=logger.warning
+        keep_dt, keep_corr, keep_rec = [], [], []
+        for i in range(min(len(corrected), len(rec_res))):
+            if i in bad:
+                continue
+            if float(rec_res[i][1]) < self.min_box_score:
+                continue
+            keep_dt.append(dt_boxes[i])
+            keep_corr.append(corrected[i])
+            keep_rec.append(rec_res[i])
+
+        items = build_items(keep_corr, keep_rec, orig_boxes=keep_dt)
+        if not items:
+            logger.warning("[OrderParser] 所有文字框都被剔除")
+            return [], None
+
+        # 3. 票據編號（整串，保留前導零）
+        order_number, no_item = find_order_number(items)
+        self.last_order_number = order_number
+
+        # 4. 數量欄閘門
+        qty_col = find_qty_column(items)
+        self.last_qty_column = qty_col
+        if qty_col is None:
+            logger.warning(
+                "[OrderParser] 找不到「数量」表頭，本張所有數量標為未確認"
+                "（不改用最近數字猜測，避免誤取金額）"
+            )
+        else:
+            logger.info(
+                f"[數量欄] x=[{qty_col.x0:.1f}, {qty_col.x1:.1f}] "
+                f"(表頭 cx={qty_col.header_cx:.1f}, w={qty_col.header_w:.1f})"
+            )
+
+        # 表格開始前的抬頭區（新規/日期/編號/テーブル）不當品項列
+        cutoff = None
+        if qty_col is not None:
+            cutoff = qty_col.header_cy - 0.5 * float(np.median([it.h for it in items]))
+        elif no_item is not None:
+            cutoff = no_item.cy
+
+        rows = parse_rows(
+            items, self.vocab_ticket, qty_col,
+            min_score=self.min_name_score,
+            min_margin=self.min_name_margin,
+            exclude_above_cy=cutoff,
+            names_with_digits=self.menus_with_digits or (),
         )
-        bad_box_indices = set(bad_box_indices)
-        # 角度離群值檢測（順序正確但形狀是菱形/怪異四邊形）
-        angle_outlier_indices = find_angle_outliers(corrected_dt_boxes, max_dev_deg=20.0)
-        if angle_outlier_indices:
-            logger.warning(f"[角度異常框] 偵測到 {len(angle_outlier_indices)} 個角度離群框，index={angle_outlier_indices}")
-        bad_box_indices |= set(angle_outlier_indices)
 
-        # 1. 找出標題、外帶框、數量欄，同時收集純數字框
-        takeout_y = None
-        takeout_x = None
-        digit_boxes = []  # 儲存結構: (corrected_cy, digit_value, text)
-
-        zipped_data = list(zip(flip_dt, corrected_dt_boxes, flip_res))
-
-        for idx, (orig_box, corr_box, (text, score)) in enumerate(zipped_data):
-            if score < 0.5:
-                continue
-            if idx in bad_box_indices:
-                continue
-
-            # 全面使用已校正的擺正座標進行幾何判斷
-            cy = np.mean([pt[1] for pt in corr_box])
-            x_coords = [pt[0] for pt in corr_box]
-            cleaned_text = text.strip()
-
-            # 收集純數字框 (放寬 Regex 至多位數，如 10)
-            if re.fullmatch(r'[1-9]\d*', cleaned_text):
-                digit_boxes.append((cy, int(cleaned_text), cleaned_text))
-
-            # 判斷訂單編號
-            if order_number is None:
-                match_order_number = re.search(r'\d{3}$', cleaned_text)
-                if match_order_number:
-                    order_number = match_order_number.group()
-                    if not is_flip:
-                        takeout_x = (80, max(x_coords) - 60)
-                        takeout_y = cy + 100
-                    else:
-                        takeout_x = (min(x_coords) + 60, frame_crop.shape[1] - 80)
-                        takeout_y = cy - 100
-
-            if cleaned_text == "枚":
-                cleaned_text = "数"
-            nn_match = process.extractOne(cleaned_text, ["数"], scorer=fuzz.token_set_ratio)
-            if nn_match and nn_match[1] > 60:
-                nn_x = np.mean(x_coords)
-                nn_w = max(x_coords) - min(x_coords)
-
-            take_out_match = process.extractOne(cleaned_text, ["ティクアウト"], scorer=fuzz.token_set_ratio)
-            if take_out_match and take_out_match[1] > 60:
-                takeout_y = cy
-                takeout_x = (min(x_coords), max(x_coords))
-
-        # 2. 過濾有效文字區塊 (排除外帶框外的雜訊)
-        valid_items = []
-        for idx, (orig_box, corr_box, (text, score)) in enumerate(zipped_data):
-            min_score = 0.3 if text.startswith("ねぎ") else 0.5
-            if score < min_score:
-                continue
-            if idx in bad_box_indices:
-                continue
-
-            cy = np.mean([pt[1] for pt in corr_box])
-            cx = np.mean([pt[0] for pt in corr_box])
-            h = abs(min(corr_box[3][1], corr_box[2][1]) - max(corr_box[0][1], corr_box[1][1]))
-
-            if takeout_y is not None and takeout_x is not None:
-                if not is_flip:
-                    if cy < takeout_y: continue
-                    if cx < (takeout_x[0] - 30) or cx > (takeout_x[1] + 40): continue
-                else:
-                    if cy > takeout_y: continue
-                    if cx < (takeout_x[0] - 40) or cx > (takeout_x[1] + 30): continue
-
-            valid_items.append({
-                'text': text,
-                'score': score,
-                'orig_box': orig_box,
-                'cx': cx,
-                'cy': cy,
-                'h': h,
-            })
-
-        # 3. 將同個高度的文字合併成同一列 (校正後座標讓 Y 軸對齊極度精準)
-        rows = []
-        for item in valid_items:
-            placed = False
+        # 5. 第二層 fallback：數量欄該列沒有 det 框時，直接在數量欄中心裁圖，
+        #    用既有的數字受限辨識（predict_quantity 只允許 blank + 0-9）再試一次。
+        #    det 常漏掉孤立的單一位數，這一層可救回，但每列一次推論，
+        #    因此只對「已辨識出品名但數量未確認」的列執行。
+        if self.enable_qty_rec_fallback and qty_col is not None and self.rec_pred is not None:
             for row in rows:
-                avg_cy = sum(r['cy'] for r in row) / len(row)
-                avg_h = sum(r['h'] for r in row) / len(row)
-                if abs(item['cy'] - avg_cy) < avg_h * 0.5:
-                    row.append(item)
-                    placed = True
-                    break
-            if not placed:
-                rows.append([item])
-
-        # 4. 合併內容並與 menus_ticket 比對，進行三重機制判斷數量
-        for row in rows:
-            row.sort(key=lambda x: x['cx'], reverse=is_flip)
-            merged_text = "".join([item['text'] for item in row])
-            row_cy = np.mean([item['cy'] for item in row])
-            avg_h = np.mean([item['h'] for item in row])
-
-            # 嘗試拆出前綴數字
-            prefix_m = re.match(r'^([1-9]\d*)(.+)', merged_text.strip())
-            leading_digit = int(prefix_m.group(1)) if prefix_m else None
-
-            # 模糊比對品項名稱
-            match_result = self.fuzzy_matcher.match(merged_text, self.menus_ticket)
-
-            if match_result:
-                matched_str, match_score = match_result
-                if match_score > 40:
-                    match_num = 1  # 預設初始化
-
-                    # --------------------------------------------------------
-                    # [方法一：前綴數字]
-                    # --------------------------------------------------------
-                    if leading_digit is not None and matched_str not in self.menus_with_digits:
-                        match_num = leading_digit
-                        logger.info(f"[數量判斷-方法一 前綴數字]: '{merged_text}' → 數量={match_num}")
+                if row.name is None or row.quantity is not None:
+                    continue
+                try:
+                    rx, ry = skew.inverse_correct_point(qty_col.header_cx, row.cy)
+                    text = self.rec_pred.predict_quantity(
+                        frame_crop, cx=rx, cy=ry,
+                        h=row.height, w=row.height, is_flip=False,
+                    )
+                    if isinstance(text, tuple):
+                        text = text[0]
+                    cand = "".join(ch for ch in str(text) if ch.isdigit())
+                    m = QUANTITY_RE.match(cand)
+                    if m:
+                        row.quantity = int(m.group(1))
+                        row.quantity_raw = str(text)
+                        row.quantity_source = "rec_crop"
+                        logger.info(
+                            f"[數量-裁圖辨識] '{row.name}' 列 -> {row.quantity} (raw={text!r})"
+                        )
                     else:
-                        # --------------------------------------------------------
-                        # [方法二：獨立數字框 + 菜名內建數字防禦機制]
-                        # --------------------------------------------------------
-                        if digit_boxes:
-                            nearest_cy, nearest_val, nearest_raw_text = min(
-                                digit_boxes, key=lambda x: abs(x[0] - row_cy)
-                            )
-                            
-                            if abs(nearest_cy - row_cy) < avg_h * 0.8:
-                                is_part_of_menu = False
-                                
-                                # 🛡️ 防禦檢查：如果品項名稱本來就含有數字 (例如 "18切牛舌")
-                                if matched_str in self.menus_with_digits:
-                                    # 檢查撈出來的數字框是否其實是品項字串的一部分 (例如抓到 1 或 8)
-                                    if nearest_raw_text in matched_str:
-                                        logger.warning(
-                                            f"[數量判斷-防禦機制觸發]: 數字框 '{nearest_raw_text}' 疑似為內建品項 '{matched_str}' 的一部分。放棄方法二。"
-                                        )
-                                        is_part_of_menu = True
-                                
-                                if not is_part_of_menu:
-                                    match_num = nearest_val
-                                    logger.info(f"[數量判斷-方法二 digit_boxes]: '{merged_text}' → 最近純數字框 val={nearest_val} → 數量={match_num}")
+                        logger.warning(
+                            f"[數量-裁圖辨識] '{row.name}' 列辨識結果={text!r} 不是有效數量，"
+                            "維持未確認"
+                        )
+                except Exception as exc:  # 單列失敗不影響其他列
+                    logger.error(f"[數量-裁圖辨識] '{row.name}' 列失敗: {exc}")
 
-                        # --------------------------------------------------------
-                        # [方法三：數量欄交叉定位 Crop 圖 (Fallback 最終防線)]
-                        # --------------------------------------------------------
-                        if match_num == 1:
-                            # 效能優化：不再對 row 內每個元素重跑模糊比對，直接以最長文字區塊作為主要 row 計算高低的基準
-                            menu_item = max(row, key=lambda x: len(x['text']))
+        self.last_rows = rows
+        for r in rows:
+            if r.name is None:
+                logger.warning(
+                    f"[未辨識列] 原始OCR='{r.name_raw}' 最相近='{r.name_reason}' "
+                    f"score={r.name_score:.1f} margin={r.name_margin:.1f}"
+                )
+            elif r.quantity is None:
+                logger.warning(f"[數量未確認] '{r.name}' (原始OCR='{r.name_raw}')")
+            else:
+                logger.info(
+                    f"[列確認] '{r.name}' x{r.quantity} "
+                    f"(來源={r.quantity_source}, 原始OCR='{r.name_raw}')"
+                )
+        return rows, order_number
 
-                            if nn_x is not None:
-                                # 1. 在擺正的邏輯座標系中，精準找出交叉點 (數量欄中心 X , 當前列中心 Y)
-                                logical_cx = nn_x
-                                logical_cy = menu_item['cy']
-
-                                # 2. 透過逆向旋轉，將邏輯交點還原成原始傾斜影像上的真實像素座標 (real_cx, real_cy)
-                                real_cx, real_cy = skew.inverse_correct_point(logical_cx, logical_cy)
-
-                                # 3. 丟入真實影像座標進行切圖 (將 w 設為 menu_item['h']，修正長方形切圖問題)
-                                alone_res, _ = self.rec_pred.predict_quantity(
-                                    frame_crop,
-                                    cx=real_cx,
-                                    cy=real_cy,
-                                    h=menu_item['h'],
-                                    w=menu_item['h'],  # 強迫 predict_quantity 內部以正方形比例進行裁切
-                                    is_flip=is_flip,
-                                )
-                                m2 = re.search(r'[1-9]\d*', alone_res)
-                                if m2:
-                                    match_num = int(m2.group())
-                                    logger.info(f"[數量判斷-方法三 rec_pred]: rec_pred 辨識結果='{alone_res}' → 數量={match_num}")
-                                else:
-                                    logger.warning(f"[數量判斷-方法三 rec_pred]: rec_pred 辨識結果='{alone_res}' → 無法取得數量，預設=1")
-                            else:
-                                logger.warning(f"[數量判斷-方法三 rec_pred]: nn_x 為 None，無法定位數量欄位，預設=1")
-
-                    logger.info(f"[訂單餐點確認]: OCR合併結果 -> '{merged_text}' 對應 -> '{matched_str}' ... 數量: {match_num}")
-                    parsed_items.append((matched_str, match_num))
-
-        logger.info(f"[訂單解析結果]: {parsed_items}, 編號: {order_number}")
-        return parsed_items, order_number
+    # ------------------------------------------------------------------
+    def summary(self) -> dict:
+        """把 last_rows 整理成可直接發布/列印的結構。"""
+        rows = self.last_rows
+        return {
+            "order_number": self.last_order_number,
+            "items": [
+                {"name": r.name, "quantity": r.quantity,
+                 "quantity_source": r.quantity_source, "raw": r.name_raw}
+                for r in rows if r.name is not None
+            ],
+            "unconfirmed_quantity": [
+                r.name for r in rows if r.name is not None and r.quantity is None
+            ],
+            "unrecognized_rows": [
+                {"raw": r.name_raw, "score": r.name_score, "margin": r.name_margin,
+                 "reason": r.name_reason}
+                for r in rows if r.name is None
+            ],
+            "qty_column_found": self.last_qty_column is not None,
+        }

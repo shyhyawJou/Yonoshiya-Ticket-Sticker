@@ -1,0 +1,26 @@
+# 這份是 install_crontab.sh 寫入的排程內容的參考副本，兩邊要一起維護。
+#
+# 為什麼只搬 seq 1 10（昨天往前 10 天）、而且從凌晨 03:05 開始跑
+# ---------------------------------------------------------------------------
+# 排程時間選在午夜過後，此時「今天」(剛開始的新一天) 才是唯一還在持續寫入的
+# 資料夾；「昨天」以前的影片、圖片、csv_logs、stream_log 都已經寫完關檔，
+# 所以一次全部搬走即可，不需要排除任何目錄。
+#
+# 01:00 起是雲端上傳（下面的 aibox_uploader.sh，見 docs/cloud_upload.md），它讀的是同一批
+# 「昨天」的資料夾。rclone move 會刪除本機檔，所以一定要排在上傳之後；但上傳沒有截止
+# 時間，跑到 03:05 還沒傳完的部分會被搬走。
+#
+# 舊版曾經用 seq 0 9（含今天）+ 第二個迴圈補搬，那時必須排除兩個當天還被
+# 程式開著寫入的目錄：
+#   csv_logs/**    CsvWriter 持續 append
+#   stream_log/**  app.py 的 loguru sink，午夜才 rotation
+# 因為 rclone move 會把還開著的檔案上傳後刪掉，loguru 的 file handle 仍指向
+# 已被 unlink 的 inode，當天剩下的 log 會無聲無息全部遺失。
+# 現在整段跳過今天，這個風險從根本消失 —— 但也因此，**任何把 seq 起點改回 0
+# 的修改都必須同時把那兩個 --exclude 加回來**。
+# 01:00 雲端上傳（Dashboard + S3）改由 aibox_uploader/aibox_uploader.sh 從 crontab 觸發，
+# 上傳昨天的資料；app.py 內建的 CloudUploader 對應關閉（config.yaml 的 cloud_upload.enabled: false），
+# 兩個同時開會重複上傳。
+0 1 * * * /home/root/ocr_mmr_dla/aibox_uploader/aibox_uploader.sh
+0 0 * * * mkdir -p /mnt/reserved/restart_logs/
+5,35 3-4 * * * flock -n /tmp/rclone_stream_video.lock sh -lc 'D=$(hostname | awk -F- "{print \$NF}"); RC="/usr/bin/rclone --config /root/.config/rclone/rclone.conf"; OPT="--transfers 2 --timeout 30s --contimeout 30s --retries 5 --low-level-retries 10 --delete-empty-src-dirs --log-level INFO"; for i in $(seq 1 10); do Y=$(date -d "-$i day" +\%Y\%m\%d); $RC move "/mnt/reserved/record/stream/$Y" "onedrive:/upload/yoshinoya/$D/$Y/" $OPT --log-file="/mnt/reserved/restart_logs/rclone_stream_${D}_${Y}.log"; rmdir "/mnt/reserved/record/stream/$Y" 2>/dev/null; done'

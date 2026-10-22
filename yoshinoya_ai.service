@@ -6,6 +6,9 @@ WorkingDirectory=/home/root/ocr_mmr_dla
 ExecStart=/bin/bash run_app.sh
 Restart=always
 RestartSec=1
+# exit code 3 = app.py 搶不到單例鎖（已經有另一份在跑）。這種情況不要重啟，
+# 否則手動除錯期間 systemd 會每秒帶起一份、每秒 log 一行。
+RestartPreventExitStatus=3
 User=root
 
 [Install]

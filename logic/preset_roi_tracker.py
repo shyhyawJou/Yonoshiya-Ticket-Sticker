@@ -43,6 +43,7 @@ class PresetRoiTracker(SingleOrderTracker):
         tray_id: str = SINGLE_ORDER_ID,
         finalize_mode: str = "ticket_leave",
         ticket_mat_confirm_frames: int = 10,
+        still_shift_ratio: float = 0.0,
     ):
         super().__init__(
             bus=bus,
@@ -54,6 +55,7 @@ class PresetRoiTracker(SingleOrderTracker):
             tray_id=tray_id,
             finalize_mode=finalize_mode,
             ticket_mat_confirm_frames=ticket_mat_confirm_frames,
+            still_shift_ratio=still_shift_ratio,
         )
         self.ticket_roi_polygon = ticket_roi_polygon
 

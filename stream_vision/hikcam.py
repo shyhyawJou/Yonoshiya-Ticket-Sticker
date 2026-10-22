@@ -218,7 +218,7 @@ class HikCamera:
 
         self.cam = MvCamera()
         self.cfg = cfg
-        self.cfg_path = Path("tasks") / 'ocr' / "config.yaml"
+        self.cfg_path = Path(cfg.source_config_path)  # supplied by load_profile_config
         self._is_sdk_initialized = False
         self._is_open = False
         self._is_grabbing = False
@@ -255,7 +255,7 @@ class HikCamera:
 
         # 亮度調節器
         #self.bright_ctrl = HikBrightnessController(
-        #    self, 
+        #    self,
         #    target_fps=cfg.camera_params['hik']['AcquisitionFrameRate']['value'],
         #    exposure_min_us=cfg.camera_params['hik']['ExposureTime']['min'],
         #    gain_min_db=cfg.camera_params['hik']['Gain']['min'],
@@ -358,7 +358,7 @@ class HikCamera:
         # 創建必要 buffer
         self.stOutFrame = MV_FRAME_OUT()
         memset(byref(self.stOutFrame), 0, sizeof(self.stOutFrame))
-        
+
         w = self.cfg.runtime.camera.width
         h = self.cfg.runtime.camera.height
         self.dst_buffer_size = w * h * 3
@@ -370,7 +370,7 @@ class HikCamera:
     def set_camera_parameters(self, params=None, display=True):
         """ 如果是透過指令的話, 一次只會有一個參數 """
         from_cmd = params is not None
-        
+
         # command or config
         if from_cmd:
             logger.info('=' * 25 + ' Set Camera Parameter by [command]' + '=' * 25)
@@ -441,7 +441,7 @@ class HikCamera:
                 need_updates.append({'control': name, 'value': default})
 
         self.cfg.camera_params['hik'] = data['camera_params']['hik']
-        
+
         for params in need_updates:
             self.set_camera_parameters(params, True)
 
@@ -785,6 +785,16 @@ class HikCamera:
             logger.warning(f'camera config is updated, new config will be saved in {self.save_delay} (s) !')
 
     def _save_camera_config(self):
+        """把相機參數現值寫回這個 profile 的 config.yaml。
+
+        2026-09-16：舊版在 profile_name 有值時改存 runtime.local.yaml，但
+        runtime.local.yaml 的 override 在載入時會蓋掉 config.yaml，導致
+        「更新了 config.yaml 的相機參數卻沒生效」，而且完全沒有提示。
+        同一份 config.yaml 的 reset_camera_parameters() 與 App 的唯讀載入
+        本來就都認 config.yaml，所以統一落地在這裡（跟 save_preset_roi 一致）。
+        runtime.local.yaml 現在只負責選品牌，舊資料由
+        profile_config.migrate_legacy_runtime_local() 一次性搬回來。
+        """
         tmp_path = self.cfg_path.with_stem('tmp_' + self.cfg_path.stem)
         data = _load_yaml(self.cfg_path)
         data['camera_params']['hik'] = self.cfg.camera_params['hik']
@@ -897,7 +907,7 @@ class HikBrightnessController:
         target_mean = int(round(golden_stats['mean']))
         logger.success(f'根據 golden image: {path}, 目標亮度值 = {target_mean}')
         return target_mean
-    
+
     def _set_golden(self, path):
         golden_img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
         self.golden_stats = self.evaluate_exposure(golden_img)
@@ -977,7 +987,7 @@ class HikBrightnessController:
         if cur == value:
             logger.warning(f'亮度值已經是 {value}, 所以不進行調整 !')
             return
-        
+
         ret = self.cam.MV_CC_SetIntValue("Brightness", value)
         if ret != 0:
             logger.warning(f'Set ExposureTime to {value:.1f} failed! ret[0x{ret:x}]')
@@ -1085,19 +1095,23 @@ if __name__ == "__main__":
 
         # 步驟 1：列舉裝置數量，讓使用者看清楚有哪些相機可選
         # （HikCamera 內部會自己用它的 HikDeviceManager 完成，外部不需要碰到那個名字）
-        device_count = HikCamera.list_available_devices()
 
-        from config import load_config
-        cfg = load_config('tasks/ocr/config.yaml')
+        import argparse
+        from profile_config import load_profile_config
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--profile', choices=['yoshinoya', 'suzumo'])
+        args = parser.parse_args()
+        cfg = load_profile_config(Path(__file__).resolve().parents[1], args.profile)
+        device_count = HikCamera.list_available_devices()
         class_names = [c.name for c in cfg.classes]
 
         if USE_MMR:
             mmr = Rotated_RTMDET(
-                path=cfg.runtime.model.object_det, 
-                classes=class_names, 
+                path=cfg.runtime.model.object_det,
+                classes=class_names,
                 conf_thresh=cfg.thresholds.ai_conf,
                 iou_thresh=cfg.thresholds.ai_iou
-            )  
+            )
         else:
             mmr = None
 

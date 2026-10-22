@@ -1,0 +1,10 @@
+classes:
+  - { id: 0, name: chopsticks }  
+  - { id: 1, name: ginger }  
+  - { id: 2, name: order_ticket }  
+  - { id: 3, name: order_list}
+  - { id: 4, name: order_sticker}
+  - { id: 5, name: soy_sauce}
+  - { id: 6, name: salad_sauce}
+  - { id: 7, name: ticket_mat}
+  - { id: 8, name: wet_wipes}

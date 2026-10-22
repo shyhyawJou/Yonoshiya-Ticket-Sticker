@@ -57,6 +57,22 @@ def get_polygon_centroid(p: PolygonXYXY) -> Tuple[float, float]:
     return poly.centroid.x, poly.centroid.y
 
 
+def center_shift_ratio(old: PolygonXYXY, new: PolygonXYXY) -> float:
+    """同一個物件在相鄰兩幀的中心位移，除以新框的短邊長。
+
+    用比例而不是像素：同樣位移 5px，對小貼紙和大傳票的意義不同。
+    不用 IoU：旋轉框細長，角度稍微抖動 IoU 就掉很多，分不出「在動」和「框在抖」。
+    """
+    if not old or not new:
+        return float("inf")
+    o = np.asarray(old, dtype=np.float64).reshape(4, 2)
+    n = np.asarray(new, dtype=np.float64).reshape(4, 2)
+    short_side = min(np.linalg.norm(n[0] - n[1]), np.linalg.norm(n[1] - n[2]))
+    if short_side <= 0:
+        return float("inf")
+    return float(np.linalg.norm(n.mean(axis=0) - o.mean(axis=0)) / short_side)
+
+
 def is_center_in_polygon(center: Tuple[float, float], p: PolygonXYXY) -> bool:
     """檢查一個點是否在 4頂點多邊形 內部"""
     point = Point(center)
@@ -71,13 +87,3 @@ def shrink_rect(r: PolygonXYXY, factor: float) -> PolygonXYXY:
     scale = 1.0 - factor
     shrunk_pts = centroid + (pts - centroid) * scale
     return tuple(shrunk_pts.flatten())
-
-def is_geometrically_frozen(old_bbox, new_bbox, freeze_iou_thresh: float = 0.97) -> bool:
-    """
-    判斷同一個追蹤物件,這一幀是否幾乎完全沒有位移/旋轉。
-    比一般用來維持身份延續的 IoU 門檻(通常 0.1~0.7)嚴格得多,
-    專門用來當作「可以開始信任像素內容比對」的前提條件。
-    """
-    if old_bbox is None:
-        return False
-    return iou_poly_poly(new_bbox, old_bbox) >= freeze_iou_thresh

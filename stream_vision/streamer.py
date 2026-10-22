@@ -79,7 +79,7 @@ class Mjpeg_Streamer:
     async def _generate(self):
         """ 發送執行緒：只在有『新』畫面時才送出，避免對慢速連線（如 ssh -L）
         重複灌入同一張舊畫面，塞爆 tunnel 造成延遲累積 """
-        logger.info("Stream generator started.")
+        logger.debug("Stream generator started.")
         last_sent_version = -1
         try:
             while self.is_running:
@@ -101,7 +101,7 @@ class Mjpeg_Streamer:
         except Exception as e:
             logger.debug(f"Streaming connection closed: {e}")
         finally:
-            logger.warning('Stream generator loop exited')
+            logger.debug('Stream generator loop exited')
 
     def start(self):
         """啟動伺服器與背景處理執行緒"""

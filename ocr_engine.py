@@ -16,6 +16,12 @@ from utils.skew_corrector import affine_to_homogeneous, rotate90_cw_matrix, rota
 # 1. 取得當下時間，並格式化成字串 (例如: 20260702_105541)
 current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
 from AI import PaddleOCR_Det, PaddleOCR_Cls, PaddleOCR_Rec
+from utils import dla_guard
+from logic.orientation import (
+    AREA_RATIO_THRESHOLD as ORIENT_AREA_THRESHOLD,
+    VERTICAL_ASPECT as ORIENT_VERTICAL_ASPECT,
+    needs_quarter_turn,
+)
 
 def draw_det_bboxes(frame_crop, dt_boxes, save_path="det_debug.jpg"):
     """
@@ -76,9 +82,10 @@ class TextSystemDLA:
     def __init__(self, det_path, cls_path, rec_path, dict_path):
 
         # 1. 初始化 DLA
-        self.det_model = PaddleOCR_Det(det_path)
-        self.cls_model = PaddleOCR_Cls(cls_path)
-        self.rec_model = PaddleOCR_Rec(rec_path)
+        # 經 dla_guard：檔案有問題只記 log，檔案正常卻載不進去（APU 沒起來）才重開機
+        self.det_model = dla_guard.load(PaddleOCR_Det, det_path, "OCR det")
+        self.cls_model = dla_guard.load(PaddleOCR_Cls, cls_path, "OCR cls")
+        self.rec_model = dla_guard.load(PaddleOCR_Rec, rec_path, "OCR rec")
 
         # 2. 載入字典
         self.character_str = ["<BLANK>"]  
@@ -105,6 +112,49 @@ class TextSystemDLA:
 
         # Recognition 參數
         self.rec_image_shape = [3, 48, 320]
+
+        # 90 度方向判斷的補救參數
+        # ------------------------------------------------------------
+        # _check_boxes_need_rotate_90 是純幾何判斷：框的 h/w >= 1.4 才算直式。
+        # 兩個字的直式貼紙(玉子 / 豚汁)det 框近乎正方形 —— 實測長短比 1.03~1.05,
+        # 過不了 1.4, 於是整張圖不轉正, 直立文字直接進 rec 只讀到一個垃圾字
+        # (實測信心 0.15~0.22; 同一張轉 90 度後讀出「豚汁」信心 1.000)。
+        # 三個字的「お新香」是 1.47, 也只擦過門檻 0.07, 這個判準對短字貼紙
+        # 本來就站在邊緣。
+        #
+        # 正方形框在幾何上無解: 轉或不轉, 長短比都還是 ~1.0, 沒有任何幾何線索。
+        # 所以改用 rec 信心當裁判 —— 對是 1.000、錯是 0.15~0.22, 差 5 倍,
+        # 訊號比幾何強得多。只在「幾何說不用轉」+「框落在正方形區間」+
+        # 「讀出來信心偏低」三個條件同時成立時才多跑一次, 正常 case 完全不受影響。
+        #
+        # 刻意不動 VERTICAL_ASPECT(1.4): 那是傳票方向調校(images/order_ticket
+        # 99 張, 48.5% -> 100%)依賴的同一顆旋鈕, 往下調會換成傳票那邊崩掉。
+        # orient_retry_conf_thresh 的取值依據(20260915 實測 179 張正方形框樣本):
+        #   A) 轉 90 度後較好(真的需要補救) 176 張：原方向 mean conf
+        #      min 0.000 / max 0.814 / p95 0.635
+        #   B) 原方向本來就對(不該補救)       3 張：min 0.662 / max 0.959
+        #   兩群在 0.662~0.814 重疊 —— 錯的方向也可能讀得很有自信(「数」0.814,
+        #   同一張轉 90 度是「豚汁」1.000), 所以「信心高」不等於「方向對」,
+        #   不存在一個乾淨的門檻。
+        #
+        #   門檻=0.5 -> 漏補救 24 張; 0.7 -> 4 張; 0.9 -> 0 張但只省下 2 次重跑。
+        #   而「多跑一次」是無害的(predict 是比分數取高者, 錯方向不會被採用),
+        #   「漏補救」則直接吐垃圾字 —— 代價完全不對稱。
+        #   因此預設取 1.0: 正方形框一律比對, 只有讀到滿分(conf == 1.0)
+        #   才省下轉 90 度那一組。傳票與明顯直式的框完全不受影響。
+        #   若之後要省這段延遲, 把它調到 0.9 是有實測依據的折衷。
+        #
+        # 2026-10-02: 由「原方向 vs 順轉 90」兩方向改為四方向全比。
+        #   mmr 的旋轉框分不出貼紙頭朝上或朝下, 所以正方形框實際上四個方向都可能。
+        #   舊版的 180/270 只能靠 cls 補, 但兩個字的短框 cls 從來過不了
+        #   cls_thresh(0.9)(當天 log 每次都是 0/1 -> is_flip=False), 等於只比了
+        #   0 與 90 兩個方向; 貼紙倒著進來時兩個都是錯的, 只是從兩個錯的挑高分:
+        #   實測讀出「た玉」0.68、「玉並」0.51~0.85, 而正確的「玉子」也有 0.75~0.83,
+        #   分數區間重疊, 門檻擋不住, 只能真的把四個方向都讀過。
+        #   180 度不重跑 det(框座標直接換算), 所以四方向只要 2 次 det + 4 次單框 rec。
+        self.orient_ambiguous_aspect = 0.7      # 長短比落在 [0.7, 1.4) 視為方向不明
+        self.orient_ambiguous_area_ratio = 0.5  # 方向不明的框需佔總面積多少才啟動補救
+        self.orient_retry_conf_thresh = 1.0     # 原樣/轉180 的最佳信心低於此值, 才再比順轉/逆轉 90
 
         logger.info("模型初始化完成。")
 
@@ -507,6 +557,111 @@ class TextSystemDLA:
         et2 = time.time()
         return img_list, cls_res, flip_count, et2 - st2
 
+    def _decide_flip(self, img_crop_list, cls_res, min_aspect=3.0):
+        """
+        判斷整張圖是否上下顛倒 (180 度)。
+
+        為什麼不用「全體多數決」:
+            單字框 (例如數量欄的 '1'、欄位標題 '数'、單號 '483') 旋轉 180 度後
+            近似對稱,cls 幾乎不可能在 cls_thresh(0.9) 之上給出穩定判斷,
+            所以這些框永遠投不出翻轉票。傳票上這種短框往往佔一半以上
+            (實測 9 框中有 5 框),把它們算進分母會把比例稀釋到永遠不過半
+            (4/9 = 0.44),結果整張圖不翻轉。
+
+            但 run_cls 已經把每個框「各自」轉正了,所以文字仍然讀得正確,
+            只有 dt_boxes / rec_res 的順序是顛倒的 —— 這會讓 order_parser
+            以影像下緣的單號去算 takeout_y,進而把所有文字框濾光,
+            最後靜默回傳空品項清單。
+
+        因此改成只採計「夠長的文字框」(寬高比 >= min_aspect) 的票。
+        若一個長框都沒有 (例如 sticker 只有名稱+編號兩個短框),
+        則退回原本的全體多數決,維持舊行為。
+
+        回傳 (is_flip, unanimous)。unanimous=False 代表長框的票有分歧(例如 1/2、
+        3/4),呼叫端不該採信這次的 is_flip,改用 _decide_flip_by_rec 兩個方向
+        都讀過再決定。沒有長框、退回全體多數決時一律回 unanimous=True(舊行為)。
+        """
+        long_votes = []
+        for img, (label, score) in zip(img_crop_list, cls_res):
+            h, w = img.shape[:2]
+            if h <= 0:
+                continue
+            # 180 度旋轉不改變寬高比,所以用 run_cls 轉正後的 crop 計算也是安全的
+            if (w / float(h)) < min_aspect:
+                continue
+            long_votes.append("180" in label and score > self.cls_thresh)
+
+        all_flip = sum(
+            1 for label, score in cls_res
+            if "180" in label and score > self.cls_thresh
+        )
+
+        if not long_votes:
+            ratio = all_flip / len(cls_res) if cls_res else 0.0
+            is_flip = ratio > 0.5
+            logger.warning(
+                f"[翻轉投票] 無長文字框(寬高比>={min_aspect})可投票,退回全體多數決: "
+                f"{all_flip}/{len(cls_res)} ratio={ratio:.2f} -> is_flip={is_flip}"
+            )
+            return is_flip, True
+
+        ratio = sum(long_votes) / len(long_votes)
+        is_flip = ratio > 0.5
+        unanimous = ratio in (0.0, 1.0)
+        logger.info(
+            f"[翻轉投票] 長文字框 {sum(long_votes)}/{len(long_votes)} ratio={ratio:.2f} "
+            f"-> {f'is_flip={is_flip}' if unanimous else '票數分歧，改比兩個方向的辨識信心'} "
+            f"(全體 {all_flip}/{len(cls_res)}="
+            f"{all_flip / len(cls_res) if cls_res else 0:.2f})"
+        )
+        return is_flip, unanimous
+
+    @staticmethod
+    def _long_box_rec_conf(rec_res, dt_boxes, min_aspect=3.0) -> float:
+        """
+        只取長文字框(寬高比 >= min_aspect)的平均 rec 信心。
+
+        單字框('1'、'数'、單號)正著讀倒著讀信心都差不多,算進來只會把兩個
+        方向的差距稀釋掉;倒著的日文長句才讀得出明顯落差。沒有長框就退回全部框。
+        """
+        confs = []
+        for box, (_, conf) in zip(dt_boxes, rec_res):
+            b = np.asarray(box, dtype=np.float64).reshape(-1, 2)
+            w = float(np.linalg.norm(b[0] - b[1]))
+            h = float(np.linalg.norm(b[0] - b[3]))
+            if h > 0 and w / h >= min_aspect:
+                confs.append(float(conf))
+        if not confs:
+            return TextSystemDLA._mean_rec_conf(rec_res)
+        return sum(confs) / len(confs)
+
+    def _decide_flip_by_rec(self, ori_im, dt_boxes, obj_type):
+        """
+        cls 的翻轉投票有分歧時:原樣與轉 180 度各讀一次,取長框辨識信心高的那個。
+
+        2026-10-13 實驗機 log:長框票數平手(1/2、2/4)的 11 次裡 10 次判成
+        「不翻」而解析出空品項 —— 這台的傳票九成是倒著進來的,而 cls 信心不到
+        cls_thresh 的框一律被算成「不翻」票,平手時就偏向錯的那邊。
+        cls 拿不定主意的時候,直接看哪個方向讀得出字比較可靠。
+
+        跟 _predict_ambiguous 共用 _read_both_flips(不經 cls、180 度不重跑 det)。
+        **只回傳方向**,不回傳這次讀到的字:這兩次讀取是為了比較而省略了 cls 逐框
+        轉正、翻轉時也沒重跑 det,小框(單號)會讀得比正式流程差 —— 實測同一張票
+        方向判對了,單號卻從 '4' 變成讀不到。方向定了之後照一般流程重讀。
+        """
+        reads = self._read_both_flips(ori_im, dt_boxes, obj_type)
+        scored = [(self._long_box_rec_conf(rec, boxes), rec, flip) for rec, boxes, flip in reads]
+        # max 遇到同分取先出現的,也就是原樣
+        _, _, is_flip = max(scored, key=lambda s: s[0])
+
+        summary = " | ".join(
+            f"{'轉180' if flip else '原樣'} 長框信心 {conf:.3f}"
+            f"「{'/'.join(t for t, _ in rec)[:40] or '∅'}」"
+            for conf, rec, flip in scored
+        )
+        logger.info(f"[翻轉投票] 方向比對: {summary} -> is_flip={is_flip}")
+        return is_flip
+
 
     # ==========================
     # 3. Recognition (文字識別)
@@ -572,23 +727,26 @@ class TextSystemDLA:
         et3 = time.time()
         return rec_res, et3 - st3
 
-    def _check_boxes_need_rotate_90(self, dt_boxes, ratio_thresh=1.4, vertical_ratio=0.2):
+    def _check_boxes_need_rotate_90(self, dt_boxes, ratio_thresh=1.4, vertical_ratio=None):
         """
         檢查文字框是否被誤判為直式框，代表整張圖被轉成 90 或 270 度。
-        用「比例」而非「絕對數量」判斷，這樣框數很少（例如貼紙只有 1 個框）也能適用。
+
+        2026-09-10：判準由「直式框**數量**比例 >= 0.2」改為
+        「直式框**面積加權**比例 >= 0.35」。原判準在正立票據上會被下半部
+        金額區的一整排直式「円」與單字框推過門檻，images/order_ticket 99 張
+        實測只有 48.5% 正確（51 張誤轉 90 度）；面積加權為 100% (99/99)，
+        兩類分佈為 0.021~0.147 vs 0.529~0.743，門檻兩側各約 0.2 餘裕。
+        判準與量測見 logic/orientation.py 與 tools/eval_orientation.py。
+
+        vertical_ratio 保留為參數僅為相容舊呼叫端；傳入數值時會被當成
+        面積加權門檻使用。
         """
-        if len(dt_boxes) == 0:
+        if dt_boxes is None or len(dt_boxes) == 0:
             return False
-
-        vertical_count = 0
-        for box in dt_boxes:
-            box = np.array(box, dtype=np.float32)
-            rect_width = np.linalg.norm(box[0] - box[1])
-            rect_height = np.linalg.norm(box[0] - box[3])
-            if rect_width > 0 and (rect_height / rect_width) >= ratio_thresh:
-                vertical_count += 1
-
-        return (vertical_count / len(dt_boxes)) >= vertical_ratio
+        thr = ORIENT_AREA_THRESHOLD if vertical_ratio is None else float(vertical_ratio)
+        return needs_quarter_turn(dt_boxes,
+                                  area_ratio_threshold=thr,
+                                  vertical_aspect=ratio_thresh)
     
     def _get_box_dims(self, box):
         """
@@ -725,10 +883,158 @@ class TextSystemDLA:
     # ========================= #
     # Main Pipeline             #
     # ========================= #
+    def _orientation_is_ambiguous(self, dt_boxes) -> bool:
+        """
+        文字框近乎正方形 —— 幾何上無法判斷這張圖是不是被轉了 90 度。
+
+        直式(h/w >= VERTICAL_ASPECT)已由 _check_boxes_need_rotate_90 處理掉,
+        明顯橫式(h/w < orient_ambiguous_aspect)本來就是正立的; 剩下中間那段
+        是正方形區間, 轉與不轉在幾何上完全等價。
+        跟 needs_quarter_turn 一樣用面積加權, 避免一堆小的單字框主導判斷。
+        """
+        if dt_boxes is None or len(dt_boxes) == 0:
+            return False
+
+        area_ambiguous = 0.0
+        area_total = 0.0
+        for box in dt_boxes:
+            b = np.asarray(box, dtype=np.float64).reshape(-1, 2)
+            w = float(np.linalg.norm(b[0] - b[1]))
+            h = float(np.linalg.norm(b[0] - b[3]))
+            if w <= 0.0 or h <= 0.0:
+                continue
+            area = w * h
+            area_total += area
+            if self.orient_ambiguous_aspect <= (h / w) < ORIENT_VERTICAL_ASPECT:
+                area_ambiguous += area
+
+        if area_total <= 0.0:
+            return False
+        return (area_ambiguous / area_total) >= self.orient_ambiguous_area_ratio
+
+    @staticmethod
+    def _mean_rec_conf(rec_res) -> float:
+        """這次讀出來的平均信心,當作「這個方向對不對」的分數"""
+        if not rec_res:
+            return 0.0
+        confs = [float(c) for _, c in rec_res]
+        return sum(confs) / len(confs)
+
+    def _recognize(self, ori_im, dt_boxes, obj_type):
+        """
+        det 之後的共用流程: sticker 過濾 + 裁切 -> cls 方向分類 ->
+        (必要時轉 180 度重新 det) -> rec。
+
+        抽成獨立方法是為了讓 predict 的「原方向」與「轉 90 度」兩條路徑
+        跑完全相同的一段邏輯,不要複製兩份而各自漂移。
+        (正方形框不走這裡, 見 _predict_ambiguous —— 那邊四個方向都明確讀過,
+        不需要 cls 判斷 180 度。)
+        """
+        # 2. sticker 過濾 + 排序 + 裁剪 (共用邏輯)
+        raw_dt_boxes = dt_boxes   # 方向比對要從原始 det 結果重新過濾/裁切, 見 _decide_flip_by_rec
+        dt_boxes, img_crop_list = self._postprocess_and_crop(ori_im, dt_boxes, obj_type)
+
+        # 3. 方向分類
+        img_crop_list, cls_res, flip_count, elapse2 = self.run_cls(img_crop_list)
+        # 只採計長文字框的方向票,避免單字框(1/数/483)把翻轉比例稀釋到永遠不過半
+        is_flip, unanimous = self._decide_flip(img_crop_list, cls_res)
+        if not unanimous:
+            # 票數分歧時 cls 的結論不可靠,兩個方向都讀過、比辨識信心決定方向;
+            # 之後照一般流程讀(翻轉就重跑 det + cls)
+            is_flip = self._decide_flip_by_rec(ori_im, raw_dt_boxes, obj_type)
+
+        # 4. 若偵測到翻轉，旋轉影像 180 度後重新執行偵測與識別
+        if is_flip:
+            rotated_im = cv2.rotate(ori_im, cv2.ROTATE_180)
+
+            dt_boxes, _ = self.run_det(rotated_im)
+
+            if len(dt_boxes) == 0:
+                return [], [], is_flip
+
+            # 180 度重新 det 後,同樣需要再過濾一次 sticker,理由相同
+            dt_boxes, img_crop_list = self._postprocess_and_crop(rotated_im, dt_boxes, obj_type)
+
+            img_crop_list, cls_res, _, _ = self.run_cls(img_crop_list)
+
+        # 5. 文字識別
+        rec_res, elapse3 = self.run_rec(img_crop_list)
+
+        return rec_res, dt_boxes, is_flip
+
+    @staticmethod
+    def _rotate_boxes_180(dt_boxes, img_w, img_h):
+        """
+        把 det 框換算到 cv2.rotate(img, ROTATE_180) 後的座標系, 省下重跑一次 det。
+        (x, y) -> (w-1-x, h-1-y), 與 utils.skew_corrector.rotate180_matrix 一致。
+        轉完後原本的左上角落在右下, 所以頂點往後挪兩格, 維持
+        [左上, 右上, 右下, 左下] 的順序 —— get_rotate_crop_image 靠這個順序決定裁切方向。
+        """
+        boxes = np.asarray(dt_boxes).reshape(-1, 4, 2).copy()
+        boxes[..., 0] = (img_w - 1) - boxes[..., 0]
+        boxes[..., 1] = (img_h - 1) - boxes[..., 1]
+        return np.roll(boxes, 2, axis=1)
+
+    def _read_both_flips(self, img, dt_boxes, obj_type):
+        """
+        對同一份 det 結果讀「原樣」與「轉 180 度」兩個方向, 不經過 cls。
+        回傳 [(rec_res, dt_boxes, is_flip), ...] 兩筆; is_flip=True 那筆的
+        dt_boxes 落在 cv2.rotate(img, ROTATE_180) 的座標系, 與 _recognize
+        翻轉時回傳的座標系語意相同。
+        """
+        h, w = img.shape[:2]
+        reads = []
+        for is_flip in (False, True):
+            if is_flip:
+                src = cv2.rotate(img, cv2.ROTATE_180)
+                boxes = self._rotate_boxes_180(dt_boxes, w, h)
+            else:
+                src, boxes = img, dt_boxes
+            boxes, crops = self._postprocess_and_crop(src, boxes, obj_type)
+            rec_res, _ = self.run_rec(crops)
+            reads.append((rec_res, boxes, is_flip))
+        return reads
+
+    def _predict_ambiguous(self, ori_im, dt_boxes, obj_type):
+        """
+        框近乎正方形(幾何無解)時, 四個方向都讀過, 取平均 rec 信心最高者。
+        cls 在兩個字的短框上過不了 cls_thresh, 所以 180 度不交給 cls,
+        而是跟 90 度一樣明確讀一次來比。
+
+        回傳 (rec_res, dt_boxes, is_flip, is_rotated_90), 四種組合對應
+        _worker_loop 的 rot_code: 原樣 / ROTATE_180 / ROTATE_90_CLOCKWISE /
+        ROTATE_90_COUNTERCLOCKWISE(= 順轉 90 再轉 180)。
+        """
+        names = {(False, False): "原樣", (False, True): "轉180",
+                 (True, False): "順轉90", (True, True): "逆轉90"}
+
+        # (is_rotated_90, rec_res, dt_boxes, is_flip); max 遇到同分取先出現的, 所以平手時偏好原樣
+        cands = [(False,) + r for r in self._read_both_flips(ori_im, dt_boxes, obj_type)]
+        best = max(cands, key=lambda c: self._mean_rec_conf(c[1]))
+
+        if self._mean_rec_conf(best[1]) < self.orient_retry_conf_thresh:
+            rotated_im = cv2.rotate(ori_im, cv2.ROTATE_90_CLOCKWISE)
+            r_dt_boxes, _ = self.run_det(rotated_im)
+            if len(r_dt_boxes) > 0:
+                cands += [(True,) + r for r in self._read_both_flips(rotated_im, r_dt_boxes, obj_type)]
+                best = max(cands, key=lambda c: self._mean_rec_conf(c[1]))
+
+        summary = " | ".join(
+            f"{names[(rot90, flip)]} "
+            f"{'/'.join(t for t, _ in rec) or '∅'}({self._mean_rec_conf(rec):.3f})"
+            for rot90, rec, _, flip in cands
+        )
+        is_rotated_90, rec_res, dt_boxes, is_flip = best
+        logger.info(
+            f"[方向補救] 文字框近乎正方形, 方向比對: {summary} "
+            f"-> 採用 {names[(is_rotated_90, is_flip)]}"
+        )
+        return rec_res, dt_boxes, is_flip, is_rotated_90
+
     def predict(self, image_input, obj_type="unknown"):
         """主要預測流程"""
         st = time.time()
- 
+
         ori_im = image_input.copy()
         img_to_detect = ori_im
         is_rotated_90 = False
@@ -749,31 +1055,19 @@ class TextSystemDLA:
             if len(dt_boxes) == 0:
                 return [], [], False, is_rotated_90, time.time() - st
 
-        # 2. sticker 過濾 + 排序 + 裁剪 (共用邏輯)
-        dt_boxes, img_crop_list = self._postprocess_and_crop(ori_im, dt_boxes, obj_type)
+            rec_res, dt_boxes, is_flip = self._recognize(ori_im, dt_boxes, obj_type)
+            return rec_res, dt_boxes, is_flip, is_rotated_90, time.time() - st
 
-        # 3. 方向分類
-        img_crop_list, cls_res, flip_count, elapse2 = self.run_cls(img_crop_list)
-        is_flip = flip_count / len(img_crop_list) > 0.5 # 改用比例判斷
-        # logger.info(f"cls_res num: {len(cls_res)}, elapsed: {elapse2:.3f}s")
+        # 1.6 方向補救：框近乎正方形（幾何無解）時，四個方向都讀過、取信心最高者。
+        #     是否落在正方形區間要用「轉正前」的框判斷。
+        if self._orientation_is_ambiguous(dt_boxes):
+            rec_res, dt_boxes, is_flip, is_rotated_90 = self._predict_ambiguous(
+                ori_im, dt_boxes, obj_type
+            )
+            return rec_res, dt_boxes, is_flip, is_rotated_90, time.time() - st
 
-        # 4. 若偵測到翻轉，旋轉影像 180 度後重新執行偵測與識別
-        if is_flip:
-            rotated_im = cv2.rotate(ori_im, cv2.ROTATE_180)
-
-            dt_boxes, _ = self.run_det(rotated_im)
-
-            if len(dt_boxes) == 0:
-                return [], [], is_flip, is_rotated_90, time.time() - st
-
-            # 180 度重新 det 後,同樣需要再過濾一次 sticker,理由相同
-            dt_boxes, img_crop_list = self._postprocess_and_crop(rotated_im, dt_boxes, obj_type)
-
-            img_crop_list, cls_res, _, _ = self.run_cls(img_crop_list)
-
-        # 4. 文字識別
-        rec_res, elapse3 = self.run_rec(img_crop_list)
-        # logger.info(f"rec_res num: {len(rec_res)}, elapsed: {elapse3:.3f}s")
+        # 幾何判定「不用轉」：照原方向讀，180 度交給 cls。
+        rec_res, dt_boxes, is_flip = self._recognize(ori_im, dt_boxes, obj_type)
 
         et = time.time()
 
@@ -785,7 +1079,7 @@ class StandaloneRecDLA:
 
         self.rec_image_shape = rec_image_shape
         self.count = 0
-        self.rec_model = PaddleOCR_Rec(rec_path)
+        self.rec_model = dla_guard.load(PaddleOCR_Rec, rec_path, "數量欄 rec (standalone)")
 
         # 載入字典
         self.character_str = ["<BLANK>"]  
@@ -993,12 +1287,14 @@ class StandaloneRecDLA:
 
 
 class AsyncOCR:
-    def __init__(self, det_path, cls_path, rec_path, dict_path, result_callback=None):
+    def __init__(self, det_path, cls_path, rec_path, dict_path, result_callback=None, ocr_routes=None):
         """
         Args:
             result_callback: 處理完成後的回調函數，格式: func(rec_res, dt_boxes, time_cost, metadata)
         """
         self.ocr_sys = TextSystemDLA(det_path, cls_path, rec_path, dict_path)
+        from logic.ocr_routing import validate_routes
+        self.ocr_routes = validate_routes(ocr_routes)
         self.input_queue = queue.Queue(maxsize=1)
         
         # 狀態控制
@@ -1052,6 +1348,26 @@ class AsyncOCR:
             try:
                 input_data = self.input_queue.get(timeout=0.1)
                 frame_crop, metadata = input_data
+                from logic.ocr_routing import backend_for
+                backend = backend_for(self.ocr_routes, metadata['type'])
+                metadata['text_backend'] = backend
+                if backend != 'det':
+                    from logic.cv_text_regions import extract_regions
+                    t0 = time.perf_counter()
+                    upright, boxes, transform = extract_regions(frame_crop, backend)
+                    crops = [self.ocr_sys.get_rotate_crop_image(upright, b.copy()) for b in boxes]
+                    # Table orientation is resolved geometrically; ink regions retain CLS.
+                    if crops and backend == 'cv_ink':
+                        crops, _, _, _ = self.ocr_sys.run_cls(crops)
+                    rec_res, _ = self.ocr_sys.run_rec(crops)
+                    metadata['M_inv_full'] = np.linalg.inv(transform @ affine_to_homogeneous(metadata['M']))
+                    if self.result_callback:
+                        self.result_callback(upright, rec_res, boxes, False,
+                                             time.perf_counter()-t0, metadata)
+                    self.input_queue.task_done()
+                    with self._lock:
+                        self._busy = False
+                    continue
                 M_inv = metadata['M_inv']
                 M = metadata['M']
                 h0, w0 = frame_crop.shape[:2]

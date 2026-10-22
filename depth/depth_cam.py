@@ -38,6 +38,13 @@ class ORBBEC_CAMERA:
         return frame
 
     def start(self):
+        # 現場不一定要用深度相機(目前只是先驗證硬體), 驗證完要能從設定檔關掉,
+        # 不能叫客人去拔插頭。關掉時 enable 維持 False, get_frame() 永遠回 None,
+        # 主迴圈就不會去併深度畫面, stop() 也會直接跳過, 跟「沒插相機」完全同路徑。
+        if not self.custom_cfg.get('enable', True):
+            logger.warning('設定檔 depth_camera.enable = false, 不啟動深度相機')
+            return
+
         if self.is_terminated:
             logger.error('這個深度相機物件已經結束, 請重新創建一個物件')
             return

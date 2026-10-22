@@ -6,7 +6,7 @@ from typing import Dict, List
 import numpy as np
 from loguru import logger
 
-from logic.geometry import iou_poly_poly, is_geometrically_frozen, is_center_in_polygon, PolygonXYXY, get_polygon_centroid
+from logic.geometry import iou_poly_poly, is_center_in_polygon, PolygonXYXY, get_polygon_centroid, center_shift_ratio
 from logic.models import Tray, TrackedItem, TrayState
 from logic.known_class_items import STABLE_CONFIRM_CLASSES
 from logic.sticker_pending_buffer import StickerPendingBuffer
@@ -30,8 +30,10 @@ class SingleOrderTracker:
         ticket_exclude_roi_polygon: Optional[PolygonXYXY] = None,
         finalize_mode: str = "ticket_leave",   # "ticket_leave" | "ticket_mat"
         ticket_mat_confirm_frames: int = 10,
+        still_shift_ratio: float = 0.0,   # >0 才啟用靜止判定，見 _advance_stable
     ):
         self.bus = bus
+        self.still_shift_ratio = still_shift_ratio
         self.sticker_missing_frame = sticker_missing_frame
         self.tray_missing_frame = tray_missing_frame
         self.frame_width = frame_width
@@ -40,6 +42,11 @@ class SingleOrderTracker:
 
         self.ticket_leave_frame = ticket_leave_frame
         self.ticket_exclude_roi_polygon = ticket_exclude_roi_polygon
+
+        # 超時收尾後的「等傳票離開」閘門（見 hold_tickets_until_clear）。
+        # 連續消失幾幀才算離開，沿用 ticket_leave_frame 的定義。
+        self._holding_tickets = False
+        self._ticket_clear_count = 0
 
         self.trays: Dict[str, Tray] = {}
         self._create_tray()
@@ -82,42 +89,74 @@ class SingleOrderTracker:
         )
 
     # ------------------------------------------------------------
-    # 生命週期操作（reset 系列，跟原本一致，只加了 order_number 清空）
+    # 生命週期操作（reset 系列）
+    #
+    # 重置一律「換一個全新的 Tray」，不逐欄清：一筆訂單的所有狀態都掛在
+    # Tray 上，預設值就是「新訂單長什麼樣子」。以前逐欄清的版本，每次 Tray
+    # 加欄位都要記得來這裡補，漏過 record_session_id（CSV 指到上一單的影片）
+    # 和 order_number（舊單號殘留）。
+    #
+    # single 模式只有一筆訂單、tray 也不是實體餐盤，所以 a / b / all 三種
+    # reset 結果相同，只差 log 標籤。誰會呼叫這些、各自還做了什麼，見
+    # LogicEngine 的「訂單生命週期」說明。
     # ------------------------------------------------------------
     def reset(self, tray_id: str):
         self.reset_all()
 
     def reset_all(self):
-        self.trays.clear()
-        self._create_tray()
-        logger.info("[RESET-all][single_order] 已重置訂單狀態")
-        self._publish_reset_status()
+        self._start_new_order(log_tag="RESET-all", reason="reset_all")
 
     def reset_tray_states(self, tray_id: str):
-        if self.tray_id not in self.trays:
-            self._create_tray()
-            self._publish_reset_status()
-            return
+        # 收尾（remove_tray）也會經過這裡；超時收尾的接單閘門是在那之後才由
+        # LogicEngine 關上的，所以這裡無條件打開不會吃掉它
+        self._start_new_order(log_tag="RESET-B", reason="reset_tray_states")
 
-        tray = self.trays[self.tray_id]
-        tray.state = TrayState.WAITING_TICKET
-        tray.missing_count = 0
-        tray.drift_count = 0
-        tray.expected_items = []
-        tray.expected_items_display = []
-        tray.checked_items = []
-        tray.ticket = None
-        tray.extra_tickets = []
-        tray.stickers = []
-        tray.order_number = None  # 避免舊訂單編號殘留到下一筆
-        # ticket mat 參數重製狀態
-        tray.order_session_active = False
-        tray.ticket_mat_stable_frames = 0
-        tray.ever_had_wrong_item = False
-        tray.wrong_item_history = []  # 每次「首次判定」記一筆品項名稱
-        tray.start_time_str = get_now_iso_str(time.time(), utc=False) #time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime())  # 新增：每次重置都刷新
-        logger.info("[RESET-B][single_order] 已重置訂單狀態")
+    def _start_new_order(self, log_tag: str, reason: str) -> None:
+        # 人工 reset 的意思就是「重新偵測」，桌上那張票要能馬上被讀
+        self._release_ticket_hold(reason=reason)
+        self.trays.clear()
+        self._create_tray()   # start_time_str 也在這裡刷新成現在
+        logger.info(f"[{log_tag}][single_order] 已重置訂單狀態")
         self._publish_reset_status()
+
+    # ------------------------------------------------------------
+    # 超時收尾後的「等傳票離開」閘門
+    # ------------------------------------------------------------
+    def hold_tickets_until_clear(self, tray_id: str) -> None:
+        """
+        訂單超時收尾後由 LogicEngine 呼叫：在 ROI 裡連續 ticket_leave_frame 幀
+        都沒有傳票之前，忽略所有傳票偵測。人工 reset（a / b / all）會直接放行。
+
+        超時的時候那張傳票多半還放在 ROI 裡。不擋的話，下一幀它就會被重新
+        鎖定、OCR、開出一筆一模一樣的訂單，再過 timeout_sec 又寫一列重複的
+        CSV。正常收尾（護貝板露出）本來就要求 ROI 裡沒有傳票，所以不需要這道閘門。
+        """
+        self._holding_tickets = True
+        self._ticket_clear_count = 0
+        logger.warning(
+            f"[order_timeout] tray={tray_id} 超時收尾後暫停接單，"
+            f"等 ROI 內傳票連續消失 {self.ticket_leave_frame} 幀再重新偵測"
+        )
+
+    def _release_ticket_hold(self, reason: str) -> None:
+        if self._holding_tickets:
+            self._holding_tickets = False
+            self._ticket_clear_count = 0
+            logger.info(f"[order_timeout] 恢復接單（{reason}）")
+
+    def _apply_ticket_hold(self, ticket_dets: list) -> list:
+        """閘門關著時吞掉這一幀的傳票偵測，並計算 ROI 已連續淨空幾幀"""
+        if not self._holding_tickets:
+            return ticket_dets
+        if ticket_dets:
+            self._ticket_clear_count = 0
+        else:
+            self._ticket_clear_count += 1
+            if self._ticket_clear_count >= self.ticket_leave_frame:
+                self._release_ticket_hold(
+                    reason=f"ROI 內傳票已連續消失 {self._ticket_clear_count} 幀"
+                )
+        return []
 
     def _publish_reset_status(self):
         # ts_utc = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime())
@@ -249,11 +288,31 @@ class SingleOrderTracker:
     def update_tray_positions(self, tray_dets: list, ts_utc: str) -> None:
         pass
 
+    def _advance_stable(self, item: TrackedItem, new_bbox: PolygonXYXY, label: str) -> None:
+        """這一幀又對上了同一個物件：穩定幀數 +1。
+
+        still_shift_ratio > 0 時多一個條件：跟上一幀比，中心位移超過框短邊的
+        這個比例就算「還在動」，計數歸零。原本只要對得上就 +1，紙被手慢慢推著
+        走也會一路數到 n_settle_frame，OCR 就拍到糊掉的字。
+        必須在呼叫端把 item.bbox 換成新框之前呼叫。
+        """
+        if self.still_shift_ratio > 0:
+            shift = center_shift_ratio(item.bbox, new_bbox)
+            if shift > self.still_shift_ratio:
+                if item.stable_frames > 0:
+                    logger.info(
+                        f"[still] {label} 累積 {item.stable_frames} 幀後移動"
+                        f"（位移 {shift:.1%} > {self.still_shift_ratio:.1%}），穩定幀數歸零"
+                    )
+                item.stable_frames = 0
+                return
+        item.stable_frames += 1
+
     def update_ticket_and_stickers(self, ticket_dets: list, sticker_dets: list, ticket_mat_dets: list = None) -> None:
         if self.tray_id not in self.trays:
             self._create_tray()
         tray = self.trays[self.tray_id]
-        ticket_dets = self._filter_ticket_dets(ticket_dets)
+        ticket_dets = self._apply_ticket_hold(self._filter_ticket_dets(ticket_dets))
         ticket_mat_dets = self._filter_ticket_mat_dets(ticket_mat_dets or [])
         # --- ticket ---
         primary_seen_this_frame = False
@@ -264,7 +323,7 @@ class SingleOrderTracker:
             t_xywhr = d.xywhr
 
             if tray.ticket is not None and iou_poly_poly(t_rect, tray.ticket.bbox) > 0.4:
-                tray.ticket.stable_frames += 1
+                self._advance_stable(tray.ticket, t_rect, "ticket")
                 tray.ticket.bbox = t_rect
                 tray.ticket.xywhr = t_xywhr
                 tray.ticket.missing_count = 0
@@ -280,7 +339,7 @@ class SingleOrderTracker:
                     best_iou, best_et = val, et
 
             if best_et is not None and best_iou > 0.4:
-                best_et.stable_frames += 1
+                self._advance_stable(best_et, t_rect, "extra_ticket")
                 best_et.bbox = t_rect
                 best_et.xywhr = t_xywhr
                 best_et.missing_count = 0
@@ -296,6 +355,18 @@ class SingleOrderTracker:
                 tray.extra_tickets.append(new_et)
                 matched_extra_tickets.add(id(new_et))
                 logger.info("[single_order] 偵測到疑似第二張同單號訂單，開始追蹤穩定度")
+
+        # --- 記錄這一幀「同時被看到」的傳票 ---
+        # 一張紙同一時間只會有一個偵測框，所以兩張票曾在同一幀一起出現，就代表
+        # 桌上確實是兩張紙。TrayStateMachine 用它分辨「同號的另一張（長單分頁）」
+        # 跟「已知那張被拿起來放到別處」—— 後者從頭到尾都不會跟本尊同時出現。
+        # 必須在下面「主票頂替」之前做，這裡的 tray.ticket 還是本幀實際配到的那張。
+        seen_now = [et for et in tray.extra_tickets if id(et) in matched_extra_tickets]
+        if primary_seen_this_frame and tray.ticket is not None:
+            seen_now.append(tray.ticket)
+        if len(seen_now) > 1:
+            for item in seen_now:
+                item.seen_with.update(id(other) for other in seen_now if other is not item)
 
         # --- 主 ticket 本幀沒看到：嘗試用「已確認同單號」且「本幀有出現」的候選頂替 ---
         if tray.ticket is not None and not primary_seen_this_frame:
@@ -360,11 +431,7 @@ class SingleOrderTracker:
 
             if best_idx != -1 and best_iou > 0.1:
                 ts_obj = tray.stickers[best_idx]
-                if is_geometrically_frozen(ts_obj.bbox, s_rect):
-                    ts_obj.geo_stable_frames += 1
-                else:
-                    ts_obj.geo_stable_frames = 0
-                ts_obj.stable_frames += 1
+                self._advance_stable(ts_obj, s_rect, f"sticker({ts_obj.cls_name})")
                 ts_obj.bbox = s_rect
                 ts_obj.xywhr = s_xywhr
                 matched_sticker_indices.add(best_idx)
@@ -398,7 +465,6 @@ class SingleOrderTracker:
                 ts.stable_frames = 0
             if not ts.is_ocr_busy:
                 ts.missing_count += 1
-                ts.geo_stable_frames = 0
 
             if ts.missing_count > self.sticker_missing_frame:
                 ts.is_missing = True

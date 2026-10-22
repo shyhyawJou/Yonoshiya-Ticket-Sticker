@@ -1,0 +1,2817 @@
+mapping:
+  - name: 牛丼･並 つゆだく
+    sub_items:
+      - 牛丼並ﾂﾕﾀﾞｸ
+  - name: 牛丼･大 つゆだく
+    sub_items:
+      - 牛丼大ﾂﾕﾀﾞｸ
+  - name: 牛丼･特 つゆだく
+    sub_items:
+      - 牛丼特ﾂﾕﾀﾞｸ
+  - name: 牛さら･ＦＰ３食
+    sub_items:
+      - 牛皿ＦＰ３食
+  - name: 牛さら･ＦＰ４食
+    sub_items:
+      - 牛皿ＦＰ４食
+  - name: 牛丼･小 つゆだく
+    sub_items:
+      - 牛丼小ﾂﾕﾀﾞｸ
+  - name: 牛丼･超特 つゆだく
+    sub_items:
+      - 超特盛 ﾂﾕﾀﾞｸ
+  - name: ﾆﾝﾆｸ唐揚超特
+    sub_items:
+      - ﾆﾝﾆｸから揚げ超特盛丼
+      - 追い飯
+      - ﾆﾝﾆｸﾏｼﾏｼだれ
+      - 玉子
+  - name: ﾆﾝﾆｸ唐揚超特(半熟
+    sub_items:
+      - ﾆﾝﾆｸから揚げ超特盛丼
+      - 追い飯
+      - ﾆﾝﾆｸﾏｼﾏｼだれ
+      - 半熟玉子
+  - name: 豚丼･並
+    sub_items:
+      - 豚丼 並盛
+  - name: 豚丼･アタマ
+    sub_items:
+      - 豚丼 ｱﾀﾏ大盛
+  - name: 豚丼･大
+    sub_items:
+      - 豚丼 大盛
+  - name: 豚丼･特
+    sub_items:
+      - 豚丼 特盛
+  - name: 豚丼･超特
+    sub_items:
+      - 豚丼 超特盛
+  - name: 豚丼･小
+    sub_items:
+      - 豚丼 小盛
+  - name: 豚さら･並
+    sub_items:
+      - 豚皿 並盛
+  - name: 豚さら･大
+    sub_items:
+      - 豚皿 大盛
+  - name: 豚さら･特
+    sub_items:
+      - 豚皿 特盛
+  - name: 焼肉さら
+    sub_items:
+      - 牛焼肉皿
+  - name: ｾｯﾄ生野菜みそ汁
+    sub_items:
+      - サラダ
+      - みそ汁
+  - name: ｾｯﾄポテトみそ汁
+    sub_items:
+      - ポテトサラダ
+      - みそ汁
+  - name: ｾｯﾄお新香みそ汁
+    sub_items:
+      - お新香
+      - みそ汁
+  - name: ｾｯﾄキムチみそ汁
+    sub_items:
+      - キムチ
+      - みそ汁
+  - name: ｾｯﾄから揚げみそ汁
+    sub_items:
+      - から揚げ
+      - みそ汁
+  - name: TPとろろ
+    sub_items:
+      - とろろ
+  - name: 変更半熟
+    sub_items:
+      - 半熟玉子
+  - name: 豚ねぎ塩丼･小
+    sub_items:
+      - ねぎ塩豚丼小
+  - name: 豚ねぎ塩丼･並
+    sub_items:
+      - ねぎ塩豚丼並
+  - name: 豚ねぎ塩丼･アタマ
+    sub_items:
+      - ねぎ塩豚丼頭
+  - name: 豚ねぎ塩丼･大
+    sub_items:
+      - ねぎ塩豚丼大
+  - name: 豚ねぎ塩丼･特
+    sub_items:
+      - ねぎ塩豚丼特
+  - name: 豚ねぎ塩丼･超特
+    sub_items:
+      - ねぎ塩豚丼超
+  - name: 豚ねぎ塩さら
+    sub_items:
+      - ねぎ塩豚皿
+  - name: ｶﾙﾋﾞﾈｷﾞ塩丼･小
+    sub_items:
+      - 塩ｶﾙﾋﾞ丼 小
+  - name: ｶﾙﾋﾞﾈｷﾞ塩丼･並
+    sub_items:
+      - 塩ｶﾙﾋﾞ丼 並
+  - name: ｶﾙﾋﾞﾈｷﾞ塩丼･大
+    sub_items:
+      - 塩ｶﾙﾋﾞ丼 大
+  - name: ｶﾙﾋﾞﾈｷﾞ塩丼･特
+    sub_items:
+      - 塩ｶﾙﾋﾞ丼 特
+  - name: ｶﾙﾋﾞねぎ塩丼･超特
+    sub_items:
+      - 塩ｶﾙﾋﾞ丼 超
+  - name: ｶﾙﾋﾞﾈｷﾞ塩さら
+    sub_items:
+      - ネギ塩ｶﾙﾋﾞ皿
+  - name: とじ御膳(玉子)
+    sub_items:
+      - 月見牛とじ御膳
+      - 玉子
+  - name: とじ丼 並(玉子)
+    sub_items:
+      - 月見牛とじ丼 並
+      - 玉子
+  - name: とじ丼 大(玉子)
+    sub_items:
+      - 月見牛とじ丼 大
+      - 玉子
+  - name: 麦ご飯大盛(無料)
+    sub_items:
+      - 麦ご飯増量
+  - name: 豚角煮定食
+    sub_items:
+      - 豚角煮定食
+      - ご飯
+  - name: 鍋ＦＰ３食
+    sub_items:
+      - 牛鍋ＦＰ３食
+  - name: 鍋ＦＰ４食
+    sub_items:
+      - 牛鍋ＦＰ４食
+  - name: 鍋膳･牛すき
+    sub_items:
+      - 牛すき鍋膳
+      - 玉子
+  - name: 鰻重･2枚盛
+    sub_items:
+      - 鰻重･２枚盛
+  - name: 鰻サラ
+    sub_items:
+      - 鰻皿
+  - name: 鰻さら･2枚盛
+    sub_items:
+      - 鰻皿･２枚盛
+  - name: 鰻さら･3枚盛
+    sub_items:
+      - 鰻皿･３枚盛
+  - name: 鰻重S(牛小鉢)
+    sub_items:
+      - 鰻重
+      - 牛小鉢
+      - お新香
+  - name: 鰻重S･2枚盛(牛小鉢)
+    sub_items:
+      - 鰻重･２枚盛
+      - 牛小鉢
+      - お新香
+  - name: 牛丼･アタマ つゆだく
+    sub_items:
+      - 牛丼頭大ﾂﾕ多
+  - name: 変更ポテトサラダ
+    sub_items:
+      - ※変更ポテト
+  - name: 黒カレー(牛)
+    sub_items:
+      - 牛黒カレー
+  - name: 黒カレー(肉ﾀﾞｸ)
+    sub_items:
+      - 肉ﾀﾞｸ牛黒ｶﾚｰ
+  - name: 黒カレー(から揚)
+    sub_items:
+      - から揚黒ｶﾚｰ
+      - から揚黒ｶﾚｰ
+  - name: 牛ハヤシ
+    sub_items:
+      - 牛ハヤシﾗｲｽ
+  - name: ねぎ半熟玉子
+    sub_items:
+      - ねぎ
+      - 半熟玉子
+  - name: D)牛丼･超特
+    sub_items:
+      - 牛丼  超特盛
+  - name: D)牛さら・並
+    sub_items:
+      - 牛皿　並盛
+  - name: D)牛さら・大
+    sub_items:
+      - 牛皿　大盛
+  - name: D)牛さら・特
+    sub_items:
+      - 牛皿　特盛
+  - name: D)とじ御膳(玉子）
+    sub_items:
+      - 月見牛とじ御膳
+      - 玉子
+  - name: D)とじ丼 並(玉子)
+    sub_items:
+      - 月見牛とじ丼 並
+      - 玉子
+  - name: D)とじ丼 大(玉子)
+    sub_items:
+      - 月見牛とじ丼 大
+      - 玉子
+  - name: D)牛丼･小(とろろ)
+    sub_items:
+      - とろろ牛丼 小盛
+  - name: D)牛丼･並(とろろ)
+    sub_items:
+      - とろろ牛丼 並盛
+  - name: D)牛丼･ｱﾀﾏ(とろろ)
+    sub_items:
+      - とろろ牛丼 アタマ
+  - name: D)牛丼･大(とろろ)
+    sub_items:
+      - とろろ牛丼 大盛
+  - name: D)牛丼･特(とろろ)
+    sub_items:
+      - とろろ牛丼 特盛
+  - name: D)牛丼･超特(とろろ)
+    sub_items:
+      - とろろ牛丼 超特盛
+  - name: D)豚ﾈｷﾞ塩さら
+    sub_items:
+      - ねぎ塩豚皿
+  - name: D)鍋膳･牛すき
+    sub_items:
+      - 牛すき鍋膳
+      - 玉子
+  - name: D)丼･牛すき 並
+    sub_items:
+      - 牛すき丼･並
+  - name: D)丼･牛すき 大
+    sub_items:
+      - 牛すき丼･大
+  - name: D)鍋ＦＰ３食
+    sub_items:
+      - 牛鍋ＦＰ３食
+  - name: D)鍋ＦＰ４食
+    sub_items:
+      - 牛鍋ＦＰ４食
+  - name: D)鰻重S(牛小鉢)
+    sub_items:
+      - 鰻重
+      - 牛小鉢
+      - お新香
+  - name: D)鰻重S･2枚盛(牛小鉢
+    sub_items:
+      - 鰻重･２枚盛
+      - 牛小鉢
+      - お新香
+  - name: D)半熟ｽﾀﾐﾅ超特盛
+    sub_items:
+      - ｽﾀﾐﾅ超特半玉
+      - 追い飯
+      - ﾆﾝﾆｸﾏｼﾏｼだれ
+      - 半熟玉子
+  - name: D)黒カレー(から揚)
+    sub_items:
+      - から揚黒ｶﾚｰ
+      - から揚黒ｶﾚｰ
+  - name: D)とん汁(無料)
+    sub_items:
+      - 豚汁
+  - name: D)ねぎ塩
+    sub_items:
+      - ねぎ塩だれ
+  - name: 唐揚げ６個
+    sub_items:
+      - から揚げ６個
+  - name: 唐揚げ９個
+    sub_items:
+      - から揚げ９個
+  - name: D)オム･牛ハヤシ
+    sub_items:
+      - 牛オムハヤシライス
+      - オム玉子
+  - name: D)オム･牛ﾊﾔｼ(肉ﾀﾞｸ)
+    sub_items:
+      - 肉だく牛オムハヤシライス
+      - オム玉子
+  - name: D)牛ハヤシ
+    sub_items:
+      - 牛ハヤシﾗｲｽ
+  - name: D)牛ハヤシ(肉ﾀﾞｸ)
+    sub_items:
+      - 肉だく牛ハヤシライス
+  - name: D)牛丼お新香とん汁S
+    sub_items:
+      - お新香
+      - 豚汁
+  - name: D)ﾁｰｽﾞ牛丼ｻﾗﾀﾞS
+    sub_items:
+      - サラダ
+      - みそ汁
+  - name: D)ねぎ玉牛丼ｻﾗﾀﾞS
+    sub_items:
+      - サラダ
+      - みそ汁
+      - 玉子
+  - name: D)明高ﾏﾖ牛丼ｻﾗﾀﾞS
+    sub_items:
+      - サラダ
+      - みそ汁
+  - name: D)牛丼･油そば･玉子S
+    sub_items:
+      - 油そば(酢･ﾗｰ油)
+      - 玉子
+  - name: D)牛丼･油そば･ｷﾑﾁS
+    sub_items:
+      - 油そば(酢･ﾗｰ油)
+      - キムチ
+  - name: ☆D)牛丼･小
+    sub_items:
+      - 牛丼　小
+  - name: ☆D)牛丼･並
+    sub_items:
+      - 牛丼　並
+  - name: ☆D)牛丼･アタマ
+    sub_items:
+      - 牛丼　アタマ
+  - name: ☆D)牛丼･大
+    sub_items:
+      - 牛丼　大
+  - name: ☆D)牛丼･特
+    sub_items:
+      - 牛丼　特
+  - name: ☆D)牛丼･超特盛
+    sub_items:
+      - 牛丼　超特
+  - name: 牛丼・油そば・肉ﾐｿﾈｷﾞ
+    sub_items:
+      - 油そば
+      - 酢･ラー油
+  - name: 単)とろろ
+    sub_items:
+      - とろろ
+  - name: 黒カレー(チーズ)
+    sub_items:
+      - チーズ黒ｶﾚｰ
+  - name: 黒豚味噌重
+    sub_items:
+      - 黒豚味噌焼重
+  - name: 鰻重牛小鉢Ｓ
+    sub_items:
+      - 鰻重
+      - 牛小鉢
+  - name: ２枚鰻重牛小鉢Ｓ
+    sub_items:
+      - 鰻重･２枚盛
+      - 牛小鉢
+  - name: 豚丼･小(ねぎ半熟)
+    sub_items:
+      - 豚丼 小盛
+      - ねぎ
+      - 半熟玉子
+  - name: 豚丼･並(ねぎ半熟)
+    sub_items:
+      - 豚丼 並盛
+      - ねぎ
+      - 半熟玉子
+  - name: 豚丼･ｱﾀﾏ(ねぎ半熟)
+    sub_items:
+      - 豚丼 ｱﾀﾏ大
+      - ねぎ
+      - 半熟玉子
+  - name: 豚丼･大(ねぎ半熟)
+    sub_items:
+      - 豚丼 大盛
+      - ねぎ
+      - 半熟玉子
+  - name: 豚丼･特(ねぎ半熟)
+    sub_items:
+      - 豚丼 特盛
+      - ねぎ
+      - 半熟玉子
+  - name: 豚丼･超特(ねぎ半熟)
+    sub_items:
+      - 豚丼 超特盛
+      - ねぎ
+      - 半熟玉子
+  - name: 豚丼･小(キムチ)
+    sub_items:
+      - 豚丼 小盛
+      - キムチ
+  - name: 豚丼･並(キムチ)
+    sub_items:
+      - 豚丼 並盛
+      - キムチ
+  - name: 豚丼･ｱﾀﾏ(キムチ)
+    sub_items:
+      - 豚丼 アタマ
+      - キムチ
+  - name: 豚丼･大(キムチ)
+    sub_items:
+      - 豚丼 大盛
+      - キムチ
+  - name: 豚丼･特(キムチ)
+    sub_items:
+      - 豚丼 特盛
+      - キムチ
+  - name: 豚丼･超特(キムチ)
+    sub_items:
+      - 豚丼 超特盛
+      - キムチ
+  - name: 鰻重・とろろ
+    sub_items:
+      - 鰻重
+      - とろろ
+  - name: 単)ジンギスカン
+    sub_items:
+      - 単)ｼﾞﾝｷﾞｽｶﾝ
+      - たれ
+  - name: オム･黒ｶﾚｰ(牛)
+    sub_items:
+      - 牛オム黒ｶﾚｰ
+      - オム玉子
+  - name: 豚丼･小(ねぎ玉)
+    sub_items:
+      - 豚丼 小盛
+      - ねぎ
+      - 玉子
+  - name: 豚丼･並(ねぎ玉)
+    sub_items:
+      - 豚丼 並盛
+      - ねぎ
+      - 玉子
+  - name: 豚丼･アタマ(ねぎ玉)
+    sub_items:
+      - 豚丼 ｱﾀﾏ大
+      - ねぎ
+      - 玉子
+  - name: 豚丼･大(ねぎ玉)
+    sub_items:
+      - 豚丼 大盛
+      - ねぎ
+      - 玉子
+  - name: 豚丼･特(ねぎ玉)
+    sub_items:
+      - 豚丼 特盛
+      - ねぎ
+      - 玉子
+  - name: 豚丼･超特(ねぎ玉)
+    sub_items:
+      - 豚丼 超特盛
+      - ねぎ
+      - 玉子
+  - name: ２枚鰻重
+    sub_items:
+      - 鰻重･２枚盛
+  - name: ２枚鰻サラ
+    sub_items:
+      - 鰻皿･２枚盛
+  - name: ３枚鰻サラ
+    sub_items:
+      - 鰻皿･３枚盛
+  - name: そば･並+肉ﾐｿ(酢･ﾗｰ)
+    sub_items:
+      - 牛丼　並
+      - 肉味噌ねぎ
+      - 油そば
+      - 酢･ラー油
+  - name: そば･ｱﾀﾏ+肉ﾐｿ(酢･ﾗｰ)
+    sub_items:
+      - 牛丼　アタマ
+      - 肉味噌ねぎ
+      - 油そば
+      - 酢･ラー油
+  - name: そば･大+肉ﾐｿ(酢･ﾗｰ)
+    sub_items:
+      - 牛丼　大
+      - 肉味噌ねぎ
+      - 油そば
+      - 酢･ラー油
+  - name: そば･特+肉ﾐｿ(酢･ﾗｰ)
+    sub_items:
+      - 牛丼　特
+      - 肉味噌ねぎ
+      - 油そば
+      - 酢･ラー油
+  - name: そば･超特+肉ﾐｿ(酢･ﾗｰ)
+    sub_items:
+      - 牛丼　超特
+      - 肉味噌ねぎ
+      - 油そば
+      - 酢･ラー油
+  - name: そば･小+肉ﾐｿ(酢･ﾗｰ)
+    sub_items:
+      - 牛丼　小
+      - 肉味噌ねぎ
+      - 油そば
+      - 酢･ラー油
+  - name: から揚丼･並(ﾎﾟﾝ酢)
+    sub_items:
+      - おろしポン酢唐揚 並
+      - おろしポン酢
+  - name: から揚丼･ｱﾀﾏ(ﾎﾟﾝ酢)
+    sub_items:
+      - おろしポン酢唐揚 頭
+      - おろしポン酢
+  - name: から揚丼･大(ﾎﾟﾝ酢)
+    sub_items:
+      - おろしポン酢唐揚 大
+      - おろしポン酢
+  - name: から揚丼･特(ﾎﾟﾝ酢)
+    sub_items:
+      - おろしポン酢唐揚 特
+      - おろしポン酢
+  - name: ﾛｰｽ生姜丼･並
+    sub_items:
+      - ﾛｰｽ生姜丼 並
+  - name: ﾛｰｽ生姜丼･大
+    sub_items:
+      - ﾛｰｽ生姜丼 大
+  - name: ﾛｰｽ生姜さら･並
+    sub_items:
+      - ﾛｰｽ生姜皿 並
+  - name: ﾛｰｽ生姜さら･大
+    sub_items:
+      - ﾛｰｽ生姜皿 大
+  - name: 豚丼･小(肉味噌ﾈｷﾞ)
+    sub_items:
+      - 肉味噌ねぎ豚丼　小
+      - ご飯
+  - name: 豚丼･並(肉味噌ﾈｷﾞ)
+    sub_items:
+      - 肉味噌ねぎ豚丼　並
+      - ご飯
+  - name: 豚丼･ｱﾀﾏ(肉味噌ﾈｷﾞ)
+    sub_items:
+      - 肉味噌ねぎ豚丼　アタマ
+      - ご飯
+  - name: 豚丼･大(肉味噌ﾈｷﾞ)
+    sub_items:
+      - 肉味噌ねぎ豚丼　大
+      - ご飯
+  - name: 豚丼･特(肉味噌ﾈｷﾞ)
+    sub_items:
+      - 肉味噌ねぎ豚丼　特
+      - ご飯
+  - name: 豚丼･超特(肉味噌ﾈｷﾞ)
+    sub_items:
+      - 肉味噌ねぎ豚丼　超特盛
+      - ご飯
+  - name: 豚角煮定食(牛小鉢)
+    sub_items:
+      - 豚角煮定食
+      - ご飯
+      - 牛小鉢
+  - name: から揚丼･並(ﾀﾙﾀﾙ)
+    sub_items:
+      - ﾀﾙﾀﾙ唐揚 並
+      - タルタル
+  - name: から揚丼･ｱﾀﾏ(ﾀﾙﾀﾙ)
+    sub_items:
+      - ﾀﾙﾀﾙ唐揚 頭
+      - タルタル
+  - name: から揚丼･大(ﾀﾙﾀﾙ)
+    sub_items:
+      - ﾀﾙﾀﾙ唐揚 大
+      - タルタル
+  - name: から揚丼･特(ﾀﾙﾀﾙ)
+    sub_items:
+      - ﾀﾙﾀﾙ唐揚 特
+      - タルタル
+  - name: 牛丼･小(とろろ)
+    sub_items:
+      - とろろ牛丼･小盛
+  - name: 牛丼･並(とろろ)
+    sub_items:
+      - とろろ牛丼･並盛
+  - name: 牛丼･ｱﾀﾏ(とろろ)
+    sub_items:
+      - とろろ牛丼･アタマ
+  - name: 牛丼･大(とろろ)
+    sub_items:
+      - とろろ牛丼･大盛
+  - name: 牛丼･特(とろろ)
+    sub_items:
+      - とろろ牛丼･特盛
+  - name: 牛丼･超特(とろろ)
+    sub_items:
+      - とろろ牛丼･超特盛
+  - name: 豚丼･小(明高ﾏﾖ)
+    sub_items:
+      - 明太高菜マヨ豚丼 小
+      - 明太高菜マヨ
+  - name: 豚丼･並(明高ﾏﾖ)
+    sub_items:
+      - 明太高菜マヨ豚丼 並
+      - 明太高菜マヨ
+  - name: 豚丼･ｱﾀﾏ(明高ﾏﾖ)
+    sub_items:
+      - 明太高菜マヨ豚丼 頭
+      - 明太高菜マヨ
+  - name: 豚丼･大(明高ﾏﾖ)
+    sub_items:
+      - 明太高菜マヨ豚丼 大
+      - 明太高菜マヨ
+  - name: 豚丼･特(明高ﾏﾖ)
+    sub_items:
+      - 明太高菜マヨ豚丼 特
+      - 明太高菜マヨ
+  - name: 豚丼･超特(明高ﾏﾖ)
+    sub_items:
+      - 明太高菜マヨ豚丼 超特
+      - 明太高菜マヨ
+  - name: 唐揚･並(明高ﾏﾖ)
+    sub_items:
+      - 明太高菜ﾏﾖ唐揚丼 並
+      - 明太高菜マヨ
+  - name: 唐揚･ｱﾀﾏ(明高ﾏﾖ)
+    sub_items:
+      - 明太高菜ﾏﾖ唐揚丼 頭
+      - 明太高菜マヨ
+  - name: 唐揚･大(明高ﾏﾖ)
+    sub_items:
+      - 明太高菜ﾏﾖ唐揚丼 大
+      - 明太高菜マヨ
+  - name: 唐揚･特(明高ﾏﾖ)
+    sub_items:
+      - 明太高菜ﾏﾖ唐揚丼 特
+      - 明太高菜マヨ
+  - name: 豚丼･小(チーズ)
+    sub_items:
+      - 豚丼 小盛
+      - チーズ
+  - name: 豚丼･並(チーズ)
+    sub_items:
+      - 豚丼 並盛
+      - チーズ
+  - name: 豚丼･アタマ(チーズ)
+    sub_items:
+      - 豚丼 ｱﾀﾏ大
+      - チーズ
+  - name: 豚丼･大(チーズ)
+    sub_items:
+      - 豚丼 大盛
+      - チーズ
+  - name: 豚丼･特(チーズ)
+    sub_items:
+      - 豚丼 特盛
+      - チーズ
+  - name: 豚丼･超特(チーズ)
+    sub_items:
+      - 豚丼 超特盛
+      - チーズ
+  - name: 変更ご飯軽め
+    sub_items:
+      - ご飯少なめ
+  - name: ☆並
+    sub_items:
+      - 牛丼　並
+  - name: ☆つゆだく
+    sub_items:
+      - 牛丼並ﾂﾕﾀﾞｸ
+  - name: ☆つゆぬき
+    sub_items:
+      - 牛丼並ﾂﾕﾇｷ
+  - name: ・並
+    sub_items:
+      - 牛丼　並
+  - name: オム･牛ハヤシ
+    sub_items:
+      - 牛オムハヤシライス
+      - オム玉子
+  - name: オム･牛ﾊﾔｼ(肉ﾀﾞｸ)
+    sub_items:
+      - 肉だく牛オムハヤシライス
+      - オム玉子
+  - name: サラダ３ みそ汁３
+    sub_items:
+      - みそ汁
+      - みそ汁
+  - name: 牛小鉢
+    sub_items:
+      - 牛小鉢
+  - name: 変)飯増量(無料)
+    sub_items:
+      - ご飯大盛
+  - name: CP牛丼 並 ３丁
+    sub_items:
+      - 牛丼　並
+      - 牛丼　並
+      - 牛小鉢
+  - name: CP牛丼 並 ４丁
+    sub_items:
+      - 牛丼　並
+      - 牛丼　並
+      - 牛小鉢
+      - 牛小鉢
+  - name: ミニカレーｾｯﾄ
+    sub_items:
+      - ﾐﾆカレーｾｯﾄ
+      - ﾐﾆカレーｾｯﾄ
+  - name: 半熟)ｽﾀﾐﾅ超特盛丼
+    sub_items:
+      - ｽﾀﾐﾅ超特半玉
+      - 追い飯
+      - ﾆﾝﾆｸﾏｼﾏｼだれ
+      - 半熟玉子
+  - name: 牛丼･ｱﾀﾏ(キムチ)
+    sub_items:
+      - 牛丼　アタマ
+      - キムチ
+  - name: 牛丼･超特(キムチ)
+    sub_items:
+      - 牛丼　超特
+      - キムチ
+  - name: D)ｽﾀﾐﾅ超特盛丼
+    sub_items:
+      - ｽﾀﾐﾅ超特盛丼
+      - 追い飯
+      - ﾆﾝﾆｸﾏｼﾏｼだれ
+      - 玉子
+  - name: D)ミニ牛丼セット
+    sub_items:
+      - ﾐﾆ牛丼ｾｯﾄ
+      - ﾐﾆ牛丼ｾｯﾄ
+  - name: D)ミニカレーセット
+    sub_items:
+      - ﾐﾆカレーｾｯﾄ
+      - ﾐﾆカレーｾｯﾄ
+  - name: D)しじみ汁
+    sub_items:
+      - しじみ汁
+  - name: トマトソース
+    sub_items:
+      - トマトソース
+  - name: サルサソース
+    sub_items:
+      - サルサソース
+  - name: 麦ご飯少なめ
+    sub_items:
+      - 麦ご飯少なめ
+  - name: 唐辛子(持帰り)
+    sub_items:
+      - 唐辛子
+  - name: ﾆﾝﾆｸﾏｼﾏｼたれ(持帰り)
+    sub_items:
+      - ﾆﾝﾆｸﾏｼﾏｼだれ
+  - name: たれ(持帰り)
+    sub_items:
+      - たれ
+  - name: アタマの大盛
+    sub_items:
+      - 牛丼　アタマ
+  - name: ☆)しじみ汁
+    sub_items:
+      - しじみ汁
+  - name: ＴＰ肉味噌ねぎ
+    sub_items:
+      - TP肉味噌
+  - name: ＴＰねぎラー油
+    sub_items:
+      - ねぎラー油
+  - name: 肉だく(牛小鉢)
+    sub_items:
+      - 肉だく
+  - name: CP牛丼 並 ２丁
+    sub_items:
+      - 牛丼　並
+      - 牛丼　並
+  - name: お新香
+    sub_items:
+      - お新香
+  - name: 玉子
+    sub_items:
+      - 玉子
+  - name: 半熟玉子
+    sub_items:
+      - 半熟玉子
+  - name: みそ汁
+    sub_items:
+      - みそ汁
+  - name: ご飯
+    sub_items:
+      - ご飯
+  - name: 別納豆
+    sub_items:
+      - 納豆
+  - name: 生野菜サラダ
+    sub_items:
+      - サラダ
+  - name: キムチ
+    sub_items:
+      - キムチ
+  - name: 変更しじみ汁
+    sub_items:
+      - ※変更しじみ
+  - name: 変更とん汁
+    sub_items:
+      - ※変更豚汁
+  - name: あさり汁
+    sub_items:
+      - あさり汁
+  - name: 変更あさり汁
+    sub_items:
+      - ※変更あさり
+  - name: そば･並(酢・ﾗｰ油)
+    sub_items:
+      - 牛丼　並
+      - 油そば
+      - 酢･ラー油
+  - name: そば･ｱﾀﾏ(酢・ﾗｰ油)
+    sub_items:
+      - 牛丼 アタマ
+      - 油そば
+      - 酢･ラー油
+  - name: そば･大(酢・ﾗｰ油)
+    sub_items:
+      - 牛丼 大
+      - 油そば
+      - 酢･ラー油
+  - name: そば･特(酢・ﾗｰ油)
+    sub_items:
+      - 牛丼 特
+      - 油そば
+      - 酢･ラー油
+  - name: そば･超特(酢・ﾗｰ油)
+    sub_items:
+      - 牛丼 超特
+      - 油そば
+      - 酢･ラー油
+  - name: そば･小(酢・ﾗｰ油)
+    sub_items:
+      - 牛丼 小
+      - 油そば
+      - 酢･ラー油
+  - name: ﾐﾆそば･並(酢・ﾗｰ油)
+    sub_items:
+      - 牛丼　並
+      - ミニ油そば
+      - 酢･ラー油
+  - name: ﾐﾆそば･ｱﾀﾏ(酢・ﾗｰ油)
+    sub_items:
+      - 牛丼 アタマ
+      - ミニ油そば
+      - 酢･ラー油
+  - name: ﾐﾆそば･大(酢・ﾗｰ油)
+    sub_items:
+      - 牛丼 大
+      - ミニ油そば
+      - 酢･ラー油
+  - name: ﾐﾆそば･特(酢・ﾗｰ油)
+    sub_items:
+      - 牛丼 特
+      - ミニ油そば
+      - 酢･ラー油
+  - name: ﾐﾆそば･超特(酢・ﾗｰ油)
+    sub_items:
+      - 牛丼 超特
+      - ミニ油そば
+      - 酢･ラー油
+  - name: ﾐﾆそば･小(酢・ﾗｰ油)
+    sub_items:
+      - 牛丼 小
+      - ミニ油そば
+      - 酢･ラー油
+  - name: とろろ
+    sub_items:
+      - とろろ
+  - name: 変)麦飯増量(無料)
+    sub_items:
+      - 麦ご飯増量
+  - name: 単)肉味噌ねぎ
+    sub_items:
+      - 単)肉味噌
+  - name: 鰻重
+    sub_items:
+      - 鰻重
+  - name: 鰻ご飯増量
+    sub_items:
+      - 鰻ご飯増量
+  - name: ポテトサラダ
+    sub_items:
+      - ポテトサラダ
+  - name: 黒カレー
+    sub_items:
+      - 黒カレー
+  - name: 単)ねぎ塩
+    sub_items:
+      - 単)ねぎ塩
+  - name: ねぎ玉子
+    sub_items:
+      - ねぎ
+      - 玉子
+  - name: から揚丼･並
+    sub_items:
+      - 唐揚げ丼 並
+  - name: から揚丼･ｱﾀﾏ
+    sub_items:
+      - 唐揚げ丼 頭
+  - name: から揚丼･大
+    sub_items:
+      - 唐揚げ丼 大
+  - name: から揚丼･特
+    sub_items:
+      - 唐揚げ丼 特
+  - name: 単)明太高菜マヨ
+    sub_items:
+      - 明太高菜
+      - マヨソース
+  - name: 単)から揚げ
+    sub_items:
+      - から揚げ
+  - name: ＴＰタルタル
+    sub_items:
+      - TPタルタル
+      - タルタル
+  - name: ＴＰねぎ塩
+    sub_items:
+      - TPねぎ塩
+  - name: ＴＰねぎタレ
+    sub_items:
+      - TPねぎタレ
+  - name: TPオム玉子
+    sub_items:
+      - TPオム玉子
+  - name: TP鬼おろしポン酢
+    sub_items:
+      - TPｵﾛｼポン酢
+  - name: 単)鬼おろしポン酢
+    sub_items:
+      - 単)ｵﾛｼポン酢
+  - name: ＴＰ明太高菜マヨ
+    sub_items:
+      - 明太高菜
+      - マヨソース
+  - name: D)牛丼･ｱﾀﾏ(ねぎ半熟
+    sub_items:
+      - 牛丼　ｱﾀﾏ大
+      - ねぎ
+      - 半熟玉子
+  - name: D)牛丼･大(ねぎ半熟
+    sub_items:
+      - 牛丼　大
+      - ねぎ
+      - 半熟玉子
+  - name: D)牛丼･特(ねぎ半熟
+    sub_items:
+      - 牛丼　特
+      - ねぎ
+      - 半熟玉子
+  - name: D)牛丼･超特(ねぎ半熟
+    sub_items:
+      - 牛丼　超特盛
+      - ねぎ
+      - 半熟玉子
+  - name: D)牛丼･小(ﾎﾟﾝ酢)
+    sub_items:
+      - おろしポン酢牛丼 小
+      - おろしポン酢
+  - name: D)牛丼･並(ﾎﾟﾝ酢)
+    sub_items:
+      - おろしポン酢牛丼 並
+      - おろしポン酢
+  - name: D)牛丼･ｱﾀﾏ(ﾎﾟﾝ酢)
+    sub_items:
+      - おろしポン酢牛丼 頭
+      - おろしポン酢
+  - name: D)牛丼･大(ﾎﾟﾝ酢)
+    sub_items:
+      - おろしポン酢牛丼 大
+      - おろしポン酢
+  - name: D)牛丼･特(ﾎﾟﾝ酢)
+    sub_items:
+      - おろしポン酢牛丼 特
+      - おろしポン酢
+  - name: D)牛丼･超特(ﾎﾟﾝ酢)
+    sub_items:
+      - おろしポン酢牛丼 超特
+      - おろしポン酢
+  - name: D)牛丼･小(ねぎ玉)
+    sub_items:
+      - 牛丼 小盛
+      - ねぎ
+      - 玉子
+  - name: D)牛丼･並(ねぎ玉)
+    sub_items:
+      - 牛丼 並盛
+      - ねぎ
+      - 玉子
+  - name: D)牛丼･ｱﾀﾏ(ねぎ玉)
+    sub_items:
+      - 牛丼 ｱﾀﾏ大
+      - ねぎ
+      - 玉子
+  - name: D)牛丼･大(ねぎ玉)
+    sub_items:
+      - 牛丼 大盛
+      - ねぎ
+      - 玉子
+  - name: D)牛丼･特(ねぎ玉)
+    sub_items:
+      - 牛丼 特盛
+      - ねぎ
+      - 玉子
+  - name: D)牛丼･超特(ねぎ玉)
+    sub_items:
+      - 牛丼 超特盛
+      - ねぎ
+      - 玉子
+  - name: 焼肉丼･並
+    sub_items:
+      - 牛焼肉丼 並
+  - name: 焼肉丼･大
+    sub_items:
+      - 牛焼肉丼 大
+  - name: D)麦飯増量無料
+    sub_items:
+      - 麦ご飯増量
+  - name: D)唐揚･並(ﾎﾟﾝ酢)
+    sub_items:
+      - おろしポン酢唐揚 並
+      - おろしポン酢
+  - name: D)唐揚･ｱﾀﾏ(ﾎﾟﾝ酢)
+    sub_items:
+      - おろしポン酢唐揚 頭
+      - おろしポン酢
+  - name: D)唐揚･大(ﾎﾟﾝ酢)
+    sub_items:
+      - おろしポン酢唐揚 大
+      - おろしポン酢
+  - name: D)唐揚･特(ﾎﾟﾝ酢)
+    sub_items:
+      - おろしポン酢唐揚 特
+      - おろしポン酢
+  - name: D)TP鬼おろしポン酢
+    sub_items:
+      - TPｵﾛｼポン酢
+  - name: D)とろろ
+    sub_items:
+      - とろろ
+  - name: 牛丼･小(キムチ)
+    sub_items:
+      - 牛丼　小
+      - キムチ
+  - name: 牛丼･並(キムチ)
+    sub_items:
+      - 牛丼　並
+      - キムチ
+  - name: D)牛丼･小(ﾈｷﾞﾗｰ)
+    sub_items:
+      - 牛丼　小
+      - ねぎラー油
+  - name: D)牛丼･並(ﾈｷﾞﾗｰ)
+    sub_items:
+      - 牛丼　並
+      - ねぎラー油
+  - name: D)牛丼･アタマ(ﾈｷﾞﾗｰ)
+    sub_items:
+      - 牛丼　ｱﾀﾏ大
+      - ねぎラー油
+  - name: D)牛丼･大(ﾈｷﾞﾗｰ)
+    sub_items:
+      - 牛丼　大
+      - ねぎラー油
+  - name: D)牛丼･超特(ﾈｷﾞﾗｰ)
+    sub_items:
+      - 牛丼　超特盛
+      - ねぎラー油
+  - name: D)ｶﾙﾋﾞﾈｷﾞ塩丼･小
+    sub_items:
+      - 塩ｶﾙﾋﾞ丼 小
+  - name: D)ｶﾙﾋﾞﾈｷﾞ塩丼･並
+    sub_items:
+      - 塩ｶﾙﾋﾞ丼 並
+  - name: D)ｶﾙﾋﾞﾈｷﾞ塩丼･頭大
+    sub_items:
+      - 塩ｶﾙﾋﾞ丼 頭
+  - name: D)ｶﾙﾋﾞﾈｷﾞ塩丼･大
+    sub_items:
+      - 塩ｶﾙﾋﾞ丼 大
+  - name: D)ｶﾙﾋﾞﾈｷﾞ塩丼･特
+    sub_items:
+      - 塩ｶﾙﾋﾞ丼 特
+  - name: D)ｶﾙﾋﾞﾈｷﾞ塩丼･超特盛
+    sub_items:
+      - 塩ｶﾙﾋﾞ丼 超
+  - name: D)ｶﾙﾋﾞﾈｷﾞ塩さら
+    sub_items:
+      - ネギ塩ｶﾙﾋﾞ皿
+  - name: D)TPねぎラー油
+    sub_items:
+      - ねぎラー油
+  - name: D)鰻重
+    sub_items:
+      - 鰻重
+  - name: D）ＴＰねぎ塩
+    sub_items:
+      - ねぎ塩
+  - name: D)ﾛｰｽ生姜丼･並
+    sub_items:
+      - ﾛｰｽ生姜丼 並
+  - name: D)ﾛｰｽ生姜丼･大
+    sub_items:
+      - ﾛｰｽ生姜丼 大
+  - name: D)ﾛｰｽ生姜さら･並
+    sub_items:
+      - ﾛｰｽ生姜皿 並
+  - name: D)ﾛｰｽ生姜さら･大
+    sub_items:
+      - ﾛｰｽ生姜皿 大
+  - name: D）から揚丼・並
+    sub_items:
+      - 唐揚げ丼 並
+  - name: D）から揚丼・大
+    sub_items:
+      - 唐揚げ丼 大
+  - name: D）から揚丼・特
+    sub_items:
+      - 唐揚げ丼 特
+  - name: D）ﾈｷﾞ塩唐揚丼・並
+    sub_items:
+      - ねぎ塩唐揚並
+  - name: D）ﾈｷﾞ塩唐揚丼・ｱﾀﾏ大
+    sub_items:
+      - ねぎ塩唐揚頭
+  - name: D）ﾈｷﾞ塩唐揚丼・大
+    sub_items:
+      - ねぎ塩唐揚大
+  - name: D）ﾈｷﾞ塩唐揚丼・特盛
+    sub_items:
+      - ねぎ塩唐揚特
+  - name: D)ご飯増量
+    sub_items:
+      - ご飯増量
+  - name: D)ＴＰオム玉子
+    sub_items:
+      - TPオム玉子
+  - name: D)黒カレー(牛ｵﾑ)
+    sub_items:
+      - 牛オム黒カレー
+      - オム玉子
+  - name: D)黒カレー(肉ﾀﾞｸｵﾑ)
+    sub_items:
+      - 肉だく牛オム黒カレー
+      - オム玉子
+  - name: D)黒カレー
+    sub_items:
+      - 黒カレー
+  - name: D)黒カレー(牛)
+    sub_items:
+      - 牛黒カレー
+  - name: D)黒カレー(肉ﾀﾞｸ)
+    sub_items:
+      - 肉ﾀﾞｸ牛黒ｶﾚｰ
+  - name: D)黒カレー(チーズ)
+    sub_items:
+      - チーズ黒ｶﾚｰ
+  - name: D)から揚丼･並(ﾀﾙﾀﾙ
+    sub_items:
+      - ﾀﾙﾀﾙ唐揚 並
+      - タルタル
+  - name: D)から揚丼･ｱﾀﾏ(ﾀﾙﾀﾙ
+    sub_items:
+      - ﾀﾙﾀﾙ唐揚 頭
+      - タルタル
+  - name: D)から揚丼･大(ﾀﾙﾀﾙ
+    sub_items:
+      - ﾀﾙﾀﾙ唐揚 大
+      - タルタル
+  - name: D)から揚丼･特(ﾀﾙﾀﾙ
+    sub_items:
+      - ﾀﾙﾀﾙ唐揚 特
+      - タルタル
+  - name: 並つゆだく
+    sub_items:
+      - 牛丼並ﾂﾕﾀﾞｸ
+  - name: 並つゆぬき
+    sub_items:
+      - 牛丼並ﾂﾕﾇｷ
+  - name: D)みそ汁
+    sub_items:
+      - みそ汁
+  - name: D)とん汁
+    sub_items:
+      - 豚汁
+  - name: D)あさり汁
+    sub_items:
+      - あさり汁
+  - name: D)ポテトサラダ
+    sub_items:
+      - ポテトサラダ
+  - name: D)生野菜サラダ
+    sub_items:
+      - サラダ
+  - name: D)ねぎ玉子
+    sub_items:
+      - ねぎ
+      - 玉子
+  - name: D)半熟ねぎ玉子
+    sub_items:
+      - ねぎ
+      - 半熟玉子
+  - name: D)玉子
+    sub_items:
+      - 玉子
+  - name: D)半熟玉子
+    sub_items:
+      - 半熟玉子
+  - name: D)チーズ
+    sub_items:
+      - チーズ
+  - name: D)肉だく
+    sub_items:
+      - 肉だく
+  - name: D)TPねぎだく
+    sub_items:
+      - TPねぎだく
+  - name: D)お新香
+    sub_items:
+      - お新香
+  - name: D)キムチ単品
+    sub_items:
+      - キムチ
+  - name: D)単品)ご飯・並
+    sub_items:
+      - ご飯
+  - name: D)単品)ご飯・大
+    sub_items:
+      - ご飯　大
+  - name: D)焼肉丼･小
+    sub_items:
+      - 焼肉丼 小
+  - name: D)焼肉丼･アタマ
+    sub_items:
+      - 焼肉丼 頭
+  - name: D)焼肉丼･特
+    sub_items:
+      - 焼肉丼 特
+  - name: D)焼肉丼･超特
+    sub_items:
+      - 焼肉丼 超特
+  - name: D)牛丼･小(肉味噌ﾈｷﾞ)
+    sub_items:
+      - 牛丼　小
+      - TP肉味噌
+  - name: D)牛丼･並(肉味噌ﾈｷﾞ)
+    sub_items:
+      - 牛丼　並
+      - TP肉味噌
+  - name: D)牛丼･ｱﾀﾏ(肉味噌ﾈｷﾞ)
+    sub_items:
+      - 牛丼　頭
+      - TP肉味噌
+  - name: D)牛丼･大(肉味噌ﾈｷﾞ)
+    sub_items:
+      - 牛丼　大
+      - TP肉味噌
+  - name: D)牛丼･超特(肉味噌ﾈｷﾞ)
+    sub_items:
+      - 牛丼　超特盛
+      - TP肉味噌
+  - name: D)TP肉味噌ねぎ
+    sub_items:
+      - TP肉味噌
+  - name: D)豚丼･小(ﾎﾟﾝ酢)
+    sub_items:
+      - 鬼おろしﾎﾟﾝ酢豚丼小盛
+      - おろしポン酢
+  - name: D)豚丼･並(ﾎﾟﾝ酢)
+    sub_items:
+      - 鬼おろしﾎﾟﾝ酢豚丼並盛
+      - おろしポン酢
+  - name: D)豚丼･ｱﾀﾏ(ﾎﾟﾝ酢)
+    sub_items:
+      - 鬼おろしﾎﾟﾝ酢豚丼 頭
+      - おろしポン酢
+  - name: D)豚丼･大(ﾎﾟﾝ酢)
+    sub_items:
+      - 鬼おろしﾎﾟﾝ酢豚丼大盛
+      - おろしポン酢
+  - name: D)豚丼･特(ﾎﾟﾝ酢)
+    sub_items:
+      - 鬼おろしﾎﾟﾝ酢豚丼特盛
+      - おろしポン酢
+  - name: D)豚丼･超特(ﾎﾟﾝ酢)
+    sub_items:
+      - 鬼おろしﾎﾟﾝ酢豚丼超特盛
+      - おろしポン酢
+  - name: D)牛丼･小(明高ﾏﾖ)
+    sub_items:
+      - 明太高菜マヨ牛丼 小
+      - 明太高菜マヨ
+  - name: D)牛丼･並(明高ﾏﾖ)
+    sub_items:
+      - 明太高菜マヨ牛丼 並
+      - 明太高菜マヨ
+  - name: D)牛丼･ｱﾀﾏ(明高ﾏﾖ)
+    sub_items:
+      - 明太高菜マヨ牛丼 頭
+      - 明太高菜マヨ
+  - name: D)牛丼･大(明高ﾏﾖ)
+    sub_items:
+      - 明太高菜マヨ牛丼 大
+      - 明太高菜マヨ
+  - name: D)牛丼･特(明高ﾏﾖ)
+    sub_items:
+      - 明太高菜マヨ牛丼 特
+      - 明太高菜マヨ
+  - name: D)牛丼･超特(明高ﾏﾖ)
+    sub_items:
+      - 明太高菜マヨ牛丼 超特
+      - 明太高菜マヨ
+  - name: D)豚丼･小(明高ﾏﾖ)
+    sub_items:
+      - 明太高菜マヨ豚丼 小
+      - 明太高菜マヨ
+  - name: D)豚丼･並(明高ﾏﾖ)
+    sub_items:
+      - 明太高菜マヨ豚丼 並
+      - 明太高菜マヨ
+  - name: D)豚丼･ｱﾀﾏ(明高ﾏﾖ)
+    sub_items:
+      - 明太高菜マヨ豚丼 頭
+      - 明太高菜マヨ
+  - name: D)豚丼･大(明高ﾏﾖ)
+    sub_items:
+      - 明太高菜マヨ豚丼 大
+      - 明太高菜マヨ
+  - name: D)豚丼･特(明高ﾏﾖ)
+    sub_items:
+      - 明太高菜マヨ豚丼 特
+      - 明太高菜マヨ
+  - name: D)豚丼･超特(明高ﾏﾖ)
+    sub_items:
+      - 明太高菜マヨ豚丼 超特
+      - 明太高菜マヨ
+  - name: D)唐揚･並(明高ﾏﾖ)
+    sub_items:
+      - 明太高菜ﾏﾖ唐揚丼 並
+      - 明太高菜マヨ
+  - name: D)唐揚･ｱﾀﾏ(明高ﾏﾖ)
+    sub_items:
+      - 明太高菜ﾏﾖ唐揚丼 頭
+      - 明太高菜マヨ
+  - name: D)唐揚･大(明高ﾏﾖ)
+    sub_items:
+      - 明太高菜ﾏﾖ唐揚丼 大
+      - 明太高菜マヨ
+  - name: D)唐揚･特(明高ﾏﾖ)
+    sub_items:
+      - 明太高菜ﾏﾖ唐揚丼 特
+      - 明太高菜マヨ
+  - name: D)明太高菜マヨ
+    sub_items:
+      - 明太高菜
+      - マヨソース
+  - name: D)牛丼・小(ﾈｷﾞ塩)
+    sub_items:
+      - ﾈｷﾞ塩牛丼 小
+  - name: D)牛丼･並(ﾈｷﾞ塩)
+    sub_items:
+      - ﾈｷﾞ塩牛丼 並
+  - name: D)牛丼・ｱﾀﾏ(ﾈｷﾞ塩)
+    sub_items:
+      - ﾈｷﾞ塩牛丼 頭
+  - name: D)牛丼・大(ﾈｷﾞ塩)
+    sub_items:
+      - ﾈｷﾞ塩牛丼 大
+  - name: D)牛丼・特(ﾈｷﾞ塩)
+    sub_items:
+      - ﾈｷﾞ塩牛丼 特
+  - name: D)牛丼・超特盛(ﾈｷﾞ塩)
+    sub_items:
+      - ﾈｷﾞ塩牛丼 超
+  - name: D)そば･小(酢・ﾗｰ油)
+    sub_items:
+      - 牛丼 小
+      - 油ｿﾊﾞ(酢･ﾗｰ
+  - name: D)そば･並(酢・ﾗｰ油)
+    sub_items:
+      - 牛丼 並
+      - 油ｿﾊﾞ(酢･ﾗｰ
+  - name: D)そば･ｱﾀﾏ(酢・ﾗｰ油)
+    sub_items:
+      - 牛丼 アタマ
+      - 油ｿﾊﾞ(酢･ﾗｰ
+  - name: D)そば･大(酢・ﾗｰ油)
+    sub_items:
+      - 牛丼 大
+      - 油ｿﾊﾞ(酢･ﾗｰ
+  - name: D)そば･特(酢・ﾗｰ油)
+    sub_items:
+      - 牛丼 特
+      - 油ｿﾊﾞ(酢･ﾗｰ
+  - name: D)そば･超特(酢・ﾗｰ油)
+    sub_items:
+      - 牛丼 超特
+      - 油ｿﾊﾞ(酢･ﾗｰ
+  - name: D)ﾐﾆそば･小(酢・ﾗｰ油)
+    sub_items:
+      - 牛丼 小
+      - ﾐﾆｿﾊﾞ(酢･ﾗｰ
+  - name: D)ﾐﾆそば･並(酢・ﾗｰ油)
+    sub_items:
+      - 牛丼 並
+      - ﾐﾆｿﾊﾞ(酢･ﾗｰ
+  - name: D)ﾐﾆそば･ｱﾀﾏ(酢・ﾗｰ油)
+    sub_items:
+      - 牛丼 アタマ
+      - ﾐﾆｿﾊﾞ(酢･ﾗｰ
+  - name: D)ﾐﾆそば･大(酢・ﾗｰ油)
+    sub_items:
+      - 牛丼 大
+      - ﾐﾆｿﾊﾞ(酢･ﾗｰ
+  - name: D)ﾐﾆそば･特(酢・ﾗｰ油)
+    sub_items:
+      - 牛丼 特
+      - ﾐﾆｿﾊﾞ(酢･ﾗｰ
+  - name: D)ﾐﾆそば･超特(酢・ﾗｰ油)
+    sub_items:
+      - 牛丼 超特
+      - ﾐﾆｿﾊﾞ(酢･ﾗｰ
+  - name: D)そば(酢･ﾗｰ油)
+    sub_items:
+      - 油そば
+      - 酢･ラー油
+  - name: D)ﾐﾆそば(酢･ﾗｰ油)
+    sub_items:
+      - ミニ油そば
+      - 酢･ラー油
+  - name: D)変更豚汁
+    sub_items:
+      - ※変更豚汁
+  - name: D)牛丼・小
+    sub_items:
+      - 牛丼  小
+  - name: D)牛丼･並
+    sub_items:
+      - 牛丼  並
+  - name: D)牛丼・大
+    sub_items:
+      - 牛丼  大
+  - name: D)牛丼・特
+    sub_items:
+      - 牛丼  特
+  - name: D)牛丼･小(ねぎ半熟
+    sub_items:
+      - 牛丼　小
+      - ねぎ
+      - 半熟玉子
+  - name: D)牛丼･並(ねぎ半熟
+    sub_items:
+      - 牛丼　並
+      - ねぎ
+      - 半熟玉子
+  - name: D)牛丼･小(チーズ)
+    sub_items:
+      - 牛丼　小
+      - チーズ
+  - name: D)牛丼･並(チーズ)
+    sub_items:
+      - 牛丼　並
+      - チーズ
+  - name: D)牛丼･ｱﾀﾏ(チーズ)
+    sub_items:
+      - 牛丼　ｱﾀﾏ大
+      - チーズ
+  - name: D)牛丼･大(チーズ)
+    sub_items:
+      - 牛丼　大
+      - チーズ
+  - name: D)牛丼･特(チーズ)
+    sub_items:
+      - 牛丼　特
+      - チーズ
+  - name: D)牛丼･超特(チーズ)
+    sub_items:
+      - 牛丼　超特盛
+      - チーズ
+  - name: D)牛丼･小(キムチ)
+    sub_items:
+      - 牛丼　小
+      - キムチ
+  - name: D)牛丼･並(キムチ)
+    sub_items:
+      - 牛丼　並
+      - キムチ
+  - name: D)牛丼･ｱﾀﾏ(キムチ)
+    sub_items:
+      - 牛丼　ｱﾀﾏ大
+      - キムチ
+  - name: D)牛丼･大(キムチ)
+    sub_items:
+      - 牛丼　大
+      - キムチ
+  - name: D)牛丼･特(キムチ)
+    sub_items:
+      - 牛丼　特
+      - キムチ
+  - name: D)牛丼･超特(キムチ)
+    sub_items:
+      - 牛丼　超特盛
+      - キムチ
+  - name: D)豚丼･小
+    sub_items:
+      - 豚丼 小盛
+  - name: D)豚丼･並
+    sub_items:
+      - 豚丼 並盛
+  - name: D)豚丼･アタマ
+    sub_items:
+      - 豚丼 ｱﾀﾏ大盛
+  - name: D)豚丼･大
+    sub_items:
+      - 豚丼 大盛
+  - name: D)豚丼･特
+    sub_items:
+      - 豚丼 特盛
+  - name: D)豚丼･超特
+    sub_items:
+      - 豚丼 超特盛
+  - name: D)鰻重･2枚盛
+    sub_items:
+      - 鰻重･２枚盛
+  - name: D)鰻サラ
+    sub_items:
+      - 鰻皿
+  - name: D)鰻さら･2枚盛
+    sub_items:
+      - 鰻皿･２枚盛
+  - name: D)鰻さら･3枚盛
+    sub_items:
+      - 鰻皿･３枚盛
+  - name: D)から揚丼･アタマ
+    sub_items:
+      - 唐揚げ丼 頭
+  - name: D）から揚げ３個
+    sub_items:
+      - 唐揚げ３個
+  - name: D）から揚げ６個
+    sub_items:
+      - 唐揚げ６個
+  - name: D）から揚げ９個
+    sub_items:
+      - 唐揚げ９個
+  - name: D)豚ﾈｷﾞ塩丼小
+    sub_items:
+      - ねぎ塩豚丼小
+  - name: D)豚ﾈｷﾞ塩丼並
+    sub_items:
+      - ねぎ塩豚丼並
+  - name: D)豚ﾈｷﾞ塩丼頭の大盛
+    sub_items:
+      - ねぎ塩豚丼頭
+  - name: D)豚ﾈｷﾞ塩丼大
+    sub_items:
+      - ねぎ塩豚丼大
+  - name: D)豚ﾈｷﾞ塩丼特
+    sub_items:
+      - ねぎ塩豚丼特
+  - name: D)豚ﾈｷﾞ塩丼超特盛
+    sub_items:
+      - ねぎ塩豚丼超
+  - name: D)唐揚･並(ﾈｷﾞ塩)
+    sub_items:
+      - ねぎ塩唐揚並
+  - name: D)唐揚･ｱﾀﾏ(ﾈｷﾞ塩)
+    sub_items:
+      - ねぎ塩唐揚頭
+  - name: D)唐揚･大(ﾈｷﾞ塩)
+    sub_items:
+      - ねぎ塩唐揚大
+  - name: D)唐揚･特(ﾈｷﾞ塩)
+    sub_items:
+      - ねぎ塩唐揚特
+  - name: D)変更半熟
+    sub_items:
+      - 変更半熟玉子
+  - name: 少なめ
+    sub_items:
+      - ご飯少なめ
+  - name: 牛丼油そばセット
+    sub_items:
+      - 油そば
+      - 酢･ラー油
+  - name: 牛丼ミニ油そばセット
+    sub_items:
+      - ミニ油そば
+      - 酢･ラー油
+  - name: 牛丼・油そば・ｷﾑﾁｾｯﾄ
+    sub_items:
+      - 油そば
+      - 酢･ラー油
+  - name: 牛丼・油そば・ﾈｷﾞﾗｰ油S
+    sub_items:
+      - 油そば
+      - 酢･ラー油
+  - name: 牛丼汁なし担々麺ｾｯﾄ
+    sub_items:
+      - 汁なし担々麺
+  - name: 牛丼ﾐﾆ汁なし担々麺ｾｯﾄ
+    sub_items:
+      - ミニ汁なし担々麺
+  - name: 牛丼 並
+    sub_items:
+      - 牛丼　並
+  - name: 納豆
+    sub_items:
+      - 納豆
+  - name: タコライス並盛
+    sub_items:
+      - ﾀｺﾗｲｽ･並盛
+  - name: ビフタコ
+    sub_items:
+      - ビフタコ
+  - name: ご飯大盛
+    sub_items:
+      - ご飯大盛
+  - name: から揚げ１個
+    sub_items:
+      - 唐揚げ
+  - name: そば･並+ｷﾑﾁ(酢・ﾗｰ)
+    sub_items:
+      - 牛丼　並
+      - キムチ
+      - 油そば
+      - 酢･ラー油
+  - name: そば･ｱﾀﾏ+ｷﾑﾁ(酢・ﾗｰ)
+    sub_items:
+      - 牛丼　アタマ
+      - キムチ
+      - 油そば
+      - 酢･ラー油
+  - name: そば･大+ｷﾑﾁ(酢・ﾗｰ)
+    sub_items:
+      - 牛丼　大
+      - キムチ
+      - 油そば
+      - 酢･ラー油
+  - name: そば･特+ｷﾑﾁ(酢・ﾗｰ)
+    sub_items:
+      - 牛丼　特
+      - キムチ
+      - 油そば
+      - 酢･ラー油
+  - name: そば･超特+ｷﾑﾁ(酢・ﾗｰ)
+    sub_items:
+      - 牛丼　超特
+      - キムチ
+      - 油そば
+      - 酢･ラー油
+  - name: そば･小+ｷﾑﾁ(酢・ﾗｰ)
+    sub_items:
+      - 牛丼　小
+      - キムチ
+      - 油そば
+      - 酢･ラー油
+  - name: そば･並+ﾈｷﾞﾗｰ(酢・ﾗｰ)
+    sub_items:
+      - 牛丼　並
+      - ねぎラー油
+      - 油そば
+      - 酢･ラー油
+  - name: そば･ｱﾀﾏ+ﾈｷﾞﾗｰ(酢・ﾗｰ)
+    sub_items:
+      - 牛丼　アタマ
+      - ねぎラー油
+      - 油そば
+      - 酢･ラー油
+  - name: そば･大+ﾈｷﾞﾗｰ(酢・ﾗｰ)
+    sub_items:
+      - 牛丼　大
+      - ねぎラー油
+      - 油そば
+      - 酢･ラー油
+  - name: そば･特+ﾈｷﾞﾗｰ(酢・ﾗｰ)
+    sub_items:
+      - 牛丼　特
+      - ねぎラー油
+      - 油そば
+      - 酢･ラー油
+  - name: そば･超特+ﾈｷﾞﾗｰ(酢・ﾗｰ)
+    sub_items:
+      - 牛丼　超特
+      - ねぎラー油
+      - 油そば
+      - 酢･ラー油
+  - name: そば･小+ﾈｷﾞﾗｰ(酢・ﾗｰ)
+    sub_items:
+      - 牛丼　小
+      - ねぎラー油
+      - 油そば
+      - 酢･ラー油
+  - name: 牛丼サラダみそ汁ｾｯﾄ
+    sub_items:
+      - サラダ
+      - みそ汁
+  - name: 牛丼お新香みそ汁ｾｯﾄ
+    sub_items:
+      - お新香
+      - みそ汁
+  - name: 牛丼キムチみそ汁ｾｯﾄ
+    sub_items:
+      - キムチ
+      - みそ汁
+  - name: 牛丼唐揚みそ汁ｾｯﾄ
+    sub_items:
+      - から揚げ
+      - みそ汁
+  - name: 牛丼ｻﾗﾀﾞとん汁ｾｯﾄ
+    sub_items:
+      - サラダ
+      - 豚汁
+  - name: 牛丼お新香とん汁ｾｯﾄ
+    sub_items:
+      - お新香
+      - 豚汁
+  - name: 牛丼ｷﾑﾁとん汁ｾｯﾄ
+    sub_items:
+      - キムチ
+      - 豚汁
+  - name: 牛丼唐揚とん汁ｾｯﾄ
+    sub_items:
+      - から揚げ
+      - 豚汁
+  - name: とん汁
+    sub_items:
+      - 豚汁
+  - name: ジンギスカン定食
+    sub_items:
+      - ｼﾞﾝｷﾞｽｶﾝ定食
+      - ご飯
+      - たれ
+  - name: 黒毛和牛重
+    sub_items:
+      - 黒毛和牛重
+  - name: '*ｻﾗﾀﾞ抜き'
+    sub_items:
+      - サラダ抜き
+  - name: 玉子(持帰り)
+    sub_items:
+      - 玉子
+  - name: 半熟玉子(持帰り)
+    sub_items:
+      - 半熟玉子
+  - name: お新香(持帰り)
+    sub_items:
+      - お新香
+  - name: ねぎラー油(持帰り)
+    sub_items:
+      - ねぎラー油
+  - name: TPオム玉子(持帰り)
+    sub_items:
+      - TPオム玉子
+  - name: 麺
+    sub_items:
+      - 麺
+  - name: 麦ご飯
+    sub_items:
+      - 麦ごはん
+  - name: 小盛
+    sub_items:
+      - 牛丼　小
+  - name: ☆)ミニサラダ
+    sub_items:
+      - ミニサラダ
+  - name: ☆)みそ汁
+    sub_items:
+      - みそ汁
+  - name: ☆)とん汁
+    sub_items:
+      - 豚汁
+  - name: ☆)あさり汁
+    sub_items:
+      - あさり汁
+  - name: ご飯軽め
+    sub_items:
+      - ご飯軽め
+  - name: ネギぬき
+    sub_items:
+      - ねぎぬき
+  - name: ご飯増量
+    sub_items:
+      - ご飯増量
+  - name: チーズ
+    sub_items:
+      - チーズ
+  - name: D)牛丼･特(ﾈｷﾞﾗｰ)
+    sub_items:
+      - 牛丼　特
+      - ねぎラー油
+  - name: D)牛丼･特(肉味噌ﾈｷﾞ)
+    sub_items:
+      - 牛丼　特
+      - TP肉味噌
+  - name: 鍋膳･牛すき２倍
+    sub_items:
+      - 牛すき鍋膳 肉２倍
+      - 玉子
+  - name: 肉豆腐丼･並
+    sub_items:
+      - 肉豆腐丼並盛
+  - name: 肉豆腐丼･大
+    sub_items:
+      - 肉豆腐丼大盛
+  - name: ミニ牛丼S(ｵﾓﾁｬ
+    sub_items:
+      - ﾐﾆ牛丼ｾｯﾄ
+      - ﾐﾆ牛丼ｾｯﾄ
+  - name: ミニカレーS(ｵﾓﾁｬ
+    sub_items:
+      - ﾐﾆカレーｾｯﾄ
+      - ﾐﾆカレーｾｯﾄ
+  - name: 単)牛すき
+    sub_items:
+      - 単)牛すき
+      - 玉子
+  - name: D)単)牛すき
+    sub_items:
+      - 単)牛すき
+      - 玉子
+  - name: D)肉２倍盛
+    sub_items:
+      - 肉2倍盛
+  - name: D)肉豆腐丼･並
+    sub_items:
+      - 肉豆腐丼並盛
+  - name: D)肉豆腐丼･大
+    sub_items:
+      - 肉豆腐丼大盛
+  - name: D)豚角煮定食
+    sub_items:
+      - 豚角煮定食
+      - ご飯
+  - name: D)豚角煮定食(牛小鉢)
+    sub_items:
+      - 豚角煮定食
+      - ご飯
+      - 牛小鉢
+  - name: ｵﾑ･牛黒ｶﾚｰ(肉ﾀﾞｸ)
+    sub_items:
+      - 肉だく牛オム黒カレー
+      - オム玉子
+  - name: オム･黒ｶﾚｰ
+    sub_items:
+      - オム黒カレー
+      - オム玉子
+  - name: 牛おろし丼
+    sub_items:
+      - 牛おろし丼
+      - たれ
+  - name: 和風ドレッング
+    sub_items:
+      - 和風ドレッング
+  - name: ごまドレッシング
+    sub_items:
+      - ごまドレッシング
+  - name: ニンニクマシマシたれ(持帰り
+    sub_items:
+      - ニンニクマシマシたれ
+  - name: マヨネーズ
+    sub_items:
+      - マヨネーズ
+  - name: とん汁に変更
+    sub_items:
+      - ※変更豚汁
+  - name: ポテトサラダ みそ汁セット
+    sub_items:
+      - ポテトサラダ
+      - みそ汁
+  - name: 牛丼･超特
+    sub_items:
+      - 牛丼 超特盛
+  - name: 牛丼･超特
+    sub_items:
+      - 牛丼　超特
+      - 酢･ラー油
+  - name: 牛丼･アタマ
+    sub_items:
+      - 牛丼　ｱﾀﾏ大
+  - name: 牛丼･アタマ
+    sub_items:
+      - 牛丼　アタマ
+      - 酢･ラー油
+  - name: 牛丼･小(ねぎ玉)
+    sub_items:
+      - 牛丼 小盛
+      - ねぎ
+      - 玉子
+  - name: 牛丼･小(ねぎ玉)
+    sub_items:
+      - 牛丼　小
+      - ねぎ
+      - 酢･ラー油
+      - 玉子
+  - name: 牛丼･並(ねぎ玉)
+    sub_items:
+      - 牛丼 並盛
+      - ねぎ
+      - 玉子
+  - name: 牛丼･並(ねぎ玉)
+    sub_items:
+      - 牛丼　並
+      - ねぎ
+      - 酢･ラー油
+      - 玉子
+  - name: 牛丼･アタマ(ねぎ玉)
+    sub_items:
+      - 牛丼 ｱﾀﾏ大
+      - ねぎ
+      - 玉子
+  - name: 牛丼･アタマ(ねぎ玉)
+    sub_items:
+      - 牛丼　アタマ
+      - ねぎ
+      - 酢･ラー油
+      - 玉子
+  - name: 牛丼･大(ねぎ玉)
+    sub_items:
+      - 牛丼 大盛
+      - ねぎ
+      - 玉子
+  - name: 牛丼･大(ねぎ玉)
+    sub_items:
+      - 牛丼　大
+      - ねぎ
+      - 酢･ラー油
+      - 玉子
+  - name: 牛丼･特(ねぎ玉)
+    sub_items:
+      - 牛丼 特盛
+      - ねぎ
+      - 玉子
+  - name: 牛丼･特(ねぎ玉)
+    sub_items:
+      - 牛丼　特
+      - ねぎ
+      - 酢･ラー油
+      - 玉子
+  - name: 牛丼･超特(ねぎ玉)
+    sub_items:
+      - 牛丼 超特盛
+      - ねぎ
+      - 玉子
+  - name: 牛丼･超特(ねぎ玉)
+    sub_items:
+      - 牛丼　超特
+      - ねぎ
+      - 酢･ラー油
+      - 玉子
+  - name: 牛丼･小(ねぎ半熟)
+    sub_items:
+      - 牛丼 小盛
+      - ねぎ
+      - 半熟玉子
+  - name: 牛丼･小(ねぎ半熟)
+    sub_items:
+      - 牛丼　小
+      - ねぎ
+      - 半熟玉子
+  - name: 牛丼･並(ねぎ半熟)
+    sub_items:
+      - 牛丼 並盛
+      - ねぎ
+      - 半熟玉子
+  - name: 牛丼･並(ねぎ半熟)
+    sub_items:
+      - 牛丼　並
+      - ねぎ
+      - 半熟玉子
+  - name: 牛丼･ｱﾀﾏ(ねぎ半熟)
+    sub_items:
+      - 牛丼 ｱﾀﾏ大
+      - ねぎ
+      - 半熟玉子
+  - name: 牛丼･ｱﾀﾏ(ねぎ半熟)
+    sub_items:
+      - 牛丼　アタマ
+      - ねぎ
+      - 半熟玉子
+  - name: 牛丼･大(ねぎ半熟)
+    sub_items:
+      - 牛丼 大盛
+      - ねぎ
+      - 半熟玉子
+  - name: 牛丼･大(ねぎ半熟)
+    sub_items:
+      - 牛丼　大
+      - ねぎ
+      - 半熟玉子
+  - name: 牛丼･特(ねぎ半熟)
+    sub_items:
+      - 牛丼 特盛
+      - ねぎ
+      - 半熟玉子
+  - name: 牛丼･特(ねぎ半熟)
+    sub_items:
+      - 牛丼　特
+      - ねぎ
+      - 半熟玉子
+  - name: 牛丼･超特(ねぎ半熟)
+    sub_items:
+      - 牛丼 超特盛
+      - ねぎ
+      - 半熟玉子
+  - name: 牛丼･超特(ねぎ半熟)
+    sub_items:
+      - 牛丼　超特
+      - ねぎ
+      - 半熟玉子
+  - name: 牛丼･小(ﾎﾟﾝ酢)
+    sub_items:
+      - おろしポン酢牛丼 小
+      - おろしポン酢
+      - ご飯
+  - name: 牛丼･小(ﾎﾟﾝ酢)
+    sub_items:
+      - おろしポン酢牛丼･小盛
+      - おろしポン酢
+  - name: 牛丼･並(ﾎﾟﾝ酢)
+    sub_items:
+      - おろしポン酢牛丼 並
+      - おろしポン酢
+      - ご飯
+  - name: 牛丼･並(ﾎﾟﾝ酢)
+    sub_items:
+      - おろしポン酢牛丼･並盛
+      - おろしポン酢
+  - name: 牛丼･ｱﾀﾏ(ﾎﾟﾝ酢)
+    sub_items:
+      - おろしポン酢牛丼 頭
+      - おろしポン酢
+      - ご飯
+  - name: 牛丼･ｱﾀﾏ(ﾎﾟﾝ酢)
+    sub_items:
+      - おろしポン酢牛丼･ｱﾀﾏ
+      - おろしポン酢
+  - name: 牛丼･大(ﾎﾟﾝ酢)
+    sub_items:
+      - おろしポン酢牛丼 大
+      - おろしポン酢
+      - ご飯
+  - name: 牛丼･大(ﾎﾟﾝ酢)
+    sub_items:
+      - おろしポン酢牛丼･大盛
+      - おろしポン酢
+  - name: 牛丼･特(ﾎﾟﾝ酢)
+    sub_items:
+      - おろしポン酢牛丼 特
+      - おろしポン酢
+      - ご飯
+  - name: 牛丼･特(ﾎﾟﾝ酢)
+    sub_items:
+      - おろしポン酢牛丼･特盛
+      - おろしポン酢
+  - name: 牛丼･超特(ﾎﾟﾝ酢)
+    sub_items:
+      - おろしポン酢牛丼 超特
+      - おろしポン酢
+      - ご飯
+  - name: 牛丼･超特(ﾎﾟﾝ酢)
+    sub_items:
+      - おろしポン酢牛丼･超特盛
+      - おろしポン酢
+  - name: 牛丼･小(ねぎだく)
+    sub_items:
+      - 牛丼 小盛
+      - TPねぎだく
+  - name: 牛丼･小(ねぎだく)
+    sub_items:
+      - 牛丼　小
+      - TPねぎだく
+  - name: 牛丼･並(ねぎだく)
+    sub_items:
+      - 牛丼 並盛
+      - TPねぎだく
+  - name: 牛丼･並(ねぎだく)
+    sub_items:
+      - 牛丼　並
+      - TPねぎだく
+  - name: 牛丼･ｱﾀﾏ(ねぎだく)
+    sub_items:
+      - 牛丼 ｱﾀﾏ大
+      - TPねぎだく
+  - name: 牛丼･ｱﾀﾏ(ねぎだく)
+    sub_items:
+      - 牛丼　アタマ
+      - TPねぎだく
+  - name: 牛丼･特(ねぎだく)
+    sub_items:
+      - 牛丼 特盛
+      - TPねぎだく
+  - name: 牛丼･特(ねぎだく)
+    sub_items:
+      - 牛丼　特
+      - TPねぎだく
+  - name: 牛丼･超特(ねぎだく)
+    sub_items:
+      - 牛丼 超特盛
+      - TPねぎだく
+  - name: 牛丼･超特(ねぎだく)
+    sub_items:
+      - 牛丼　超特
+      - TPねぎだく
+  - name: 牛丼･小(肉味噌ﾈｷﾞ)
+    sub_items:
+      - 牛丼　小
+      - TP肉味噌
+  - name: 牛丼･小(肉味噌ﾈｷﾞ)
+    sub_items:
+      - 肉味噌ねぎ牛丼　小
+  - name: 牛丼･並(肉味噌ﾈｷﾞ)
+    sub_items:
+      - 牛丼　並
+      - TP肉味噌
+  - name: 牛丼･並(肉味噌ﾈｷﾞ)
+    sub_items:
+      - 肉味噌ねぎ牛丼　並
+  - name: 牛丼･ｱﾀﾏ(肉味噌ﾈｷﾞ)
+    sub_items:
+      - 牛丼　アタマ
+      - TP肉味噌
+  - name: 牛丼･ｱﾀﾏ(肉味噌ﾈｷﾞ)
+    sub_items:
+      - 肉味噌ねぎ牛丼 アタマ
+  - name: 牛丼･大(肉味噌ﾈｷﾞ)
+    sub_items:
+      - 牛丼　大
+      - TP肉味噌
+  - name: 牛丼･大(肉味噌ﾈｷﾞ)
+    sub_items:
+      - 肉味噌ねぎ牛丼　大
+  - name: 牛丼･特(肉味噌ﾈｷﾞ)
+    sub_items:
+      - 牛丼　特
+      - TP肉味噌
+  - name: 牛丼･特(肉味噌ﾈｷﾞ)
+    sub_items:
+      - 肉味噌ねぎ牛丼　特
+  - name: 牛丼･超特(肉味噌ﾈｷﾞ)
+    sub_items:
+      - 牛丼　超特
+      - TP肉味噌
+  - name: 牛丼･超特(肉味噌ﾈｷﾞ)
+    sub_items:
+      - 肉味噌ねぎ牛丼　超特盛
+  - name: 牛丼･小(明高ﾏﾖ)
+    sub_items:
+      - 明太高菜マヨ牛丼･小盛
+      - 明太高菜マヨ
+  - name: 牛丼･小(明高ﾏﾖ)
+    sub_items:
+      - 明太高菜マヨ牛丼 小
+      - 明太高菜マヨ
+  - name: 牛丼･並(明高ﾏﾖ)
+    sub_items:
+      - 明太高菜マヨ牛丼･並盛
+      - 明太高菜マヨ
+  - name: 牛丼･並(明高ﾏﾖ)
+    sub_items:
+      - 明太高菜マヨ牛丼 並
+      - 明太高菜マヨ
+  - name: 牛丼･ｱﾀﾏ(明高ﾏﾖ)
+    sub_items:
+      - 明太高菜マヨ牛丼･アタマ
+      - 明太高菜マヨ
+  - name: 牛丼･ｱﾀﾏ(明高ﾏﾖ)
+    sub_items:
+      - 明太高菜マヨ牛丼 頭
+      - 明太高菜マヨ
+  - name: 牛丼･大(明高ﾏﾖ)
+    sub_items:
+      - 明太高菜マヨ牛丼･大盛
+      - 明太高菜マヨ
+  - name: 牛丼･大(明高ﾏﾖ)
+    sub_items:
+      - 明太高菜マヨ牛丼 大
+      - 明太高菜マヨ
+  - name: 牛丼･特(明高ﾏﾖ)
+    sub_items:
+      - 明太高菜マヨ牛丼･特盛
+      - 明太高菜マヨ
+  - name: 牛丼･特(明高ﾏﾖ)
+    sub_items:
+      - 明太高菜マヨ牛丼 特
+      - 明太高菜マヨ
+  - name: 牛丼･超特(明高ﾏﾖ)
+    sub_items:
+      - 明太高菜マヨ牛丼･超特盛
+      - 明太高菜マヨ
+  - name: 牛丼･超特(明高ﾏﾖ)
+    sub_items:
+      - 明太高菜マヨ牛丼 超特
+      - 明太高菜マヨ
+  - name: 牛丼･小(ﾈｷﾞﾗｰ)
+    sub_items:
+      - 牛丼　小
+      - ねぎラー油
+  - name: 牛丼･小(ﾈｷﾞﾗｰ)
+    sub_items:
+      - 牛丼 小盛
+      - ねぎラー油
+  - name: 牛丼･並(ﾈｷﾞﾗｰ)
+    sub_items:
+      - 牛丼　並
+      - ねぎラー油
+  - name: 牛丼･並(ﾈｷﾞﾗｰ)
+    sub_items:
+      - 牛丼 並盛
+      - ねぎラー油
+  - name: 牛丼･アタマ(ﾈｷﾞﾗｰ)
+    sub_items:
+      - 牛丼　アタマ
+      - ねぎラー油
+  - name: 牛丼･アタマ(ﾈｷﾞﾗｰ)
+    sub_items:
+      - 牛丼 ｱﾀﾏ大
+      - ねぎラー油
+  - name: 牛丼･大(ﾈｷﾞﾗｰ)
+    sub_items:
+      - 牛丼　大
+      - ねぎラー油
+  - name: 牛丼･大(ﾈｷﾞﾗｰ)
+    sub_items:
+      - 牛丼 大盛
+      - ねぎラー油
+  - name: 牛丼･特(ﾈｷﾞﾗｰ)
+    sub_items:
+      - 牛丼　特
+      - ねぎラー油
+  - name: 牛丼･特(ﾈｷﾞﾗｰ)
+    sub_items:
+      - 牛丼 特盛
+      - ねぎラー油
+  - name: 牛丼･超特(ﾈｷﾞﾗｰ)
+    sub_items:
+      - 牛丼　超特
+      - ねぎラー油
+  - name: 牛丼･超特(ﾈｷﾞﾗｰ)
+    sub_items:
+      - 牛丼 超特盛
+      - ねぎラー油
+  - name: 牛丼･小(肉だく)
+    sub_items:
+      - 牛丼　小
+      - TP肉だく
+  - name: 牛丼･小(肉だく)
+    sub_items:
+      - 牛丼 小盛
+      - TP肉だく
+  - name: 牛丼･並(肉だく)
+    sub_items:
+      - 牛丼　並
+      - TP肉だく
+  - name: 牛丼･並(肉だく)
+    sub_items:
+      - 牛丼 並盛
+      - TP肉だく
+  - name: 牛丼･アタマ(肉だく)
+    sub_items:
+      - 牛丼　アタマ
+      - TP肉だく
+  - name: 牛丼･アタマ(肉だく)
+    sub_items:
+      - 牛丼 ｱﾀﾏ大
+      - TP肉だく
+  - name: 牛丼･大(肉だく)
+    sub_items:
+      - 牛丼　大
+      - TP肉だく
+  - name: 牛丼･大(肉だく)
+    sub_items:
+      - 牛丼 大盛
+      - TP肉だく
+  - name: 牛丼･特(肉だく)
+    sub_items:
+      - 牛丼　特
+      - TP肉だく
+  - name: 牛丼･特(肉だく)
+    sub_items:
+      - 牛丼 特盛
+      - TP肉だく
+  - name: 牛丼･超特(肉だく)
+    sub_items:
+      - 牛丼　超特
+      - TP肉だく
+  - name: 牛丼･超特(肉だく)
+    sub_items:
+      - 牛丼 超特盛
+      - TP肉だく
+  - name: 牛丼･小(チーズ)
+    sub_items:
+      - 牛丼　小
+      - チーズ
+  - name: 牛丼･小(チーズ)
+    sub_items:
+      - 牛丼 小盛
+      - チーズ
+  - name: 牛丼･並(チーズ)
+    sub_items:
+      - 牛丼　並
+      - チーズ
+  - name: 牛丼･並(チーズ)
+    sub_items:
+      - 牛丼 並盛
+      - チーズ
+  - name: 牛丼･大(チーズ)
+    sub_items:
+      - 牛丼　大
+      - チーズ
+  - name: 牛丼･大(チーズ)
+    sub_items:
+      - 牛丼 大盛
+      - チーズ
+  - name: 牛丼･大(キムチ)
+    sub_items:
+      - 牛丼　大盛
+      - キムチ
+  - name: 牛丼･大(キムチ)
+    sub_items:
+      - 牛丼　大
+      - キムチ
+  - name: 牛丼･並
+    sub_items:
+      - 牛丼　並
+  - name: 牛丼･並
+    sub_items:
+      - 牛丼　並
+      - 酢･ラー油
+  - name: 牛丼･大
+    sub_items:
+      - 牛丼　大
+  - name: 牛丼･大
+    sub_items:
+      - 牛丼　大
+      - 酢･ラー油
+  - name: 牛丼･特
+    sub_items:
+      - 牛丼　特
+  - name: 牛丼･特
+    sub_items:
+      - 牛丼　特
+      - 酢･ラー油
+  - name: 牛丼･アタマ(チーズ)
+    sub_items:
+      - 牛丼　アタマ
+      - チーズ
+  - name: 牛丼･アタマ(チーズ)
+    sub_items:
+      - 牛丼 ｱﾀﾏ大
+      - チーズ
+  - name: 牛丼･特(チーズ)
+    sub_items:
+      - 牛丼　特
+      - チーズ
+  - name: 牛丼･特(チーズ)
+    sub_items:
+      - 牛丼 特盛
+      - チーズ
+  - name: 牛丼･超特(チーズ)
+    sub_items:
+      - 牛丼　超特
+      - チーズ
+  - name: 牛丼･超特(チーズ)
+    sub_items:
+      - 牛丼 超特盛
+      - チーズ
+  - name: 牛丼･特(キムチ)
+    sub_items:
+      - 牛丼　特盛
+      - キムチ
+  - name: 牛丼･特(キムチ)
+    sub_items:
+      - 牛丼　特
+      - キムチ
+  - name: 担々・牛丼 並
+    sub_items:
+      - 牛丼 並盛
+      - 汁なし担々麺
+  - name: 担々･牛丼 並
+    sub_items:
+      - 牛丼　並
+      - 汁なし担々麺
+  - name: 担々･牛丼 ｱﾀﾏ
+    sub_items:
+      - 牛丼 ｱﾀﾏ大盛
+      - 汁なし担々麺
+  - name: 担々･牛丼 ｱﾀﾏ
+    sub_items:
+      - 牛丼　アタマ
+      - 汁なし担々麺
+  - name: 担々･牛丼 大
+    sub_items:
+      - 牛丼 大盛
+      - 汁なし担々麺
+  - name: 担々･牛丼 大
+    sub_items:
+      - 牛丼　大
+      - 汁なし担々麺
+  - name: 担々･牛丼 特
+    sub_items:
+      - 牛丼 特盛
+      - 汁なし担々麺
+  - name: 担々･牛丼 特
+    sub_items:
+      - 牛丼　特
+      - 汁なし担々麺
+  - name: 担々･牛丼 超特
+    sub_items:
+      - 牛丼 超特盛
+      - 汁なし担々麺
+  - name: 担々･牛丼 超特
+    sub_items:
+      - 牛丼　超特
+      - 汁なし担々麺
+  - name: 担々･牛丼 小
+    sub_items:
+      - 牛丼 小盛
+      - 汁なし担々麺
+  - name: 担々･牛丼 小
+    sub_items:
+      - 牛丼　小
+      - 汁なし担々麺
+  - name: ミニ担々・牛丼 並
+    sub_items:
+      - 牛丼　並
+      - ミニ汁なし担々麺
+  - name: ミニ担々・牛丼 並
+    sub_items:
+      - 牛丼 並盛
+      - ミニ汁なし担々麺
+  - name: ミニ担々･牛丼 ｱﾀﾏ
+    sub_items:
+      - 牛丼　アタマ
+      - ミニ汁なし担々麺
+  - name: ミニ担々･牛丼 ｱﾀﾏ
+    sub_items:
+      - 牛丼 ｱﾀﾏ大盛
+      - ミニ汁なし担々麺
+  - name: ミニ担々･牛丼 大
+    sub_items:
+      - 牛丼　大
+      - ミニ汁なし担々麺
+  - name: ミニ担々･牛丼 大
+    sub_items:
+      - 牛丼 大盛
+      - ミニ汁なし担々麺
+  - name: ミニ担々･牛丼 特
+    sub_items:
+      - 牛丼　特
+      - ミニ汁なし担々麺
+  - name: ミニ担々･牛丼 特
+    sub_items:
+      - 牛丼 特盛
+      - ミニ汁なし担々麺
+  - name: ミニ担々･牛丼 超特
+    sub_items:
+      - 牛丼　超特
+      - ミニ汁なし担々麺
+  - name: ミニ担々･牛丼 超特
+    sub_items:
+      - 牛丼 超特盛
+      - ミニ汁なし担々麺
+  - name: ミニ担々･牛丼 小
+    sub_items:
+      - 牛丼　小
+      - ミニ汁なし担々麺
+  - name: ミニ担々･牛丼 小
+    sub_items:
+      - 牛丼 小盛
+      - ミニ汁なし担々麺
+  - name: 超特盛
+    sub_items:
+      - 牛丼 超特盛
+  - name: 超特盛
+    sub_items:
+      - 牛丼　超特
+  - name: ＴＰねぎだく
+    sub_items:
+      - TPねぎだく
+  - name: ＴＰねぎだく
+    sub_items:
+      - ねぎだく
+  - name: ミニ牛丼ｾｯﾄ
+    sub_items:
+      - ﾐﾆ牛丼ｾｯﾄ
+      - ﾐﾆ牛丼ｾｯﾄ
+  - name: ミニ牛丼ｾｯﾄ
+    sub_items:
+      - ﾐﾆ牛丼ｾｯﾄ
+      - ご飯
+  - name: ごはん大盛
+    sub_items:
+      - ご飯　大
+  - name: ごはん大盛
+    sub_items:
+      - ご飯 大盛
+  - name: しじみ汁
+    sub_items:
+      - しじみ汁
+  - name: しじみ汁
+    sub_items:
+      - しじみ
+  - name: ｽﾀﾐﾅ超特盛丼
+    sub_items:
+      - ｽﾀﾐﾅ超特盛
+      - 追い飯
+      - ﾆﾝﾆｸﾏｼﾏｼだれ
+      - 玉子
+  - name: ｽﾀﾐﾅ超特盛丼
+    sub_items:
+      - ｽﾀﾐﾅ超特盛丼
+      - 追い飯
+      - ﾆﾝﾆｸﾏｼﾏｼだれ
+      - 玉子
+  - name: ★肉２倍盛
+    sub_items:
+      - 肉２倍盛
+  - name: 単)タルタル
+    sub_items:
+      - 単)タルタル
+  - name: 単)タルタル
+    sub_items:
+      - タルタル
+  - name: から牛･ｱﾀﾏ
+    sub_items:
+      - から牛　頭
+  - name: から牛･アタマ
+    sub_items:
+      - から牛 ｱﾀﾏ
+  - name: から揚げ３個
+    sub_items:
+      - から揚げ３個
+  - name: から揚げ３個
+    sub_items:
+      - 唐揚げ３個
+  - name: から揚げ６個
+    sub_items:
+      - から揚げ６個
+  - name: から揚げ６個
+    sub_items:
+      - 唐揚げ６個
+  - name: から揚げ９個
+    sub_items:
+      - から揚げ９個
+  - name: から揚げ９個
+    sub_items:
+      - 唐揚げ９個
+  - name: 牛丼･小
+    sub_items:
+      - 牛丼　小盛
+  - name: 牛丼･小
+    sub_items:
+      - 牛丼　小
+  - name: 牛丼･小
+    sub_items:
+      - 牛丼　小
+      - 酢･ラー油
+  - name: D）★肉２倍盛
+    sub_items:
+      - 牛皿肉２倍盛
+  - name: D）★肉２倍盛
+    sub_items:
+      - 肉２倍盛
+  - name: D)ＴＰタルタル
+    sub_items:
+      - ＴＰタルタル
+  - name: D)ＴＰタルタル
+    sub_items:
+      - TPタルタル
+      - タルタル
+  - name: 並盛
+    sub_items:
+      - 牛丼 並盛
+  - name: 並盛
+    sub_items:
+      - 牛丼　並
+  - name: D)焼肉丼･並
+    sub_items:
+      - 牛焼肉丼 並
+  - name: D)焼肉丼･並
+    sub_items:
+      - 焼肉丼 並
+  - name: D)焼肉丼･大
+    sub_items:
+      - 牛焼肉丼 大
+  - name: D)焼肉丼･大
+    sub_items:
+      - 焼肉丼 大
+  - name: D)焼肉さら
+    sub_items:
+      - 牛焼肉皿
+  - name: D)焼肉さら
+    sub_items:
+      - 焼肉皿
+  - name: D)豚さら･並
+    sub_items:
+      - 豚皿 並盛
+  - name: D)豚さら･並
+    sub_items:
+      - 豚皿　並
+  - name: D)豚さら･大
+    sub_items:
+      - 豚皿 大盛
+  - name: D)豚さら･大
+    sub_items:
+      - 豚皿　大
+  - name: D)豚さら･特
+    sub_items:
+      - 豚皿 特盛
+  - name: D)豚さら･特
+    sub_items:
+      - 豚皿　特
+  - name: つゆだく
+    sub_items:
+      - つゆだく
+  - name: つゆだく
+    sub_items:
+      - 牛丼並ﾂﾕﾀﾞｸ
+  - name: つゆぬき
+    sub_items:
+      - つゆぬき
+  - name: つゆぬき
+    sub_items:
+      - 牛丼並ﾂﾕﾇｷ
+  - name: 麦ご飯大盛
+    sub_items:
+      - 麦ご飯増量
+  - name: 麦ご飯大盛
+    sub_items:
+      - 麦ご飯大盛
+  - name: 大盛
+    sub_items:
+      - 牛丼 大盛
+  - name: 大盛
+    sub_items:
+      - 牛丼　大
+  - name: 特盛
+    sub_items:
+      - 牛丼 特盛
+  - name: 特盛
+    sub_items:
+      - 牛丼　特
+  - name: 牛さら･並
+    sub_items:
+      - 牛皿　並盛
+  - name: 牛さら･並
+    sub_items:
+      - 牛皿　並
+  - name: 牛さら･大
+    sub_items:
+      - 牛皿　大盛
+  - name: 牛さら･大
+    sub_items:
+      - 牛皿　大
+  - name: 牛さら･特
+    sub_items:
+      - 牛皿　特盛
+  - name: 牛さら･特
+    sub_items:
+      - 牛皿　特
+  - name: ｶﾙﾋﾞねぎ塩丼･アタマ
+    sub_items:
+      - 塩ｶﾙﾋﾞ丼 頭
+  - name: ｶﾙﾋﾞねぎ塩丼･アタマ
+    sub_items:
+      - 塩ｶﾙﾋﾞ丼 ｱﾀﾏ
+  - name: 変更ご飯増量(無料
+    sub_items:
+      - ご飯大盛
+  - name: 変更ご飯増量(無料
+    sub_items:
+      - ご飯大盛り
+  - name: W牛ｻﾗ･ﾈｷﾞ塩ｶﾙﾋﾞ弁当
+    sub_items:
+      - W牛皿･塩ｶﾙﾋﾞ弁当
+      - ご飯
+  - name: W牛ｻﾗ･ﾈｷﾞ塩ｶﾙﾋﾞ弁当
+    sub_items:
+      - W牛皿･ﾈｷﾞ塩ｶﾙﾋﾞ弁当
+      - ご飯
+  - name: 牛ハヤシ(肉ﾀﾞｸ)
+    sub_items:
+      - 肉だく牛ハヤシライス
+  - name: D)牛丼・ｱﾀﾏ
+    sub_items:
+      - 牛丼  ｱﾀﾏ大
+  - name: D)牛丼・ｱﾀﾏ
+    sub_items:
+      - 牛丼　頭
+  - name: 並
+    sub_items:
+      - 牛丼　並
+  - name: 並
+    sub_items:
+      - 牛丼 並盛
+  - name: 並
+    sub_items:
+      - ﾁｰｽﾞ牛丼 並盛
+  - name: 並
+    sub_items:
+      - 牛丼 並盛
+      - ねぎ
+  - name: 並
+    sub_items:
+      - 明太高菜マヨ牛丼 並盛
+      - 明太高菜マヨ
+  - name: 小
+    sub_items:
+      - 牛丼 小盛
+  - name: 小
+    sub_items:
+      - ﾁｰｽﾞ牛丼 小盛
+  - name: 小
+    sub_items:
+      - 牛丼 小盛
+      - ねぎ
+  - name: 小
+    sub_items:
+      - 明太高菜マヨ牛丼 小盛
+      - 明太高菜マヨ
+  - name: アタマ
+    sub_items:
+      - 牛丼 アタマ
+  - name: アタマ
+    sub_items:
+      - ﾁｰｽﾞ牛丼 ｱﾀﾏ
+  - name: アタマ
+    sub_items:
+      - 牛丼 アタマ
+      - ねぎ
+  - name: アタマ
+    sub_items:
+      - 明太高菜マヨ牛丼 ｱﾀﾏ
+      - 明太高菜マヨ
+  - name: アタマ
+    sub_items:
+      - 牛丼　ｱﾀﾏ大
+  - name: 大
+    sub_items:
+      - 牛丼 大盛
+  - name: 大
+    sub_items:
+      - ﾁｰｽﾞ牛丼 大盛
+  - name: 大
+    sub_items:
+      - 牛丼 大盛
+      - ねぎ
+  - name: 大
+    sub_items:
+      - 明太高菜マヨ牛丼 大盛
+      - 明太高菜マヨ
+  - name: 特
+    sub_items:
+      - 牛丼 特盛
+  - name: 特
+    sub_items:
+      - ﾁｰｽﾞ牛丼 特盛
+  - name: 特
+    sub_items:
+      - 牛丼 特盛
+      - ねぎ
+  - name: 特
+    sub_items:
+      - 明太高菜マヨ牛丼 特盛
+      - 明太高菜マヨ
+  - name: 超特
+    sub_items:
+      - 牛丼 超特盛
+  - name: 超特
+    sub_items:
+      - ﾁｰｽﾞ牛丼 超特盛
+  - name: 超特
+    sub_items:
+      - 牛丼 超特盛
+      - ねぎ
+  - name: 超特
+    sub_items:
+      - 明太高菜マヨ牛丼 超特盛
+      - 明太高菜マヨ
+  - name: 牛丼･大(ねぎだく)
+    sub_items:
+      - 牛丼 大盛
+      - TPねぎだく
+      - 玉子
+  - name: 牛丼･大(ねぎだく)
+    sub_items:
+      - 牛丼 大盛
+      - TPねぎだく
+  - name: 牛丼･大(ねぎだく)
+    sub_items:
+      - 牛丼　大
+      - TPねぎだく
+  - name: 肉２倍盛
+    sub_items:
+      - 肉2倍盛
+  - name: 肉2倍盛
+    sub_items:
+      - 肉2倍盛
+      - 玉子

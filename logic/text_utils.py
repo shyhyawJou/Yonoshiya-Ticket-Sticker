@@ -82,3 +82,88 @@ class FuzzyMatcher:
             return result[0], result[1]
 
         return None
+
+# ----------------------------------------------------------------------------
+# 詞彙受限比對（margin-aware）
+# ----------------------------------------------------------------------------
+# 部署到鈴茂資料時發現：候選清單若是吉野家 1235 筆菜單，而實際票據只會出現
+# images/日文ticket.txt 的 8 個詞，則即使 OCR 文字完全正確，
+#   のり弁当 / 箸 / 醤油 / おしぼり / 紅しょうが -> None（整列被丟棄）
+#   サラダ・味噌汁セ -> 'サラダみそ汁セット' (58.8)   ← 錯配
+#   ドレッシング     -> 'ごまドレッシング'   (85.7)   ← 錯配
+# 也就是 0/8。修正的關鍵是「候選清單必須是該部署真正會出現的詞」，
+# 再加上「第一名與第二名要有足夠差距」才接受，避免相近候選硬配。
+# ----------------------------------------------------------------------------
+
+
+class MatchDecision:
+    """一次詞彙比對的完整結果，保留原始 OCR 文字以便追查。
+
+    accepted 為 False 時 name 仍可能有值（最相近候選），呼叫端應以
+    accepted 判斷是否採用，不要只看 name。
+    """
+
+    __slots__ = ("raw", "normalized", "name", "score", "runner_up", "margin",
+                 "accepted", "reason")
+
+    def __init__(self, raw, normalized, name, score, runner_up, margin,
+                 accepted, reason):
+        self.raw = raw
+        self.normalized = normalized
+        self.name = name
+        self.score = score
+        self.runner_up = runner_up
+        self.margin = margin
+        self.accepted = accepted
+        self.reason = reason
+
+    def __repr__(self):
+        return (f"MatchDecision(raw={self.raw!r}, name={self.name!r}, "
+                f"score={self.score:.1f}, margin={self.margin:.1f}, "
+                f"accepted={self.accepted}, reason={self.reason})")
+
+
+def match_restricted(
+    text: str,
+    candidates: Sequence[str],
+    min_score: float = 62.0,
+    min_margin: float = 8.0,
+    scorer=None,
+    key=None,
+) -> MatchDecision:
+    """在一個「小而封閉」的候選清單中比對，並要求與第二名有足夠差距。
+
+    Args:
+        min_score:  第一名的最低分數。
+        min_margin: 第一名與第二名的最小差距；候選只有一個時不套用。
+        key:        可選的座標轉換函式，套用在 OCR 文字與候選兩側之後才計分
+                    （例如 logic.menu_alias 的折疊，讓 唐揚げ 與 から揚げ
+                    落在同一個點上）。回傳的候選仍是**原始字串**，不是轉換後
+                    的結果 —— 折疊後的字串只能用來比對，不可外流顯示。
+
+    設計理由：token_set_ratio 對「候選是 OCR 文字的超集」過於寬容
+    （'ドレッシング' vs 'ごまドレッシング' 可得 85.7），因此這裡預設改用
+    fuzz.ratio，它會懲罰長度差異。
+    """
+    scorer = scorer or fuzz.ratio
+    norm = normalize_text(text, ignore_space=True)
+    if not norm or not candidates:
+        return MatchDecision(text, norm, None, 0.0, 0.0, 0.0, False, "empty")
+
+    probe = key(norm) if key else norm
+    scored = sorted(
+        ((float(scorer(probe, key(c) if key else c)), c) for c in candidates),
+        key=lambda t: -t[0],
+    )
+    best_score, best_name = scored[0]
+    runner_up = scored[1][0] if len(scored) > 1 else 0.0
+    margin = best_score - runner_up
+
+    if best_score < min_score:
+        return MatchDecision(text, norm, best_name, best_score, runner_up,
+                             margin, False, "below_min_score")
+    if len(scored) > 1 and margin < min_margin:
+        return MatchDecision(text, norm, best_name, best_score, runner_up,
+                             margin, False, "ambiguous_margin")
+    return MatchDecision(text, norm, best_name, best_score, runner_up,
+                         margin, True, "ok")

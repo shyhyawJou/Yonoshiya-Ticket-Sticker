@@ -1,0 +1,7 @@
+shapely
+pyyaml
+aiohttp
+paho-mqtt
+pyclipper
+rapidfuzz
+numpy < 2

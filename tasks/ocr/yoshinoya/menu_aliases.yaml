@@ -1,0 +1,94 @@
+# menu_aliases.yaml —— 吉野家專屬的菜名等價台帳
+#
+# 跟 menus_mapping.yaml 的分工（很重要）：
+#   menus_mapping.yaml  是客戶 xlsx 的「忠實投影」，隨時可以被工具整份重產，
+#                       所以任何人工判斷都不可以寫在裡面 —— 會被下次合併抹掉。
+#   menu_aliases.yaml   是人工判斷累積下來的台帳，由我們維護、不隨 xlsx 重產。
+#
+# 這份檔案是「決策台帳」而不只是設定檔：equivalents 記錄判定為「相同」的，
+# distinct 記錄判定為「不同」的。兩者都要記 —— 只記「相同」的話，被判為
+# 不同的組合每次菜單改版都會再問一次，人力就白花了。
+#
+# 通用日文讀音規則請寫在 ../ja_readings.yaml（跨客戶共用），不要寫在這裡。
+
+# 只在這個品牌成立的讀音/寫法規則。將來若在兩三個客戶都出現，就提升到
+# ../ja_readings.yaml。格式與 readings 相同。
+readings_extra: []
+
+# 人工判定「這些寫法指向同一道菜」。
+# 用 group（而不是 pair）表達，讓傳遞性是明示的，避免 A~B、B~C 分別記錄後
+# 意外推導出 A~C。
+#
+# 只有「fold 折不到、而且不是同一個傳票 name 的組合變體」才需要寫在這裡：
+#   - 折得到的（唐揚げ / から揚げ）交給 ../ja_readings.yaml
+#   - 同一個傳票 name 的多種組合（4切牛ﾀﾝ 的 唐辛子/たれ/無）交給 menus_mapping.yaml
+#     的同名多列 + 程式的多重假設判定，不需要也不應該在這裡宣告成「同一道菜」
+#
+# 範例（確認過再打開）：
+# equivalents:
+#   - group: [牛丼特, 牛丼特盛]
+#     decided_by: chris.fan
+#     decided_at: 2026-09-16
+#     source: xlsx_2026Q3
+#     note: POS 兩種代碼指向同一商品
+#
+# 什麼情況才需要寫在這裡？只有「../ja_readings.yaml 的規則折不到、而且不是
+# 組合差異」的那些。以下 7 組是 2026-09-18 盤點出來、由 chris.fan 判定為同一
+# 道菜的 —— 寫進來之後它們在整份菜單裡就是同一個品項，不再是「變體 + 自動
+# 改名」的權宜處理。
+equivalents:
+  - group: [タルタル, 単)タルタル]          # 「単)」= 單品販售
+    decided_by: chris.fan
+    decided_at: 2026-09-18
+  - group: [ねぎ塩だれ, 単)ねぎ塩]
+    decided_by: chris.fan
+    decided_at: 2026-09-18
+  - group: [ねぎだく, TPねぎだく]           # TP = トッピング（加料）
+    decided_by: chris.fan
+    decided_at: 2026-09-18
+  - group: [スタミナ超特盛, スタミナ超特盛丼]   # 差一個「丼」
+    decided_by: chris.fan
+    decided_at: 2026-09-18
+  - group: [焼肉丼並, 牛焼肉丼並]           # 差一個「牛」
+    decided_by: chris.fan
+    decided_at: 2026-09-18
+  - group: [焼肉丼大, 牛焼肉丼大]
+    decided_by: chris.fan
+    decided_at: 2026-09-18
+  - group: [肉2倍盛, 牛皿肉2倍盛]
+    decided_by: chris.fan
+    decided_at: 2026-09-18
+  - group: [しじみ汁, しじみ]
+    decided_by: chris.fan
+    decided_at: 2026-10-20
+  - group: [つゆだく, 牛丼並ﾂﾕﾀﾞｸ]
+    decided_by: chris.fan
+    decided_at: 2026-10-20
+  - group: [明太高菜マヨ牛丼･アタマ, 明太高菜マヨ牛丼 頭]
+    decided_by: chris.fan
+    decided_at: 2026-10-20
+  - group: [麦ご飯大盛, 麦ご飯増量]
+    decided_by: chris.fan
+    decided_at: 2026-10-20
+  - group: [ご飯大盛, ご飯大盛り]
+    decided_by: chris.fan
+    decided_at: 2026-10-20
+
+# 人工判定「這些寫法不是同一道菜」。寫進來之後就不會再被詢問。
+# 數量軸與份量軸（３個/６個、並/大/特/頭）不需要寫在這裡 —— menu_alias.py
+# 的 guard_signature() 已經有硬性護欄，結構上就不會合併。
+#
+#
+# distinct 有兩個作用：
+#   1. 阻止等價層把兩個寫法折成同一個品項
+#   2. **否決**狀態機的自動推論。menus_mapping.yaml 裡同一個傳票名稱如果對到
+#      多個「只含一個品項」的變體，程式會推論它們是異寫並統一對外的名字；
+#      寫在這裡的配對不受此推論影響（見 tray_state_machine._expand_parsed_items）
+distinct:
+  - pair: [ご飯増量, 鰻ご飯増量]
+    decided_at: 2026-09-18
+    reason: |
+      傳票「ご飯増量」在 menus_mapping.yaml 對到兩個單品變體
+      ['鰻ご飯増量'] 與 ['ご飯増量']，程式會自動推論成異寫並統一改名，
+      但鰻魚飯加量與白飯加量是不同商品，改名會把錯的餐點說成對的。
+
