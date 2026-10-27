@@ -509,6 +509,9 @@ class StreamManager:
                             is_flip=ocr_result["is_flip"],
                             task_bbox=metadata["bbox"],
                             target=metadata.get("target"),
+                            # 除錯總覽(debug_sheet)用：log 的 [OCR#n] 與送 OCR 時的旋轉框
+                            ocr_meta={"seq": (metadata.get("trace") or {}).get("job"),
+                                      "xywhr": metadata.get("xywhr")},
                         )
                         # 傳票的菜單區域下界（吉野家 parser 才有），跟著這份 OCR 結果給 overlay 畫
                         pop_line = getattr(logic.order_parser, "pop_menu_bottom_line", None)
@@ -554,6 +557,7 @@ class StreamManager:
                             "M": M,
                             "M_inv": M_inv,
                             "bbox": task["bbox"],
+                            "xywhr": [float(v) for v in task["xywhr"]],   # 原始影格上的旋轉框（= full_screen 座標）
                             "cls_name": task['cls_name'],
                             # 計時：出現時間、移動重置次數、第幾次讀取；OCR 線程再補上
                             # 送出 / 開始 / 結束時間與各段耗時（utils/perf_stats.py）

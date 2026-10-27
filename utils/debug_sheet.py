@@ -46,7 +46,7 @@ try:  # Pillow 是選用依賴：沒有的話退回 ASCII
 except Exception:  # pragma: no cover - 依環境而定
     _HAS_PIL = False
 
-SHEET_VERSION = "1"
+SHEET_VERSION = "2"   # 2:entries 加 t / ocr_seq / xywhr、events_t、頂層 profile 與 layout
 DEFAULT_FONT_REL = "tasks/ocr/NotoSansJP-Bold.otf"
 
 # ---------------------------------------------------------------------------
@@ -406,6 +406,10 @@ class SheetRenderer:
         self.max_pages = max(1, int(max_pages))
         self._rev = ctx.sticker_to_tickets()
         self._ticket_seq: Dict[int, int] = {}      # id(傳票證據) -> 第幾筆傳票（跨頁編號一致）
+        self._seg_idx: Dict[int, int] = {}         # id(格子) -> 圖上的 #編號（寫 layout 的 prev / next 用）
+        # 最近一頁的版面座標（輸出 jpg 的像素）：_render_page 每頁重設，_write_one 每拿到一頁就收走。
+        # renderer 只在背景渲染執行緒使用，不需要鎖；iter_pages / render_pages 的回傳型別不變。
+        self.last_layout: Dict[str, Any] = {}
 
     # ------------------------------------------------------------------
     def plan(self, entries: List[Evidence]) -> Tuple[List[dict], dict]:
@@ -455,6 +459,7 @@ class SheetRenderer:
         """
         pages, info = self.plan(entries)
         self._ticket_seq = {id(e): i + 1 for i, e in enumerate(info["all_tickets"])}
+        self._seg_idx = {id(g): pg["offset"] + i + 1 for pg in pages for i, g in enumerate(pg["segs"])}
         for i, pg in enumerate(pages):
             yield self._render_page(pg, summary, i + 1, len(pages), info)
 
@@ -465,7 +470,18 @@ class SheetRenderer:
         """只取第 1 張（相容舊呼叫端 / 測試）。"""
         return self.render_pages(entries, summary)[0]
 
+    def _lp(self, x0: float, y0: float, x1: float, y1: float) -> List[int]:
+        """排版座標（REF 畫布）→ 輸出 jpg 的像素座標（canvas_w / canvas_h 不是 REF 時最後會 resize）。"""
+        sx, sy = self.out_w / self.W, self.out_h / self.H
+        return [round(x0 * sx), round(y0 * sy), round(x1 * sx), round(y1 * sy)]
+
     def _render_page(self, pg: dict, summary: Dict[str, Any], page: int, pages: int, info: dict) -> np.ndarray:
+        self.last_layout = {
+            "page": page, "w": self.out_w, "h": self.out_h, "tickets": [], "tiles": [],
+            # 超過 max_pages 沒畫出來的格子 / 沒有圖可放的舊傳票，只在最後 / 第 1 頁計數（跟圖上的註記一致）
+            "hidden_tiles": info["hidden_tiles"] if page == pages else 0,
+            "hidden_tickets": info["hidden_tickets"] if page == 1 else 0,
+        }
         canvas = np.empty((self.H, self.W, 3), np.uint8)
         canvas[:] = _bgr(C_BG)
         tl = _TextLayer(canvas, self.font_path)
@@ -664,15 +680,20 @@ class SheetRenderer:
             for bi in r.get("box_idx") or []:
                 row_color[int(bi)] = ROW_PALETTE[ri % len(ROW_PALETTE)]
         crop_bottom = iy
+        crop_rect = None
         if ev.crop is not None:
             img, sc = _fit_into(ev.crop, crop_w, crop_h, max_up=1.6)
             h, w = img.shape[:2]
             crop_bottom = iy + h
             canvas[iy:iy + h, ix:ix + w] = img
+            crop_rect = self._lp(ix, iy, ix + w, iy + h)
             cv2.rectangle(canvas, (ix - 2, iy - 2), (ix + w + 1, iy + h + 1), _bgr(oc), 2)
             _draw_boxes(canvas, ev.boxes, sc, tl, (ix, iy), colors=row_color or None, label_mode="index")
         else:
             tl.add(ix, iy, "(裁切圖已釋放)", 30, C_DIM)
+        self.last_layout.setdefault("tickets", []).append({
+            "uid": ev.uid, "seq": seq, "rect": self._lp(x0, y0, x1, y1), "crop": crop_rect,
+        })
 
         # ---- 右側：解析表 ----
         # OrderRequirements 記下的「實際套用」mapping（含換湯等替換），格式「品名×數量 → 貼紙×數量（備註）」；
@@ -896,15 +917,25 @@ class SheetRenderer:
         crop_box_h = int((y1 - y0 - title_h) * 0.48)
         crop_src = next((e for e in reversed(group) if e.crop is not None), None)
         cy = y0 + title_h + pad
+        crop_rect = None
         if crop_src is not None:
             img, sc = _fit_into(crop_src.crop, w - 2 * pad - 8, crop_box_h, max_up=2.2)
             h, ww = img.shape[:2]
             ox = x0 + (w - ww) // 2
             canvas[cy:cy + h, ox:ox + ww] = img
+            crop_rect = self._lp(ox, cy, ox + ww, cy + h)   # 注意：接著會畫 det 框與標籤在這塊上面
             _draw_boxes(canvas, crop_src.boxes, sc, tl, (ox, cy), label=True, min_fs=14, max_fs=24)
             cy += h + pad
         else:
             cy += tl.add(x0 + pad, cy, "(無裁切圖)", 28, C_DIM) + pad
+        prev, nxt = getattr(group, "prev", None), getattr(group, "next", None)
+        self.last_layout.setdefault("tiles", []).append({
+            "idx": idx, "uids": [e.uid for e in group], "track": last.track, "verdict": verdict,
+            "rect": self._lp(x0, y0, x1, y1), "crop": crop_rect,
+            # 同一個追蹤物件在 problem ↔ 正常 之間被拆成的前 / 後一格（沒畫出來的是 None）
+            "prev": self._seg_idx.get(id(prev)) if prev is not None else None,
+            "next": self._seg_idx.get(id(nxt)) if nxt is not None else None,
+        })
 
         # ---- 文字區 ----
         tw = w - 2 * pad - 6
@@ -1038,6 +1069,8 @@ class DebugSheet:
         self._next_uid = 0
         self._next_track = 0
         self._frame: Optional[np.ndarray] = None
+        # 目前正在套用的那筆 OCR 的脈絡（LogicEngine.apply_ocr_result 進出時設 / 清），同 set_frame 的用法
+        self._ocr_meta: Optional[Dict[str, Any]] = None
 
         self._queue: "queue.Queue[Optional[tuple]]" = queue.Queue(maxsize=4)
         self._thread: Optional[threading.Thread] = None
@@ -1080,6 +1113,26 @@ class DebugSheet:
     def set_frame(self, frame: Optional[np.ndarray]) -> None:
         """每幀 update() 開頭給一次當下的原圖參考（不複製），醬料包裁切用。"""
         self._frame = frame
+
+    def set_ocr_meta(self, meta: Optional[Dict[str, Any]]) -> None:
+        """主迴圈套用一筆 OCR 結果前後呼叫（同 set_frame）：record_ocr 會把它記進那筆證據。
+
+        meta = {"seq": log 上 [OCR#n] 的 n, "xywhr": 送 OCR 時在原始影格上的旋轉框}，兩個都可以是 None。
+        只留參考、套用完就清掉，不會帶到下一筆或醬料包。"""
+        self._ocr_meta = meta or None
+
+    @staticmethod
+    def _ocr_fields(meta: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        out: Dict[str, Any] = {}
+        if not meta:
+            return out
+        seq = meta.get("seq")
+        if seq is not None:
+            out["ocr_seq"] = int(seq)
+        xywhr = meta.get("xywhr")
+        if xywhr is not None:
+            out["xywhr"] = [round(float(v), 2) for v in xywhr]   # numpy 型別轉成一般 float，json 才不會變字串
+        return out
 
     def track_uid(self, obj: Any) -> int:
         """幫追蹤物件（TrackedItem）配一個穩定 id。
@@ -1175,7 +1228,10 @@ class DebugSheet:
             with self._lock:
                 self._next_uid += 1
                 uid = self._next_uid
-            ev = Evidence(uid=uid, kind=kind, t=time.time(), crop=small, boxes=boxes, track=track, data=dict(data))
+            data = dict(data)
+            for k, v in self._ocr_fields(self._ocr_meta).items():
+                data.setdefault(k, v)
+            ev = Evidence(uid=uid, kind=kind, t=time.time(), crop=small, boxes=boxes, track=track, data=data)
             return self._add(tray_id, ev)
         except Exception as e:  # 除錯功能不能影響主流程
             logger.warning(f"[debug_sheet] record_ocr 失敗（略過）: {e!r}")
@@ -1196,7 +1252,10 @@ class DebugSheet:
             with self._lock:
                 self._next_uid += 1
                 uid = self._next_uid
-            ev = Evidence(uid=uid, kind="known", t=time.time(), crop=small, boxes=[], track=track, data=dict(data))
+            data = dict(data)
+            if xywhr is not None:
+                data.setdefault("xywhr", [round(float(v), 2) for v in xywhr])
+            ev = Evidence(uid=uid, kind="known", t=time.time(), crop=small, boxes=[], track=track, data=data)
             return self._add(tray_id, ev)
         except Exception as e:
             logger.warning(f"[debug_sheet] record_known 失敗（略過）: {e!r}")
@@ -1210,7 +1269,9 @@ class DebugSheet:
             with self._lock:
                 for e in reversed(self._evidence.get(tray_id, [])):
                     if e.track == track:
-                        e.data.setdefault("events", []).append(f"{_hms(time.time())} {text}")
+                        now = time.time()
+                        e.data.setdefault("events", []).append(f"{_hms(now)} {text}")
+                        e.data.setdefault("events_t", []).append(round(now, 3))   # 與 events 一一對應
                         return
         except Exception as e:
             logger.warning(f"[debug_sheet] annotate 失敗（略過）: {e!r}")
@@ -1323,7 +1384,10 @@ class DebugSheet:
         shape = None
         t_mark = time.perf_counter()
         # 逐頁渲染、編碼、寫檔：寫完一頁就釋放，記憶體只握一張畫布
-        for page_no, img in enumerate(self._get_renderer().iter_pages(entries, summary), 1):
+        layouts: List[Dict[str, Any]] = []
+        renderer = self._get_renderer()
+        for page_no, img in enumerate(renderer.iter_pages(entries, summary), 1):
+            layouts.append(dict(renderer.last_layout, file=self.page_path(path, page_no).name))
             t_a = time.perf_counter()
             render_s += t_a - t_mark
             ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), self.quality])
@@ -1346,7 +1410,8 @@ class DebugSheet:
 
         t_j = time.perf_counter()
         if self.save_json:
-            self._dump_json(entries, summary, path.with_suffix(".json"), [p.name for p in paths])
+            self._dump_json(entries, summary, path.with_suffix(".json"), [p.name for p in paths],
+                            layout=layouts, profile=self.ctx.profile)
         json_s = time.perf_counter() - t_j
 
         total_s = time.perf_counter() - t0
@@ -1393,15 +1458,19 @@ class DebugSheet:
 
     @staticmethod
     def _dump_json(entries: List[Evidence], summary: Dict[str, Any], path: Path,
-                   files: Optional[List[str]] = None) -> None:
+                   files: Optional[List[str]] = None, layout: Optional[List[Dict[str, Any]]] = None,
+                   profile: Optional[str] = None) -> None:
         doc = {
             "version": SHEET_VERSION,
             "pages": len(files or []) or 1,
             "files": files or [],
+            "profile": profile,                 # 與圖上標頭的 profile: 那行相同
             "summary": summary,
+            "layout": layout or [],             # 每頁一筆：格子 / 傳票在 jpg 上的位置（輸出像素）
             "entries": [
                 {
                     "uid": e.uid, "kind": e.kind, "time": _hms(e.t), "track": e.track,
+                    "t": round(e.t, 3),         # 主迴圈記錄這筆的 epoch 秒（比影格晚一段 OCR 推論時間）
                     "boxes": [{"text": b["text"], "conf": round(b["conf"], 4)} for b in e.boxes],
                     "data": e.data,
                 }

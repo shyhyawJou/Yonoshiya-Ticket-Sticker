@@ -901,3 +901,167 @@ def test_no_text_is_drawn_twice(tmp_path):
     items = [(x, y, t) for x, y, t, *_ in _all_text_items(ds)]
     dup = {k for k in items if items.count(k) > 1}
     assert not dup, f"重複繪製: {sorted(dup)[:5]}"
+
+
+# ---------------------------------------------------------------------------
+# json v2：雲端 OCR Log 對位用的欄位（t / ocr_seq / xywhr / events_t / profile / layout）
+# ---------------------------------------------------------------------------
+def _v2_order(tmp_path, **cfg_kw):
+    """傳票（OCR#7）→ 貼紙 A（OCR#8，OK）→ 醬料包（不走 OCR）→ 事件註記，收尾讀回 json。"""
+    ctx = DebugContext(menu_variants=VARIANTS, object_class_items={"sesame": "ごまドレッシング"},
+                       profile="yoshinoya / parser=legacy / mode=preset_roi")
+    ds = DebugSheet(make_cfg(tmp_path, **cfg_kw), tmp_path, ROOT, ctx, crop_fn=lambda frame, xywhr: frame[0:80, 0:160])
+    sm, _bus = make_sm(tmp_path, ds)
+    tray = make_tray()
+    trays = {"t1": tray}
+    ds.set_ocr_meta({"seq": 7, "xywhr": np.array([60.25, 50.0, 100.0, 80.0, 0.5], np.float32)})
+    ticket_ocr(sm, trays)
+    ds.set_ocr_meta({"seq": 8, "xywhr": (170.0, 150.0, 100.0, 60.0, 0.0)})
+    a = add_sticker(tray, poly(120, 120, 220, 180))
+    sticker_ocr(sm, trays, a, "牛丼小")
+    ds.set_ocr_meta(None)
+    ds.set_frame(np.full((600, 800, 3), 180, np.uint8))
+    tray.state = TrayState.WAITING_STICKERS
+    s = add_sticker(tray, poly(380, 120, 480, 180), cls="sesame")
+    s.stable_frames = 99
+    sm.resolve_known_class_items(trays)
+    sm.debug_hooks.event("t1", a, "已核對的 牛丼小 離開畫面")
+    path = Path(ds.finalize("t1", dict(SUMMARY)))
+    ds.shutdown()
+    return ds, json.loads(DebugSheet.json_path_for(path).read_text(encoding="utf-8")), path
+
+
+def test_v2_entries_carry_epoch_time_ocr_seq_and_xywhr(tmp_path):
+    import time as _time
+    _ds, doc, _path = _v2_order(tmp_path)
+    assert doc["version"] == "2"
+    assert doc["profile"] == "yoshinoya / parser=legacy / mode=preset_roi"
+    by_kind = {}
+    for e in doc["entries"]:
+        by_kind.setdefault(e["kind"], []).append(e)
+        assert isinstance(e["t"], float) and abs(e["t"] - _time.time()) < 60, "t 是 epoch 秒（小數到毫秒）"
+        assert e["time"] == _time.strftime("%H:%M:%S", _time.localtime(e["t"])), "舊欄位 time 不變、跟 t 一致"
+    tk, st, kn = by_kind["ticket"][0], by_kind["sticker"][0], by_kind["known"][0]
+    assert tk["data"]["ocr_seq"] == 7 and st["data"]["ocr_seq"] == 8
+    assert tk["data"]["xywhr"] == [60.25, 50.0, 100.0, 80.0, 0.5], "numpy 型別要轉成一般數字，不能變成字串"
+    assert st["data"]["xywhr"] == [170.0, 150.0, 100.0, 60.0, 0.0]
+    assert "ocr_seq" not in kn["data"], "醬料包沒有 OCR，不能沾到上一筆的流水號"
+    assert len(kn["data"]["xywhr"]) == 5, "醬料包記下裁切用的旋轉框"
+
+
+def test_v2_events_t_pairs_with_events(tmp_path):
+    _ds, doc, _path = _v2_order(tmp_path)
+    tagged = [e["data"] for e in doc["entries"] if e["data"].get("events")]
+    assert tagged, "要有事件"
+    for d in tagged:
+        assert len(d["events_t"]) == len(d["events"])
+        assert all(isinstance(x, float) for x in d["events_t"])
+
+
+def test_ocr_meta_is_cleared_and_not_carried_over(tmp_path):
+    ds = DebugSheet(make_cfg(tmp_path), tmp_path, ROOT)
+    ds.set_ocr_meta({"seq": 3, "xywhr": None})
+    ds.record_ocr("t1", "sticker", sticker_crop(), [], [], {"verdict": "OK"})
+    ds.set_ocr_meta(None)
+    ds.record_ocr("t1", "sticker", sticker_crop(), [], [], {"verdict": "OK"})
+    first, second = ds._evidence["t1"]
+    assert first.data["ocr_seq"] == 3 and "xywhr" not in first.data
+    assert "ocr_seq" not in second.data
+
+
+def test_v2_layout_matches_rendered_tiles(tmp_path):
+    _ds, doc, path = _v2_order(tmp_path)
+    assert len(doc["layout"]) == doc["pages"] == 1
+    lay = doc["layout"][0]
+    assert lay["file"] == path.name and (lay["w"], lay["h"]) == (4024, 3036)
+    items = [e for e in doc["entries"] if e["kind"] in ("sticker", "known")]
+    assert sorted(u for t in lay["tiles"] for u in t["uids"]) == sorted(e["uid"] for e in items), "每筆貼紙 / 醬料包都在某一格"
+    assert [t["idx"] for t in lay["tiles"]] == list(range(1, len(lay["tiles"]) + 1))
+    tk = [e for e in doc["entries"] if e["kind"] == "ticket"]
+    assert [t["uid"] for t in lay["tickets"]] == [e["uid"] for e in tk[-3:]]
+    for cell in lay["tiles"] + lay["tickets"]:
+        x0, y0, x1, y1 = cell["rect"]
+        assert 0 <= x0 < x1 <= lay["w"] and 0 <= y0 < y1 <= lay["h"]
+        if cell["crop"]:
+            cx0, cy0, cx1, cy1 = cell["crop"]
+            assert x0 <= cx0 < cx1 <= x1 and y0 <= cy0 < cy1 <= y1, "裁切圖在格子裡面"
+    img = cv2.imdecode(np.fromfile(str(path), np.uint8), cv2.IMREAD_COLOR)
+    t0 = lay["tiles"][0]
+    cx0, cy0, cx1, cy1 = t0["crop"]
+    patch = img[cy0:cy1, cx0:cx1]
+    assert patch.mean() > 150, "crop 範圍切出來是那張淺色的裁切圖，不是深色面板"
+
+
+def test_v2_layout_is_in_output_pixels_when_canvas_is_scaled(tmp_path):
+    _ds, doc, path = _v2_order(tmp_path, canvas_w=2012, canvas_h=1518)
+    lay = doc["layout"][0]
+    assert (lay["w"], lay["h"]) == (2012, 1518)
+    img = cv2.imdecode(np.fromfile(str(path), np.uint8), cv2.IMREAD_COLOR)
+    assert img.shape[:2] == (1518, 2012)
+    for cell in lay["tiles"] + lay["tickets"]:
+        x0, y0, x1, y1 = cell["rect"]
+        assert x1 <= 2012 and y1 <= 1518, "座標要換算成輸出 jpg 的像素"
+
+
+def test_v2_layout_multi_page_hidden_and_prev_next(tmp_path):
+    ds = DebugSheet(make_cfg(tmp_path, tiles_per_page=5, max_pages=2), tmp_path, ROOT)
+    _fill(ds, n_ng=1, n_ok=13)                       # 14 格，只放得下 10 格
+    path = Path(ds.finalize("t1", dict(SUMMARY)))
+    ds.shutdown()
+    doc = json.loads(DebugSheet.json_path_for(path).read_text(encoding="utf-8"))
+    lay = doc["layout"]
+    assert [p["page"] for p in lay] == [1, 2] and [p["file"] for p in lay] == doc["files"]
+    assert [len(p["tiles"]) for p in lay] == [5, 5]
+    assert [t["idx"] for p in lay for t in p["tiles"]] == list(range(1, 11)), "編號跨頁連續"
+    assert lay[0]["hidden_tiles"] == 0 and lay[1]["hidden_tiles"] == 4, "沒畫出來的數量記在最後一頁"
+    assert lay[0]["tiles"][0]["verdict"] == "NG"
+
+
+def test_v2_layout_links_ng_and_ok_tiles_of_the_same_sticker(tmp_path):
+    ds, sm, tray, trays, b = _order_with_ng(tmp_path)
+    b.stable_frames = 5
+    sticker_ocr(sm, trays, b, "牛丼小")              # NG 後被 OK 貼紙蓋住 → 拆成兩格
+    path = Path(ds.finalize("t1", dict(SUMMARY)))
+    ds.shutdown()
+    tiles = json.loads(DebugSheet.json_path_for(path).read_text(encoding="utf-8"))["layout"][0]["tiles"]
+    ng = next(t for t in tiles if t["verdict"] == "NG")
+    ok = next(t for t in tiles if t["idx"] == ng["next"])
+    assert ok["prev"] == ng["idx"] and ok["verdict"] == "OK"
+
+
+def _import_logic_engine():
+    """裝置上直接 import；開發機沒有 DLA / 相機模組時用空殼頂替（只測 apply_ocr_result 的膠水）。"""
+    try:
+        import logic_engine
+    except ImportError:
+        import types
+        for name, attr in (("ocr_engine", "StandaloneRecDLA"), ("mmr_engine", "Rotated_RTMDET")):
+            mod = types.ModuleType(name)
+            setattr(mod, attr, object)
+            sys.modules.setdefault(name, mod)
+        import logic_engine
+    return logic_engine
+
+
+def test_logic_engine_passes_ocr_meta_only_during_apply(tmp_path):
+    le = _import_logic_engine()
+    ds = DebugSheet(make_cfg(tmp_path), tmp_path, ROOT)
+    seen = []
+
+    class SM:
+        def apply_ocr_result(self, *a, **kw):
+            seen.append(ds._ocr_meta)
+            raise RuntimeError("狀態機出錯也要清掉脈絡")
+
+    eng = SimpleNamespace(debug_sheet=ds, state_machine=SM(), trays={}, mode="tray")
+    meta = {"seq": 42, "xywhr": [1.0, 2.0, 3.0, 4.0, 0.0]}
+    try:
+        le.LogicEngine.apply_ocr_result(eng, "t1", "sticker", None, [], [], False, None, ocr_meta=meta)
+    except RuntimeError:
+        pass
+    assert seen == [meta]
+    assert ds._ocr_meta is None
+    # 舊呼叫端（不帶 ocr_meta）照常可用
+    eng.state_machine = SimpleNamespace(apply_ocr_result=lambda *a, **kw: seen.append(ds._ocr_meta))
+    le.LogicEngine.apply_ocr_result(eng, "t1", "sticker", None, [], [], False, None)
+    assert seen[-1] is None

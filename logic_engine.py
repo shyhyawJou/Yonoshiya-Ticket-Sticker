@@ -470,17 +470,23 @@ class LogicEngine:
         is_flip: bool,
         task_bbox: PolygonXYXY,
         target=None,
+        ocr_meta: Optional[dict] = None,
     ):
         """
         1. 處理 OCR 結果
         2. 檢查 tray盤狀態
         3. 發布 mqtt 訊息
         target = 送出時 task["target"]（被讀的那個追蹤物件），沒有就退回用 task_bbox 找
+        ocr_meta = {"seq": log 的 OCR#n, "xywhr": 送 OCR 時的旋轉框}：只給除錯總覽記錄用，不影響判定
         """
-        self.state_machine.apply_ocr_result(
-            self.trays, tray_id, item_type, frame_crop, dt_boxes, rec_res, is_flip, task_bbox,
-            target=target,
-        )
+        self.debug_sheet.set_ocr_meta(ocr_meta)
+        try:
+            self.state_machine.apply_ocr_result(
+                self.trays, tray_id, item_type, frame_crop, dt_boxes, rec_res, is_flip, task_bbox,
+                target=target,
+            )
+        finally:
+            self.debug_sheet.set_ocr_meta(None)
 
         # === single 模式專屬修正 ===
         # TicketReader.apply_ticket_result 解析失敗時，只會把
