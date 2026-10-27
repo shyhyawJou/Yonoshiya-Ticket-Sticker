@@ -14,7 +14,7 @@ import cv2
 from loguru import logger
 
 from utils.clip_video import Clip, PeriodicClipRecorder
-from utils.frame_writer import AsyncFrameWriter
+from utils.frame_writer import AsyncFrameWriter, full_screen_tag
 from utils import clock_guard
 from utils.disk_guard import DiskGuard
 from utils.perf_stats import LOOP_PROFILER, ocr_done_line
@@ -134,6 +134,7 @@ class StreamManager:
             on_recording_start=self.start_event_recording,
             on_recording_stop=self.stop_event_recording,
             get_video_filename=self.get_event_video_filename,
+            save_frame=self._save_full_screen,      # 醬料包判定時存全幀（見 TrayStateMachine.resolve_known_class_items）
         )
         self.task.bus.on_command(self._handle_cmd)
 
@@ -343,12 +344,19 @@ class StreamManager:
     def _handle_cmd(self, cmd: str, payload: dict) -> None:
         self.commands.handle(cmd, payload)
 
-    def _save_frame(self, frame, folder_name: str) -> None:
+    def _save_frame(self, frame, folder_name: str, tag: str = "") -> None:
         try:
-            self.frame_writer.save(frame.copy(), self.save_dir, folder_name)
+            self.frame_writer.save(frame.copy(), self.save_dir, folder_name, tag=tag)
 
         except Exception as e:
             logger.error(f"儲存影像失敗 (Folder: {folder_name}): {e}")
+
+    def _save_full_screen(self, tag: str) -> None:
+        """存一張當下的原始全幀到 full_screen，檔名帶「為什麼存」的標籤。
+
+        標籤：ticket / sticker / ticket-extra = 送 OCR 的那一幀；sauce = 醬料包（不走 OCR）下 OK/NG 結論的那一幀。
+        """
+        self._save_frame(self.tmp_frame, f"{str(self.save_dir)}/{self.event_recorder.date}/full_screen", tag=tag)
 
     def _check_event_record_timeout(self, now_ts):
         if not self.event_recorder.is_running:
@@ -549,7 +557,7 @@ class StreamManager:
                             continue
 
                         # self._save_frame(warped_img, f"{str(self.save_dir)}/{self.event_recorder.date}/ocr_cut")
-                        self._save_frame(self.tmp_frame, f"{str(self.save_dir)}/{self.event_recorder.date}/full_screen")
+                        self._save_full_screen(full_screen_tag(task["type"]))
 
                         metadata = {
                             "tray_id": task["tray_id"],
