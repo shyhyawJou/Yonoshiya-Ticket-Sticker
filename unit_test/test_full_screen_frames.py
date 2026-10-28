@@ -208,3 +208,86 @@ def test_task_context_and_app_wire_the_callback_everywhere():
     assert 'self._save_full_screen(full_screen_tag(task["type"]))' in app, "送 OCR 的全幀要帶任務類型標籤"
     assert "full_screen_tag" in app.split("class ", 1)[0], "app.py 要 import full_screen_tag"
     assert app.count("/full_screen\"") == 1, "full_screen 只有一個寫入點（_save_full_screen）"
+
+
+# ---------------------------------------------------------------------------
+# 寫圖成功的 log
+# ---------------------------------------------------------------------------
+import utils.frame_writer as fw  # noqa: E402
+
+
+class _Rec:
+    """記下 info / error 呼叫的假 logger（不依賴 loguru 的 sink API，這裡的環境怎麼裝都能跑）。"""
+
+    def __init__(self):
+        self.infos, self.errors = [], []
+
+    def info(self, msg, *a, **k):
+        self.infos.append(msg)
+
+    def error(self, msg, *a, **k):
+        self.errors.append(msg)
+
+    def warning(self, msg, *a, **k):
+        pass
+
+
+def _write_one(tmp_path, folder="full_screen", tag="sticker", **patches):
+    saved = {k: getattr(fw, k) for k in patches}
+    for k, v in patches.items():
+        setattr(fw, k, v)
+    w = AsyncFrameWriter(max_queue_size=5)
+    try:
+        name = w.save(np.full((20, 30, 3), 180, np.uint8), tmp_path, folder, tag=tag)
+        w._queue.join()
+    finally:
+        w.stop(wait=True)
+        for k, v in saved.items():
+            setattr(fw, k, v)
+    return name
+
+
+def test_a_successful_write_logs_name_size_time_and_backlog(tmp_path):
+    rec = _Rec()
+    name = _write_one(tmp_path, tag="sticker", loguru_logger=rec)
+    assert (tmp_path / "full_screen" / name).is_file()
+    assert len(rec.infos) == 1, "每寫成功一張，記一行"
+    msg = rec.infos[0]
+    assert f"full_screen/{name}" in msg and "寫圖成功" in msg
+    assert "MB" in msg and "ms" in msg and "佇列剩 0" in msg
+    assert name.endswith("_sticker.jpg") and "sticker" in msg, "原因標籤跟著檔名一起出現在 log"
+
+
+def test_the_log_names_the_folder_so_snapshots_are_distinguishable(tmp_path):
+    rec = _Rec()
+    _write_one(tmp_path, folder="snapshot", tag="", loguru_logger=rec)
+    assert rec.infos and "snapshot/" in rec.infos[0] and "full_screen/" not in rec.infos[0]
+
+
+def test_a_failed_imwrite_is_not_reported_as_success(tmp_path):
+    """磁碟寫到一半滿了：檔案可能已經留下一點內容，但 imwrite 回傳 False。這不能記成「寫圖成功」。"""
+    def half_written(path, frame):
+        Path(path).write_bytes(b"x")          # 檔案存在（讀得到大小），但回傳 False
+        return False
+
+    rec = _Rec()
+    _write_one(tmp_path, loguru_logger=rec, cv2=SimpleNamespace(imwrite=half_written))
+    assert rec.infos == [], "imwrite 回傳 False 不能記成功（以前就沒有任何訊息，維持）"
+
+
+def test_a_logging_failure_does_not_turn_a_good_write_into_an_error(tmp_path):
+    class Boom(_Rec):
+        def info(self, msg, *a, **k):
+            raise RuntimeError("log sink 壞了")
+
+    err = _Rec()
+    name = _write_one(tmp_path, loguru_logger=Boom(), logger=err)
+    assert (tmp_path / "full_screen" / name).is_file(), "圖照樣寫好"
+    assert err.errors == [], "不能被誤報成『儲存影像失敗』"
+
+
+def test_drop_logic_is_still_unchanged_after_adding_the_log():
+    w = _writer_without_worker(1)
+    img = np.zeros((4, 4, 3), np.uint8)
+    assert w.save(img, Path("/tmp"), "f", tag="sauce") is not None
+    assert w.save(img, Path("/tmp"), "f", tag="sauce") is None and w._dropped_count == 1

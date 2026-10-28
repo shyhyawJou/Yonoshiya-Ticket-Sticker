@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Optional
 import cv2
 import logging
+from loguru import logger as loguru_logger
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +78,21 @@ class AsyncFrameWriter:
                 filename = frame_filename(current_time, tag)
 
                 save_path = save_path_dir / filename
-                cv2.imwrite(str(save_path), frame)
+                t_write = time.perf_counter()
+                ok = cv2.imwrite(str(save_path), frame)
+
+                # 寫圖成功才記（imwrite 失敗會回傳 False，這種情況不算成功、維持原本不記）。
+                # 用 loguru：上面那個 logger 是標準 logging，App 沒有把它轉到 loguru 的輸出，
+                # 寫在那邊的訊息不一定會進你的 log 檔。記錄本身出錯不能把「已經寫好的圖」當成失敗。
+                if ok:
+                    try:
+                        loguru_logger.info(
+                            f"[存圖] {Path(folder_name).name}/{filename} 寫圖成功 "
+                            f"{save_path.stat().st_size / 1e6:.2f}MB 寫檔 {(time.perf_counter() - t_write) * 1000:.0f}ms "
+                            f"佇列剩 {self._queue.qsize()}"
+                        )
+                    except Exception:
+                        pass
 
             except Exception as e:
                 logger.error(f"儲存影像失敗 (Folder: {folder_name}): {e}")
