@@ -43,8 +43,7 @@ class TaskContext:
 
     # ---------- 載入 ----------
 
-    def load_task(self, task: str, on_recording_start=None, on_recording_stop=None, get_video_filename=None,
-                  save_frame=None) -> None:
+    def load_task(self, task: str, on_recording_start=None, on_recording_stop=None, get_video_filename=None) -> None:
         """
         安全地載入指定任務的設定檔、AI 模型和邏輯引擎。
         """
@@ -60,7 +59,6 @@ class TaskContext:
         self._on_recording_start = on_recording_start
         self._on_recording_stop = on_recording_stop
         self._get_event_video_filename = get_video_filename
-        self._save_frame_cb = save_frame          # save_frame(tag)：存一張全幀（醬料包判定用）
 
         class_names = [c.name for c in cfg.classes]
         self.cfg = cfg
@@ -106,7 +104,6 @@ class TaskContext:
             on_recording_start=self._on_recording_start,
             on_recording_stop=self._on_recording_stop,
             get_video_filename=self._get_event_video_filename,
-            save_frame=self._save_frame_cb,
         )
 
         # --- init ocr ---
@@ -117,6 +114,8 @@ class TaskContext:
             dict_path=cfg.runtime.model.text,
             result_callback=self._on_ocr_result,
             ocr_routes=cfg.ocr_routes,
+            # 吉野家大傳票的 CV 輔助：det 之前先用表格版面決定方向（只有 legacy 解析器用得到）
+            ticket_cv_orient=bool(getattr(cfg, "ticket_cv_assist", False)) and cfg.ticket_parser == "legacy",
         )
         self.ocr.start()
 
@@ -315,7 +314,6 @@ class TaskContext:
                 on_recording_start=self._on_recording_start,
                 on_recording_stop=self._on_recording_stop,
                 get_video_filename=self._get_event_video_filename,
-                save_frame=self._save_frame_cb,
             )
         except Exception as e:
             logger.error(f"[MODE] 切換模式失敗，退回 '{old_mode}': {e}")

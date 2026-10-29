@@ -14,6 +14,8 @@ ocr_routes:
 - 欄位省略時回到 DET。`ticket`／`sticker` 內部任務名稱會自動對應正式類別名稱。
 - 這只是既有 OCR 任務的處理方式，不會讓未被狀態機排入 OCR 的其他物件自動產生任務。
 
+吉野家的 `ticket_cv_assist`（見 `tasks/ocr/yoshinoya/README.md`）不是這裡的路由：大傳票仍走 `det`，只是 AsyncOCR 在 det 之前先用 `logic/yoshinoya/ticket_cv_layout.py` 決定方向（跳過翻轉比對），版面再交給解析器做 det 框分格與漏框補讀。找不到表格時照 `det` 原流程。
+
 流程接線位於 `manager/task_context.py` 與 `ocr_engine.AsyncOCR`。
 CV 路徑使用 `logic/szm/cv_text_regions.py`，同時回傳轉正後圖片、文字框與座標變換，合成 `M_inv_full` 後再交給既有回呼，避免畫框位置偏移。
 表格找不到時回空框；不會在背後改用 DET。DET 模型目前仍在 OCR 服務初始化時載入，CV 是略過該次推論，不代表完全不占 DET 模型記憶體。

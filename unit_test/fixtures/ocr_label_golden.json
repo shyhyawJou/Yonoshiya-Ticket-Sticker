@@ -1,0 +1,752 @@
+{
+ "_note": "由 make_ocr_label_golden.py 用真的 autolabeling.py 產生（假的 OCR 管線 + 固定比對分數）。autolabeling 的標註邏輯有改時，重跑它。",
+ "menu_yaml": "mapping:\n  - name: 牛丼･並\n    sub_items:\n      - 牛丼並\n  - name: 生野菜ｻﾗﾀﾞ･みそ汁ｾｯﾄ\n    sub_items:\n      - サラダ\n      - みそ汁\n  - name: 牛丼並ﾂﾕﾀﾞｸ\n    sub_items:\n      - 牛丼並ﾂﾕﾀﾞｸ\n  - name: 牛丼･並\n    sub_items:\n      - 重複の貼紙は最初の1件が勝つ\n  - name: 変更ご飯軽め\n    sub_items:\n      - ご飯少なめ\n  - name: あああああああああああああああああいうえ\n    sub_items:\n      - 境界テスト貼紙\n",
+ "match_threshold": 85.0,
+ "cases": [
+  {
+   "name": "ticket_mixed",
+   "category": "ticket",
+   "file": "20260919_102943_892__order_ticket__1.jpg",
+   "wh": [
+    351,
+    739
+   ],
+   "boxes": [
+    [
+     [
+      217,
+      93
+     ],
+     [
+      279,
+      93
+     ],
+     [
+      279,
+      133
+     ],
+     [
+      217,
+      133
+     ]
+    ],
+    [
+     [
+      30,
+      150
+     ],
+     [
+      80,
+      150
+     ],
+     [
+      80,
+      190
+     ],
+     [
+      30,
+      190
+     ]
+    ],
+    [
+     [
+      20,
+      200
+     ],
+     [
+      200,
+      200
+     ],
+     [
+      200,
+      240
+     ],
+     [
+      20,
+      240
+     ]
+    ],
+    [
+     [
+      40.5,
+      300.2
+     ],
+     [
+      210.7,
+      280.1
+     ],
+     [
+      214.0,
+      310.9
+     ],
+     [
+      44.0,
+      331.0
+     ]
+    ],
+    [
+     [
+      10,
+      400
+     ],
+     [
+      150,
+      400
+     ],
+     [
+      150,
+      430
+     ],
+     [
+      10,
+      430
+     ]
+    ],
+    [
+     [
+      10,
+      440
+     ],
+     [
+      150,
+      440
+     ],
+     [
+      150,
+      470
+     ],
+     [
+      10,
+      470
+     ]
+    ]
+   ],
+   "texts": [
+    "690",
+    "数",
+    "3牛丼･並",
+    "※生野菜ｻﾗﾀﾞ･みそ汁ｾｯﾄ",
+    "ＡＢＣ 增 变 黑 燒 烧 醬 ★ ≠ ·",
+    ""
+   ],
+   "confs": [
+    0.99,
+    0.5,
+    0.97654321,
+    0.9,
+    0.123456,
+    0.0
+   ],
+   "expected_label": {
+    "version": "4.0.0-beta.9",
+    "flags": {},
+    "checked": false,
+    "shapes": [
+     {
+      "label": "text",
+      "score": 0.99,
+      "points": [
+       [
+        217.0,
+        93.0
+       ],
+       [
+        279.0,
+        93.0
+       ],
+       [
+        279.0,
+        133.0
+       ],
+       [
+        217.0,
+        133.0
+       ]
+      ],
+      "group_id": 0,
+      "description": "690",
+      "difficult": true,
+      "shape_type": "rectangle",
+      "flags": null,
+      "attributes": {
+       "category": "ticket",
+       "auto_matched": false,
+       "menu_match_score": 0.0,
+       "raw_ocr_text": "690",
+       "menu_context": null
+      },
+      "kie_linking": []
+     },
+     {
+      "label": "text",
+      "score": 0.5,
+      "points": [
+       [
+        30.0,
+        150.0
+       ],
+       [
+        80.0,
+        150.0
+       ],
+       [
+        80.0,
+        190.0
+       ],
+       [
+        30.0,
+        190.0
+       ]
+      ],
+      "group_id": 0,
+      "description": "数",
+      "difficult": true,
+      "shape_type": "rectangle",
+      "flags": null,
+      "attributes": {
+       "category": "ticket",
+       "auto_matched": false,
+       "menu_match_score": 0.0,
+       "raw_ocr_text": "数",
+       "menu_context": null
+      },
+      "kie_linking": []
+     },
+     {
+      "label": "text",
+      "score": 0.9765,
+      "points": [
+       [
+        20.0,
+        200.0
+       ],
+       [
+        200.0,
+        200.0
+       ],
+       [
+        200.0,
+        240.0
+       ],
+       [
+        20.0,
+        240.0
+       ]
+      ],
+      "group_id": 0,
+      "description": "牛丼･並",
+      "difficult": false,
+      "shape_type": "rectangle",
+      "flags": null,
+      "attributes": {
+       "category": "ticket",
+       "auto_matched": true,
+       "menu_match_score": 88.9,
+       "raw_ocr_text": "3牛丼・並",
+       "menu_context": [
+        "牛丼並"
+       ]
+      },
+      "kie_linking": []
+     },
+     {
+      "label": "text",
+      "score": 0.9,
+      "points": [
+       [
+        40.5,
+        300.20001220703125
+       ],
+       [
+        210.6999969482422,
+        280.1000061035156
+       ],
+       [
+        214.0,
+        310.8999938964844
+       ],
+       [
+        44.0,
+        331.0
+       ]
+      ],
+      "group_id": 0,
+      "description": "生野菜ｻﾗﾀﾞ･みそ汁ｾｯﾄ",
+      "difficult": false,
+      "shape_type": "polygon",
+      "flags": null,
+      "attributes": {
+       "category": "ticket",
+       "auto_matched": true,
+       "menu_match_score": 100.0,
+       "raw_ocr_text": "生野菜サラダ・みそ汁セット",
+       "menu_context": [
+        "サラダ",
+        "みそ汁"
+       ]
+      },
+      "kie_linking": []
+     },
+     {
+      "label": "text",
+      "score": 0.1235,
+      "points": [
+       [
+        10.0,
+        400.0
+       ],
+       [
+        150.0,
+        400.0
+       ],
+       [
+        150.0,
+        430.0
+       ],
+       [
+        10.0,
+        430.0
+       ]
+      ],
+      "group_id": 0,
+      "description": "ABC増変黒焼焼醤☆キ・",
+      "difficult": true,
+      "shape_type": "rectangle",
+      "flags": null,
+      "attributes": {
+       "category": "ticket",
+       "auto_matched": false,
+       "menu_match_score": 12.5,
+       "raw_ocr_text": "ABC増変黒焼焼醤☆キ・",
+       "menu_context": null
+      },
+      "kie_linking": []
+     },
+     {
+      "label": "text",
+      "score": 0.0,
+      "points": [
+       [
+        10.0,
+        440.0
+       ],
+       [
+        150.0,
+        440.0
+       ],
+       [
+        150.0,
+        470.0
+       ],
+       [
+        10.0,
+        470.0
+       ]
+      ],
+      "group_id": 0,
+      "description": "",
+      "difficult": true,
+      "shape_type": "rectangle",
+      "flags": null,
+      "attributes": {
+       "category": "ticket",
+       "auto_matched": false,
+       "menu_match_score": 0.0,
+       "raw_ocr_text": "",
+       "menu_context": null
+      },
+      "kie_linking": []
+     }
+    ],
+    "imagePath": "20260919_102943_892__order_ticket__1.jpg",
+    "imageData": null,
+    "imageHeight": 739,
+    "imageWidth": 351,
+    "description": ""
+   }
+  },
+  {
+   "name": "sticker_matched",
+   "category": "sticker",
+   "file": "20260919_103000_100__order_sticker__1.jpg",
+   "wh": [
+    300,
+    120
+   ],
+   "boxes": [
+    [
+     [
+      10,
+      20
+     ],
+     [
+      280,
+      20
+     ],
+     [
+      280,
+      90
+     ],
+     [
+      10,
+      90
+     ]
+    ]
+   ],
+   "texts": [
+    "牛丼並ﾂﾕﾀﾞｸ"
+   ],
+   "confs": [
+    0.95
+   ],
+   "expected_label": {
+    "version": "4.0.0-beta.9",
+    "flags": {},
+    "checked": false,
+    "shapes": [
+     {
+      "label": "text",
+      "score": 0.95,
+      "points": [
+       [
+        10.0,
+        20.0
+       ],
+       [
+        280.0,
+        20.0
+       ],
+       [
+        280.0,
+        90.0
+       ],
+       [
+        10.0,
+        90.0
+       ]
+      ],
+      "group_id": 0,
+      "description": "牛丼並ﾂﾕﾀﾞｸ",
+      "difficult": false,
+      "shape_type": "rectangle",
+      "flags": null,
+      "attributes": {
+       "category": "sticker",
+       "auto_matched": true,
+       "menu_match_score": 100.0,
+       "raw_ocr_text": "牛丼並ツユダク",
+       "menu_context": "牛丼並ﾂﾕﾀﾞｸ"
+      },
+      "kie_linking": []
+     }
+    ],
+    "imagePath": "20260919_103000_100__order_sticker__1.jpg",
+    "imageData": null,
+    "imageHeight": 120,
+    "imageWidth": 300,
+    "description": ""
+   }
+  },
+  {
+   "name": "sticker_unmatched_and_context",
+   "category": "sticker",
+   "file": "20260919_103001_200__order_sticker__1.jpg",
+   "wh": [
+    300,
+    120
+   ],
+   "boxes": [
+    [
+     [
+      10,
+      20
+     ],
+     [
+      150,
+      20
+     ],
+     [
+      150,
+      60
+     ],
+     [
+      10,
+      60
+     ]
+    ],
+    [
+     [
+      10,
+      62
+     ],
+     [
+      150,
+      62
+     ],
+     [
+      150,
+      100
+     ],
+     [
+      10,
+      100
+     ]
+    ]
+   ],
+   "texts": [
+    "サラタ",
+    "ご飯軽め"
+   ],
+   "confs": [
+    0.8,
+    0.99
+   ],
+   "expected_label": {
+    "version": "4.0.0-beta.9",
+    "flags": {},
+    "checked": false,
+    "shapes": [
+     {
+      "label": "text",
+      "score": 0.8,
+      "points": [
+       [
+        10.0,
+        20.0
+       ],
+       [
+        150.0,
+        20.0
+       ],
+       [
+        150.0,
+        60.0
+       ],
+       [
+        10.0,
+        60.0
+       ]
+      ],
+      "group_id": 0,
+      "description": "サラタ",
+      "difficult": true,
+      "shape_type": "rectangle",
+      "flags": null,
+      "attributes": {
+       "category": "sticker",
+       "auto_matched": false,
+       "menu_match_score": 66.7,
+       "raw_ocr_text": "サラタ",
+       "menu_context": null
+      },
+      "kie_linking": []
+     },
+     {
+      "label": "text",
+      "score": 0.99,
+      "points": [
+       [
+        10.0,
+        62.0
+       ],
+       [
+        150.0,
+        62.0
+       ],
+       [
+        150.0,
+        100.0
+       ],
+       [
+        10.0,
+        100.0
+       ]
+      ],
+      "group_id": 0,
+      "description": "ご飯軽め",
+      "difficult": true,
+      "shape_type": "rectangle",
+      "flags": null,
+      "attributes": {
+       "category": "sticker",
+       "auto_matched": false,
+       "menu_match_score": 66.7,
+       "raw_ocr_text": "ご飯軽め",
+       "menu_context": null
+      },
+      "kie_linking": []
+     }
+    ],
+    "imagePath": "20260919_103001_200__order_sticker__1.jpg",
+    "imageData": null,
+    "imageHeight": 120,
+    "imageWidth": 300,
+    "description": ""
+   }
+  },
+  {
+   "name": "score_exactly_at_threshold",
+   "category": "ticket",
+   "file": "20260919_103003_400__order_ticket__1.jpg",
+   "wh": [
+    200,
+    100
+   ],
+   "boxes": [
+    [
+     [
+      10,
+      10
+     ],
+     [
+      190,
+      10
+     ],
+     [
+      190,
+      40
+     ],
+     [
+      10,
+      40
+     ]
+    ],
+    [
+     [
+      10,
+      50
+     ],
+     [
+      190,
+      50
+     ],
+     [
+      190,
+      80
+     ],
+     [
+      10,
+      80
+     ]
+    ]
+   ],
+   "texts": [
+    "あああああああああああああああああかきく",
+    "あああああああああああああああああいうえ"
+   ],
+   "confs": [
+    0.9,
+    0.9
+   ],
+   "expected_label": {
+    "version": "4.0.0-beta.9",
+    "flags": {},
+    "checked": false,
+    "shapes": [
+     {
+      "label": "text",
+      "score": 0.9,
+      "points": [
+       [
+        10.0,
+        10.0
+       ],
+       [
+        190.0,
+        10.0
+       ],
+       [
+        190.0,
+        40.0
+       ],
+       [
+        10.0,
+        40.0
+       ]
+      ],
+      "group_id": 0,
+      "description": "あああああああああああああああああいうえ",
+      "difficult": false,
+      "shape_type": "rectangle",
+      "flags": null,
+      "attributes": {
+       "category": "ticket",
+       "auto_matched": true,
+       "menu_match_score": 85.0,
+       "raw_ocr_text": "あああああああああああああああああかきく",
+       "menu_context": [
+        "境界テスト貼紙"
+       ]
+      },
+      "kie_linking": []
+     },
+     {
+      "label": "text",
+      "score": 0.9,
+      "points": [
+       [
+        10.0,
+        50.0
+       ],
+       [
+        190.0,
+        50.0
+       ],
+       [
+        190.0,
+        80.0
+       ],
+       [
+        10.0,
+        80.0
+       ]
+      ],
+      "group_id": 0,
+      "description": "あああああああああああああああああいうえ",
+      "difficult": false,
+      "shape_type": "rectangle",
+      "flags": null,
+      "attributes": {
+       "category": "ticket",
+       "auto_matched": true,
+       "menu_match_score": 100.0,
+       "raw_ocr_text": "あああああああああああああああああいうえ",
+       "menu_context": [
+        "境界テスト貼紙"
+       ]
+      },
+      "kie_linking": []
+     }
+    ],
+    "imagePath": "20260919_103003_400__order_ticket__1.jpg",
+    "imageData": null,
+    "imageHeight": 100,
+    "imageWidth": 200,
+    "description": ""
+   }
+  },
+  {
+   "name": "no_text_found",
+   "category": "ticket",
+   "file": "20260919_103002_300__order_ticket__1.jpg",
+   "wh": [
+    200,
+    300
+   ],
+   "boxes": [],
+   "texts": [],
+   "confs": [],
+   "expected_label": {
+    "version": "4.0.0-beta.9",
+    "flags": {},
+    "checked": false,
+    "shapes": [],
+    "imagePath": "20260919_103002_300__order_ticket__1.jpg",
+    "imageData": null,
+    "imageHeight": 300,
+    "imageWidth": 200,
+    "description": ""
+   }
+  }
+ ]
+}

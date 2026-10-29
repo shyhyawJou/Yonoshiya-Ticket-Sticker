@@ -1,0 +1,1 @@
+Get-Content C:\Users\prima\Desktop\yoshinoya\yoshinoya-demo\logs\stream_log\20260407.log -Wait -Tail 100

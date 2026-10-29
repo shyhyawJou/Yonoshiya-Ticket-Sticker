@@ -133,6 +133,7 @@ class OrderParser:
         fuzzy_matcher: FuzzyMatcher,
         rec_pred,  # StandaloneRecDLA
         menu_index=None,
+        cv_assist: bool = False,
     ):
         self.menus_ticket = menus_ticket
         self.menus_with_digits = menus_with_digits
@@ -148,6 +149,13 @@ class OrderParser:
         # 最近一次 parse() 每一列的比對細節（原始文字 / 比對到的菜名 / 分數 / 數量與來源 / 被丟棄的原因 /
         # 該列用到的 det 框 index），給 utils/debug_sheet 的除錯總覽圖用。只讀，不影響解析結果。
         self.last_debug_rows: List[dict] = []
+        # CV 輔助（config 的 ticket_cv_assist，實驗中）：版面交給 CV、字交給 det，det 漏框才用 CV 框補讀。
+        # 找不到表格時 parse() 照舊走下面的 det 流程。見 logic/yoshinoya/ticket_cv_assist.py
+        self.cv_assist = None
+        if cv_assist:
+            from logic.yoshinoya.ticket_cv_assist import CvAssist
+            self.cv_assist = CvAssist(self.folded, self.menus_ticket, self.fuzzy_matcher, self.rec_pred)
+        self.last_cv_result = None   # 最近一次 CV 輔助的結果（含版面），沒走 CV 時為 None
 
     def pop_menu_bottom_line(self):
         """取出最近一次 parse() 的菜單區域下界 ((x0, y0), (x1, y1))，沒找到為 None。
@@ -171,6 +179,20 @@ class OrderParser:
         order_number: Optional[str] = None
         self._menu_bottom_line = None
         self.last_debug_rows = []
+        self.last_cv_result = None
+
+        # is_flip 時不走：AsyncOCR 交給 parser 前已經把 crop 轉正，is_flip 實際上恆為 False
+        if self.cv_assist is not None and not is_flip:
+            try:
+                res = self.cv_assist.parse(frame_crop, dt_boxes, rec_res)
+            except Exception as e:  # 實驗功能出錯不能讓整張傳票讀不到
+                logger.exception(f"[CV輔助] 發生例外，改用原本的解析: {e}")
+                res = None
+            if res is not None:
+                self.last_cv_result = res
+                self.last_debug_rows = res.debug_rows
+                self._menu_bottom_line = res.menu_bottom_line
+                return res.items, res.order_number
         nn_x = None  # 擺正後的數量欄中心 X 座標
         nn_w = None  # 擺正後的數量欄寬度
 

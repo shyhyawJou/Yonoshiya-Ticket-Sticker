@@ -1062,6 +1062,33 @@ class TextSystemDLA:
         )
         return rec_res, dt_boxes, is_flip, is_rotated_90
 
+    def predict_oriented(self, image_input, rotate_cw: int, obj_type="unknown"):
+        """方向已知時的 det -> rec：轉正後只跑一次 det、一輪 rec。
+
+        給吉野家大傳票開 CV 輔助時用 —— 方向由表格版面決定（logic/yoshinoya/ticket_cv_layout.py，
+        数欄在左 = 正向），不做 90 度檢查、cls 翻轉投票、翻轉比對與轉 180 重讀
+        （傳票常倒著放，原本幾乎每張都走「翻轉比對+轉180重讀」：det 2 次、rec 3 輪）。
+        cls 也不跑：整張已經轉正，cls 只會偶爾把單一框誤翻。
+
+        rotate_cw: 原圖要順時針轉幾度才是正向（0/90/180/270）。
+        回傳格式同 predict；(is_flip, is_rotated_90) 依 AsyncOCR 的慣例表示這個轉法，
+        dt_boxes 是轉正後影像上的座標，AsyncOCR 照舊依這兩個旗標把 crop 轉正。
+        """
+        st = time.time()
+        self._prof_reset()
+        self.prof["path"].append("CV定向")
+        rotate_cw %= 360
+        code = {90: cv2.ROTATE_90_CLOCKWISE, 180: cv2.ROTATE_180, 270: cv2.ROTATE_90_COUNTERCLOCKWISE}.get(rotate_cw)
+        img = image_input if code is None else cv2.rotate(image_input, code)
+        is_flip, is_rotated_90 = rotate_cw in (180, 270), rotate_cw in (90, 270)
+
+        dt_boxes, _ = self.run_det(img)
+        if len(dt_boxes) == 0:
+            return [], [], is_flip, is_rotated_90, time.time() - st
+        dt_boxes, img_crop_list = self._postprocess_and_crop(img, dt_boxes, obj_type)
+        rec_res, _ = self.run_rec(img_crop_list)
+        return rec_res, dt_boxes, is_flip, is_rotated_90, time.time() - st
+
     def predict(self, image_input, obj_type="unknown"):
         """主要預測流程"""
         st = time.time()
@@ -1218,6 +1245,29 @@ class StandaloneRecDLA:
 
         return text, score
 
+    def predict_text(self, img: np.ndarray, points) -> tuple:
+        """一般文字辨識（不限數字），回傳 (文字, 信心)。
+
+        給吉野家大傳票的 CV 輔助補讀 det 漏框的品名 / 單號用（logic/yoshinoya/ticket_cv_assist.py）。
+        predict / predict_quantity 只解碼 1~9，讀不了菜名。
+        解碼跟主流程 TextSystemDLA._decode 一樣套 REC_INDEX_MAPPING（井→丼 這類易混字修正）。
+        """
+        t_prof = time.perf_counter()
+        crop = self.get_rotate_crop_image(img, np.asarray(points, dtype=np.float32))
+        preds = self.rec_model.run(self._resize_norm_img(crop)).reshape(1, 40, -1)
+        char_list, conf_list, prev_token = [], [], None
+        for token, prob in zip(preds.argmax(axis=2)[0], preds.max(axis=2)[0]):
+            if token != 0 and token != prev_token:
+                if token in REC_INDEX_MAPPING:
+                    token = REC_INDEX_MAPPING[token]
+                char_list.append(self.character_str[token])
+                conf_list.append(prob)
+            prev_token = token
+        self.count += 1
+        self.prof_calls += 1
+        self.prof_ms += 1000 * (time.perf_counter() - t_prof)
+        return ''.join(char_list), (float(sum(conf_list) / len(conf_list)) if conf_list else 0.0)
+
     def predict(self, frame_crop, dt_box, is_flip, nn_x=None):
         """
         傳入單張事先裁切好的圖片
@@ -1331,14 +1381,18 @@ class StandaloneRecDLA:
 
 
 class AsyncOCR:
-    def __init__(self, det_path, cls_path, rec_path, dict_path, result_callback=None, ocr_routes=None):
+    def __init__(self, det_path, cls_path, rec_path, dict_path, result_callback=None, ocr_routes=None,
+                 ticket_cv_orient: bool = False):
         """
         Args:
             result_callback: 處理完成後的回調函數，格式: func(rec_res, dt_boxes, time_cost, metadata)
+            ticket_cv_orient: 大傳票（ticket / ticket_extra）先用 CV 版面決定方向再 det
+                              （吉野家 ticket_cv_assist，見 _cv_ticket_layout）
         """
         self.ocr_sys = TextSystemDLA(det_path, cls_path, rec_path, dict_path)
         from logic.ocr_routing import validate_routes
         self.ocr_routes = validate_routes(ocr_routes)
+        self.ticket_cv_orient = bool(ticket_cv_orient)
         self.input_queue = queue.Queue(maxsize=1)
         
         # 狀態控制
@@ -1389,6 +1443,28 @@ class AsyncOCR:
                 self._busy = False
             return False
 
+    @staticmethod
+    def _cv_ticket_layout(frame_crop):
+        """吉野家大傳票的 CV 版面（見 logic/yoshinoya/ticket_cv_layout.py），回傳 (版面, 給 [OCR#n] 路徑的註記)。
+
+        方向可信才拿來跳過 det 的翻轉比對；找不到表格或方向不可信時照舊流程，
+        版面仍交給解析器（找不到表格的話解析器直接走 legacy，不用再算一次）。
+        """
+        t = time.perf_counter()
+        try:
+            from logic.yoshinoya.ticket_cv_layout import analyze
+            layout = analyze(frame_crop)
+        except Exception as e:  # 實驗功能出錯不能讓整張傳票讀不到
+            logger.exception(f"[CV定向] 版面分析發生例外，照舊流程: {e}")
+            return None, "CV版面例外"
+        ms = 1000 * (time.perf_counter() - t)
+        if not layout.ok:
+            return layout, f"CV找不到表格{ms:.0f}ms"
+        if not layout.orientation_ok:
+            logger.info(f"[CV定向] 方向不可信（{layout.orientation_note}），照舊流程")
+            return layout, f"CV方向不可信{ms:.0f}ms"
+        return layout, f"CV版面{ms:.0f}ms(轉{layout.rotate})"
+
     def _worker_loop(self):
         """後台工作迴圈"""
         while self.running:
@@ -1430,7 +1506,16 @@ class AsyncOCR:
                 h0, w0 = frame_crop.shape[:2]
 
                 t0 = time.perf_counter()
-                rec_res, dt_boxes, is_flip, is_rotated_90, time_cost = self.ocr_sys.predict(frame_crop, obj_type=metadata['type'])
+                layout, cv_note = None, None
+                if self.ticket_cv_orient and metadata['type'] in ('ticket', 'ticket_extra'):
+                    layout, cv_note = self._cv_ticket_layout(frame_crop)
+                if layout is not None and layout.ok and layout.orientation_ok:
+                    rec_res, dt_boxes, is_flip, is_rotated_90, time_cost = self.ocr_sys.predict_oriented(
+                        frame_crop, layout.rotate, obj_type=metadata['type'])
+                else:
+                    rec_res, dt_boxes, is_flip, is_rotated_90, time_cost = self.ocr_sys.predict(frame_crop, obj_type=metadata['type'])
+                if cv_note:
+                    self.ocr_sys.prof["path"].insert(0, cv_note)
                 t1 = time.perf_counter()
                 trace['end_mono'] = time.monotonic()
                 trace['prof'] = dict(self.ocr_sys.prof, path=list(self.ocr_sys.prof["path"]))
@@ -1449,6 +1534,14 @@ class AsyncOCR:
                 if rot_code is not None:
                     T_total = _ROTATE_MATRIX_FN[rot_code](w0, h0) @ T_total
                     frame_crop = cv2.rotate(frame_crop, rot_code)
+
+                if layout is not None:
+                    # 版面交給解析器（OrderParser 的 CV 輔助），不用再算一次；
+                    # 版面是對原始 crop 算的，換算成對轉正後的 frame_crop
+                    from logic.yoshinoya.ticket_cv_layout import hand_off, rebase
+                    applied = {None: 0, cv2.ROTATE_90_CLOCKWISE: 90, cv2.ROTATE_180: 180,
+                               cv2.ROTATE_90_COUNTERCLOCKWISE: 270}[rot_code]
+                    hand_off(frame_crop, rebase(layout, applied, w0, h0))
 
                 is_rotated_90 = False
                 is_flip = False

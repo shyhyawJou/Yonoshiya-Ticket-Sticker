@@ -32,9 +32,11 @@ ticket_modifiers.py
            台帳認定（人工決定，不是靠字串猜）。文法規則只用來**提案**，
            讓 tools/verify_menu_modifiers.py 在 xlsx 改版後提醒有新的沒歸軸。
 2. 軸      湯軸 / 飯軸 / 配菜軸…。軸決定「可以換掉什麼」（`slots`）。
-3. 錨定    從修飾列往上找第一個「變體含有該軸成員」且該軸槽位還沒被用掉
-           的列。軸感知 + 槽位容量 + 最近往上，三者合起來才不會
-           「看到湯就亂換」。
+3. 錨定    從修飾列找最近一個「變體含有該軸可刪的成員」且該軸槽位還沒被用掉
+           的列。軸感知 + 槽位容量 + 最近，三者合起來才不會「看到湯就亂換」。
+           找的方向由軸的 anchor 決定：nearest_above 只往上（2026-09-21 的印法），
+           anywhere 先往上、沒有再往下（2026-10-28：POS 可能把變更品項都印在最下面）。
+           可刪的成員由軸的 remove_slots 決定（湯軸目前只刪 みそ汁）。
 
 刻意零依賴（只用 re / dataclasses / loguru），所以在 Windows 開發機上
 可以完整驗證，不需要 DLA 或相機。菜單知識由呼叫端注入，槽位數量由
@@ -60,6 +62,11 @@ from loguru import logger
 # 在台帳加 kind 與在狀態機加對應的套用分支。
 KIND_SUBSTITUTE = "substitute"
 
+# 錨定方式（menu_modifiers.yaml 軸的 anchor）
+ANCHOR_ABOVE = "nearest_above"   # 只往上找最近的套餐（2026-09-21 的印法：換湯一定印在套餐下方）
+ANCHOR_ANYWHERE = "anywhere"     # 先往上找最近的，上面沒有再往下找最近的
+_ANCHOR_MODES = (ANCHOR_ABOVE, ANCHOR_ANYWHERE)
+
 
 # ---------------------------------------------------------------------------
 # 知識層
@@ -77,6 +84,68 @@ class AxisCfg:
     name: str
     slots: frozenset = frozenset()
     display: str = ""
+    # 變更時實際要刪的槽位（slots 的子集）。空 = slots 全部都可以刪。
+    # slots 仍是「哪些貼紙算這一軸」的完整定義（自動推導修飾列要用），兩者分開。
+    removable: frozenset = frozenset()
+    anchor: str = ANCHOR_ABOVE
+    # 被刪的那一份照樣送前端顯示、貼了算 OK，只是不算完成條件（見 menu_modifiers.yaml）
+    show_removed: bool = False
+
+    def can_remove(self, sticker_name: str) -> bool:
+        return sticker_name in (self.removable or self.slots)
+
+
+@dataclass(frozen=True)
+class SetMainRule:
+    """套餐 -> 它下面那個 size 列要對到哪一種主餐（menu_modifiers.yaml 的 set_size_rows.mains）。
+
+    set_contains 為空 = 預設規則（其他所有套餐）。main 是主餐貼紙去掉 size 後的名字，
+    with_ 是同一份主餐另外會印的貼紙（ねぎ玉牛丼 = 牛丼 + ねぎ）。
+    """
+
+    set_contains: Tuple[str, ...]
+    main: str
+    with_: frozenset = frozenset()
+
+    def label(self) -> str:
+        return self.main + (f" + {'、'.join(sorted(self.with_))}" if self.with_ else "")
+
+
+@dataclass
+class SetSizeCfg:
+    """套餐名稱太長、主餐的 size 被印到下一列（`牛丼お新香みそ汁ｾｯﾄ` / `並`）的處理。
+
+    `並` 在 menus_mapping.yaml 是一對多（一般牛丼 / チーズ牛丼 / ねぎ玉 / 明太高菜マヨ），
+    客戶的菜單無法改，所以用套餐名稱決定這一列是哪一種主餐，見 resolve_set_sizes。
+    """
+
+    size_rows: frozenset = frozenset()       # 只有 size 的傳票品名（並 / 大 / 特 …）
+    size_words: Tuple[str, ...] = ()         # 從主餐貼紙去掉 size 時要認得的字（長的先比）
+    set_markers: Tuple[str, ...] = ()        # 套餐名稱開頭或結尾的字（セット / S）
+    mains: Tuple[SetMainRule, ...] = ()
+
+    def __bool__(self) -> bool:
+        return bool(self.size_rows and self.mains)
+
+    def main_of(self, sticker: str) -> Optional[str]:
+        """主餐貼紙去掉結尾的 size：`チーズ牛丼並盛` -> `チーズ牛丼`；不是主餐貼紙回 None。"""
+        s, changed = sticker, True
+        while changed:
+            changed = False
+            for w in self.size_words:
+                if w and s.endswith(w) and len(s) > len(w):
+                    s, changed = s[: -len(w)], True
+                    break
+        return s if s != sticker else None
+
+    def matches(self, rule: SetMainRule, combo: Sequence[str]) -> bool:
+        """這個貼紙組合是不是規則說的那一種主餐。"""
+        mains = [(sub, self.main_of(sub)) for sub in combo]
+        mains = [(sub, m) for sub, m in mains if m is not None]
+        if len(mains) != 1 or mains[0][1] != rule.main:
+            return False
+        extras = frozenset(sub for sub in combo if sub != mains[0][0])
+        return extras == rule.with_
 
 
 @dataclass(frozen=True)
@@ -167,9 +236,27 @@ class ModifierKnowledge:
             self.rules[key] = r
         self.not_modifier: Set[str] = {self._norm(n) for n in not_modifier}
         self.grammar = grammar or TicketGrammar()
+        self.set_sizes: SetSizeCfg = SetSizeCfg()
 
     def __bool__(self) -> bool:
-        return bool(self.rules)
+        return bool(self.rules) or bool(self.set_sizes)
+
+    # ------------------------------------------------------------------
+    def is_set(self, ticket_name: str) -> bool:
+        """套餐：去掉通路前綴（D) …）後，開頭或結尾是 set_markers（セット / S）。
+
+        只看頭尾不看中間：`S` 只有一個字，出現在中間的不算（2026-10 菜單盤點 32 筆全是套餐）。
+        """
+        body = self.grammar.strip_prefixes(self._norm(ticket_name))
+        return any(body.startswith(m) or body.endswith(m) for m in self.set_sizes.set_markers if m)
+
+    def set_main_rule(self, set_name: str) -> Optional[SetMainRule]:
+        """套餐名稱 -> 主餐規則（由上往下第一個命中；set_contains 空的是預設）。"""
+        name = self._norm(set_name)
+        for rule in self.set_sizes.mains:
+            if not rule.set_contains or any(c in name for c in rule.set_contains):
+                return rule
+        return None
 
     # ------------------------------------------------------------------
     def axis_of(self, ticket_name: str) -> Optional[str]:
@@ -181,6 +268,22 @@ class ModifierKnowledge:
         if cfg is None:
             return False
         return self._norm(sticker_name) in cfg.slots
+
+    def is_removable(self, axis: str, sticker_name: str) -> bool:
+        """這個 sub_item 是「變更時要刪的」那一份嗎？（軸的 remove_slots；沒設時 = is_slot）
+
+        錨定容量與實際扣除都用這個；is_slot 只用在認出修飾列（derive_from_menu）。
+        """
+        cfg = self.axes.get(axis)
+        return cfg is not None and cfg.can_remove(self._norm(sticker_name))
+
+    def anchor_mode(self, axis: str) -> str:
+        cfg = self.axes.get(axis)
+        return cfg.anchor if cfg else ANCHOR_ABOVE
+
+    def show_removed(self, axis: str) -> bool:
+        cfg = self.axes.get(axis)
+        return bool(cfg and cfg.show_removed)
 
     def slot_members(self, axis: str) -> frozenset:
         cfg = self.axes.get(axis)
@@ -315,6 +418,9 @@ class OrderLine:
     is_modifier: bool = False
     # 掛在這一列上的修飾（這一列是被修改的那個「錨」）
     modifiers: List[TicketModifier] = field(default_factory=list)
+    # size 列（`並`）屬於哪個套餐、對到哪一種主餐（見 resolve_set_sizes）；None = 照原本一對多
+    size_rule: Optional[SetMainRule] = None
+    size_set: str = ""
 
 
 SlotCounter = Callable[[str, str], int]
@@ -345,7 +451,10 @@ def resolve_modifiers(
         OrderLine(name=name, quantity=qty, row_index=idx)
         for idx, (name, qty) in enumerate(parsed_items)
     ]
-    if not know or not know.rules:
+    if not know:
+        return lines, []
+    resolve_set_sizes(lines, know)
+    if not know.rules:
         return lines, []
 
     # 每一列在各軸上已經被消耗掉的槽位數。同一個套餐被換兩次湯是不合理的，
@@ -378,39 +487,100 @@ def resolve_modifiers(
             row_index=line.row_index,
         )
 
-        anchor = _find_anchor(lines, line.row_index, axis, consumed, slot_counter)
-        if anchor is None:
+        anywhere = know.anchor_mode(axis) == ANCHOR_ANYWHERE
+        # 一個修飾列可以分攤到好幾個套餐：`変更あさり汁 x2` 配兩個各附一碗 みそ汁 的套餐
+        # （2026-10-28 現場傳票 853：3 個 ｾｯﾄポテトみそ汁 + 変更とん汁 x1 + 変更あさり汁 x2
+        # 全部印在最下面）。只錨一個套餐的話只會扣一碗，訂單就一直等那碗不會來的湯。
+        remaining = mod.quantity
+        while remaining > 0:
+            anchor = _find_anchor(lines, line.row_index, axis, consumed, slot_counter, anywhere=anywhere)
+            if anchor is None:
+                break
+            anchor_line, capacity = anchor
+            take = min(remaining, capacity)
+            part = TicketModifier(
+                kind=mod.kind, axis=axis, ticket_name=line.name, quantity=mod.quantity,
+                row_index=line.row_index, anchor_index=anchor_line.row_index,
+                anchor_name=anchor_line.name, applied=take,
+            )
+            consumed.setdefault(anchor_line.row_index, {})
+            consumed[anchor_line.row_index][axis] = (
+                consumed[anchor_line.row_index].get(axis, 0) + take
+            )
+            anchor_line.modifiers.append(part)
+            remaining -= take
+            logger.info(
+                f"[ticket_modifiers] '{line.name}' x{mod.quantity} 錨定到"
+                f"{'上方' if anchor_line.row_index < line.row_index else '下方'}第 "
+                f"{anchor_line.row_index} 列 '{anchor_line.name}'，"
+                f"扣除 {know.axis_display(axis)} x{take}"
+            )
+
+        if remaining == mod.quantity:
             unattached.append(mod)
             logger.warning(
                 f"[ticket_modifiers] 修飾列 '{line.name}'（{know.axis_display(axis)}）"
-                f"在它上方找不到含該軸槽位的套餐，退回當普通品項處理"
+                f"在{'整張傳票' if anywhere else '它上方'}找不到含可替換槽位的套餐，退回當普通品項處理"
             )
-            continue
-
-        anchor_line, capacity = anchor
-        take = min(mod.quantity, capacity)
-        mod.anchor_index = anchor_line.row_index
-        mod.anchor_name = anchor_line.name
-        mod.applied = take
-        consumed.setdefault(anchor_line.row_index, {})
-        consumed[anchor_line.row_index][axis] = (
-            consumed[anchor_line.row_index].get(axis, 0) + take
-        )
-        anchor_line.modifiers.append(mod)
-
-        logger.info(
-            f"[ticket_modifiers] '{line.name}' x{mod.quantity} 錨定到上方第 "
-            f"{anchor_line.row_index} 列 '{anchor_line.name}'，"
-            f"扣除 {know.axis_display(axis)} x{take}"
-        )
-        if take < mod.quantity:
+        elif remaining > 0:
+            # 換了一部分：剩下的份數錨不到，跟「整列錨不到」一樣回報
+            unattached.append(TicketModifier(
+                kind=mod.kind, axis=axis, ticket_name=line.name, quantity=remaining,
+                row_index=line.row_index,
+            ))
             logger.warning(
-                f"[ticket_modifiers] '{line.name}' 要換 {mod.quantity} 份，但 "
-                f"'{anchor_line.name}' 只剩 {capacity} 個 {know.axis_display(axis)} "
-                f"槽位，只扣 {take} 份"
+                f"[ticket_modifiers] '{line.name}' 要換 {mod.quantity} 份，但只找到 "
+                f"{mod.quantity - remaining} 個可換的 {know.axis_display(axis)} 槽位，"
+                f"剩 {remaining} 份錨不到"
             )
 
     return lines, unattached
+
+
+def resolve_set_sizes(lines: Sequence[OrderLine], know: ModifierKnowledge) -> None:
+    """size 列（`並`）往上找最近的套餐，用套餐名稱決定它是哪一種主餐，結果寫在 line.size_rule。
+
+    客戶的套餐名稱太長時，主餐的 size 會印到下一列：
+
+        1 牛丼お新香みそ汁ｾｯﾄ        <- 套餐（貼紙只有 お新香、みそ汁）
+        1   並                      <- 主餐的 size：`並` 一對多，可能是一般牛丼 / チーズ牛丼 / …
+
+    往上找時跳過其他 size 列（`D)牛からペアｾｯﾄ` 下面接兩列 `並`）與修飾列（換湯…）。
+    找不到套餐、或主餐規則對不上任何變體時不動作，維持原本的「任一種主餐都算」
+    （展開時才知道變體，見 OrderRequirements.expand_parsed_items）。
+    """
+    cfg = know.set_sizes
+    if not cfg:
+        return
+    for line in lines:
+        if know._norm(line.name) not in cfg.size_rows:
+            continue
+        owner = None
+        for j in range(line.row_index - 1, -1, -1):
+            cand = lines[j]
+            if know._norm(cand.name) in cfg.size_rows or know.axis_of(cand.name) is not None:
+                continue
+            if know.is_set(cand.name):
+                owner = cand
+            break   # 碰到第一個不是 size 列 / 修飾列的列就停：不是套餐就代表這列 size 不屬於套餐
+        if owner is None:
+            logger.info(
+                f"[ticket_modifiers] size 列 '{line.name}'（第 {line.row_index} 列）上方找不到套餐，"
+                f"維持原本的「任一種主餐都算」"
+            )
+            continue
+        rule = know.set_main_rule(owner.name)
+        if rule is None:
+            logger.warning(
+                f"[ticket_modifiers] size 列 '{line.name}' 屬於套餐 '{owner.name}'，但主餐規則沒有"
+                f"任何一條命中（set_size_rows.mains 少了預設規則？），維持原本的一對多"
+            )
+            continue
+        line.size_rule, line.size_set = rule, owner.name
+        logger.info(
+            f"[ticket_modifiers] size 列 '{line.name}'（第 {line.row_index} 列）屬於上方套餐 "
+            f"'{owner.name}'（第 {owner.row_index} 列）→ 主餐 {rule.label()}"
+        )
 
 
 def _find_anchor(
@@ -419,14 +589,22 @@ def _find_anchor(
     axis: str,
     consumed: Dict[int, Dict[str, int]],
     slot_counter: SlotCounter,
+    anywhere: bool = False,
 ) -> Optional[Tuple[OrderLine, int]]:
-    """從 from_index 往上找第一個還有該軸空槽位的列。
+    """從 from_index 找最近一個還有該軸空槽位的列。
 
-    往上找是現場確認過的印法：換湯一定印在套餐下方（2026-09-21）。
-    刻意不做「找不到就往下找」的 fallback —— 那會在傳票版面改變時
-    靜默地換錯套餐，而漏換只是退回改動前的行為。
+    anywhere=False（nearest_above）：只往上找。2026-09-21 現場確認的印法是換湯一定印在
+    套餐下方，所以當時刻意不做「找不到就往下找」—— 版面改變時會靜默地換錯套餐。
+
+    anywhere=True：先往上、上面沒有再往下。2026-10-28 客戶說明 POS 可能把所有變更品項
+    印在傳票最下面，換湯不再對應「正上方那個套餐」，而是「這張傳票裡附的那碗湯」。
+    刪哪一個套餐的湯對核對結果沒有差別（扣的都是同一種湯），只影響顯示上是哪一份少了湯，
+    所以仍先取上方最近的，舊印法的結果跟以前一樣。
     """
-    for j in range(from_index - 1, -1, -1):
+    order = list(range(from_index - 1, -1, -1))
+    if anywhere:
+        order += list(range(from_index + 1, len(lines)))
+    for j in order:
         cand = lines[j]
         if cand.is_modifier:
             continue          # 修飾列自己不能當錨
@@ -503,10 +681,28 @@ def load_modifier_knowledge(
                 f"[ticket_modifiers] 軸 '{entry['name']}' 沒有任何 slots，"
                 "它不會扣掉任何東西"
             )
+        removable = frozenset(
+            norm(canon(str(s))) for s in (entry.get("remove_slots") or []) if str(s).strip()
+        )
+        if removable - slots:
+            logger.warning(
+                f"[ticket_modifiers] 軸 '{entry['name']}' 的 remove_slots 有不在 slots 裡的: "
+                f"{sorted(removable - slots)}（照樣會刪，但請確認是不是寫錯）"
+            )
+        anchor = str(entry.get("anchor") or ANCHOR_ABOVE)
+        if anchor not in _ANCHOR_MODES:
+            logger.warning(
+                f"[ticket_modifiers] 軸 '{entry['name']}' 的 anchor={anchor!r} 不認得，"
+                f"改用 {ANCHOR_ABOVE}（可用: {list(_ANCHOR_MODES)}）"
+            )
+            anchor = ANCHOR_ABOVE
         axes.append(AxisCfg(
             name=str(entry["name"]),
             slots=slots,
             display=str(entry.get("display") or ""),
+            removable=removable,
+            anchor=anchor,
+            show_removed=bool(entry.get("show_removed", False)),
         ))
 
     rules: List[SubstitutionRule] = []
@@ -529,15 +725,63 @@ def load_modifier_knowledge(
         axes=axes, rules=rules, not_modifier=not_modifier,
         grammar=grammar, normalize=norm,
     )
+    know.set_sizes = _load_set_sizes(data.get("set_size_rows") or {}, norm, canon)
     if know.rules:
+        def _axis_txt(a):
+            rm = f"、只刪 {sorted(a.removable)}" if a.removable else ""
+            return f"{a.name}:{len(a.slots)}槽{rm}、錨定={a.anchor}、被刪的{'照樣顯示' if a.show_removed else '不顯示'}"
         logger.info(
             f"[ticket_modifiers] 載入軸 {len(know.axes)} 個"
-            f"（{', '.join(f'{a.name}:{len(a.slots)}槽' for a in axes)}）、"
+            f"（{'；'.join(_axis_txt(a) for a in axes)}）、"
             f"修飾列台帳 {len(know.rules)} 筆、已判定非修飾列 {len(know.not_modifier)} 筆"
         )
     else:
         logger.info("[ticket_modifiers] 沒有修飾列台帳，傳票修飾功能停用")
     return know
+
+
+def _load_set_sizes(data: dict, norm, canon) -> SetSizeCfg:
+    """menu_modifiers.yaml 的 set_size_rows -> SetSizeCfg（沒寫就是停用）。"""
+    if not data:
+        return SetSizeCfg()
+    size_rows = frozenset(norm(str(s)) for s in (data.get("size_rows") or []) if str(s).strip())
+    words = {norm(str(s)) for s in list(data.get("size_rows") or []) + list(data.get("size_suffixes") or [])}
+    mains = []
+    for entry in data.get("mains") or []:
+        if not isinstance(entry, dict) or not entry.get("main"):
+            logger.warning(f"[ticket_modifiers] 無法解析的 set_size_rows.mains 條目: {entry!r}")
+            continue
+        mains.append(SetMainRule(
+            set_contains=tuple(norm(str(c)) for c in (entry.get("set_contains") or []) if str(c).strip()),
+            main=norm(str(entry["main"])),
+            with_=frozenset(norm(canon(str(w))) for w in (entry.get("with") or []) if str(w).strip()),
+        ))
+    cfg = SetSizeCfg(
+        size_rows=size_rows,
+        size_words=tuple(sorted((w for w in words if w), key=len, reverse=True)),
+        set_markers=tuple(norm(str(m)) for m in (data.get("set_markers") or []) if str(m).strip()),
+        mains=tuple(mains),
+    )
+    if cfg:
+        logger.info(
+            f"[ticket_modifiers] 套餐 size 列：size {sorted(size_rows)}、套餐標記 {list(cfg.set_markers)}、"
+            f"主餐規則 {len(mains)} 條（{'；'.join(r.label() for r in mains)}）"
+        )
+    return cfg
+
+
+def load_extra_sets(modifiers_path: Optional[str]) -> List[Tuple[str, List[str]]]:
+    """set_size_rows.extra_sets：客戶菜單還沒收錄、但現場會出現的套餐 [(傳票名, 貼紙)]。
+
+    config.load_config 在建菜名索引之前呼叫，讓解析器認得這個名字。貼紙可以是空的
+    （套餐本身不印貼紙，內容由下面的 size 列 / 獨立列帶出）。
+    """
+    data = _read_yaml(modifiers_path, "menu_modifiers").get("set_size_rows") or {}
+    out = []
+    for entry in data.get("extra_sets") or []:
+        if isinstance(entry, dict) and entry.get("ticket"):
+            out.append((str(entry["ticket"]), [str(s) for s in (entry.get("sub_items") or [])]))
+    return out
 
 
 def _read_yaml(path: Optional[str], label: str) -> dict:

@@ -76,8 +76,7 @@ class LogicEngine:
           放在 tracker 或 state machine 裡都不合適。
     """
 
-    def __init__(self, cfg: Config, bus: MqttBus, mmr: Rotated_RTMDET, rec_path: str, dict_path: str, on_recording_start=None, on_recording_stop=None, get_video_filename=None,
-                 save_frame=None):
+    def __init__(self, cfg: Config, bus: MqttBus, mmr: Rotated_RTMDET, rec_path: str, dict_path: str, on_recording_start=None, on_recording_stop=None, get_video_filename=None):
         self.cfg = cfg
         self.bus = bus
         self.mmr = mmr
@@ -85,9 +84,6 @@ class LogicEngine:
         self.on_recording_start = on_recording_start or (lambda reason="": None)
         self.on_recording_stop = on_recording_stop or (lambda reason="": None)
         self.get_video_filename = get_video_filename or (lambda session_id: "")
-        # save_frame(tag)：請 App 存一張當下的原始全幀。醬料包不走 OCR、沒有「送出 OCR」那一幀，
-        # 所以在它下 OK/NG 結論時由狀態機呼叫（None = 不存）。
-        self.save_frame = save_frame
 
         #### 2026/06/24 by Chris
         self.menus_ticket = [normalize_text(m, ignore_space=True) for m in cfg.menus_ticket]
@@ -134,7 +130,8 @@ class LogicEngine:
         # 訂單 OCR 解析 / 貼紙比對：穩定層，與 tray 概念解耦
         # 傳票解析器依品牌（ticket_parser）：吉野家 legacy 是預設，Suzumo 的 table 才載入 szm 那份
         parser_class = OrderParser
-        parser_options = {"menu_index": self.ticket_index}
+        parser_options = {"menu_index": self.ticket_index,
+                          "cv_assist": bool(getattr(cfg, "ticket_cv_assist", False))}
         if cfg.ticket_parser == "table":
             from logic.szm.order_parser import OrderParser as TableParser
             parser_class = TableParser
@@ -265,7 +262,6 @@ class LogicEngine:
             wrong_item_strong_score=float(getattr(cfg.stability, "wrong_item_strong_score", 0) or 0),
             wrong_item_strong_conf=float(getattr(cfg.stability, "wrong_item_strong_conf", 0.9) or 0),
             debug_sheet=self.debug_sheet,
-            save_frame=self.save_frame,
         )
 
         # CSV log 跟影片放在同一個日期資料夾底下 (<root>/<日期>/csv_logs/)，

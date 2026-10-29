@@ -391,6 +391,9 @@ class Config:
     preset_roi: Optional[PresetRoiCfg] = None   # 新增:僅 mode == "preset_roi" 時才會有值
     ocr_routes: Dict[str, str] = field(default_factory=dict)
     ticket_parser: str = "table"
+    # 吉野家大傳票（ticket_parser: legacy）的 CV 輔助：用表格框線 / 方框決定版面，det 漏框時用 CV 框補讀。
+    # 實驗中，預設關閉；找不到表格時自動退回原本的解析。見 logic/yoshinoya/ticket_cv_assist.py
+    ticket_cv_assist: bool = False
     object_class_items: Dict[str, str] = field(default_factory=dict)
     # 傳票名稱 -> 多個貼紙組合變體（同名多列的來源，見 load_config 的說明）。
     # 值一定是 List[List[str]]：即使只有一個變體也包一層，呼叫端不需要分岔。
@@ -517,6 +520,20 @@ def load_config(config_path: str, overrides=None) -> Config:
                     sub_items=[str(s) for s in mc["sub_items"]]
                 ))
 
+        # 人工補的套餐（menu_modifiers.yaml 的 set_size_rows.extra_sets）：客戶菜單還沒收錄、
+        # 但現場會出現的。menus_mapping.yaml 是 xlsx 的忠實投影、不可手改，所以補在那邊。
+        # 要在建菜名索引之前加，解析器才認得這個名字。貼紙可以是空的（套餐本身不印貼紙）。
+        from logic.ticket_modifiers import load_extra_sets
+        known_names = {mc.name for mc in mapping_cases}
+        extra_set_names = set()
+        for name, subs in load_extra_sets(_resolve(base_dir, inc.get("menu_modifiers") or "menu_modifiers.yaml")):
+            if name in known_names:
+                logger.warning(f"[config] extra_sets 的 '{name}' 已經在 menus_mapping.yaml 裡，忽略人工補的這筆")
+                continue
+            mapping_cases.append(MappingCasesCfg(name=name, sub_items=subs))
+            extra_set_names.add(name)
+            logger.info(f"[config] 人工補的套餐（客戶菜單沒有）: {name} -> {subs or '（本身不印貼紙）'}")
+
         # ------------------------------------------------------------------
         # 菜名等價層（同菜異寫）
         # ------------------------------------------------------------------
@@ -561,7 +578,9 @@ def load_config(config_path: str, overrides=None) -> Config:
             key = ticket_index.canonical_or_self(mc.name)
             combo = [sticker_index.canonical_or_self(sub) for sub in mc.sub_items]
             combos = menu_variants.setdefault(key, [])
-            if combo and combo not in combos:   # 同內容的重複列不必留兩份
+            # 同內容的重複列不必留兩份。空組合只收人工補的套餐（本身不印貼紙）：其他品項
+            # 沒寫 sub_items 時維持舊行為（退回「貼紙就是它自己」）
+            if (combo or mc.name in extra_set_names) and combo not in combos:
                 combos.append(combo)
 
         multi = {k: v for k, v in menu_variants.items() if len(v) > 1}
@@ -839,6 +858,7 @@ def load_config(config_path: str, overrides=None) -> Config:
             raise ValueError(f"Unknown object_class_items: {sorted(unknown)}")
         return Config(
             ticket_parser=parser,
+            ticket_cv_assist=bool(base.get("ticket_cv_assist", False)),
             object_class_items=object_class_items,
             ocr_routes=validate_routes(base.get('ocr_routes', {})),
             mqtt=mqtt,

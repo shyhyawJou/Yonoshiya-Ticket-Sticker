@@ -8,7 +8,7 @@
 | `classes.yaml` | 偵測器的 11 個類別與 id，**必須跟 `.dla` 模型訓練時一致** |
 | `menus_mapping.yaml` | 菜單來源：每筆 `name` 展開成「傳票」品項、`sub_items` 展開成「貼紙」品項 |
 | `menu_aliases.yaml` | 菜名身份的人工台帳（同菜異寫 `equivalents` / 確認不同 `distinct`） |
-| `menu_modifiers.yaml` | 傳票修飾列的人工台帳（換湯、換飯…）；搭配共用的 `../ja_ticket_grammar.yaml` |
+| `menu_modifiers.yaml` | 傳票修飾列的人工台帳（換湯、換飯…）與套餐 size 列（`set_size_rows`）；搭配共用的 `../ja_ticket_grammar.yaml` |
 | `japan_dict.txt` | OCR rec 的字典檔 |
 
 四份菜單相關的 yaml 是**四種不同性質的知識**，改東西前先確定該動哪一份：
@@ -18,7 +18,7 @@
 | `../ja_readings.yaml` | 通用日文讀音規則（唐→から、盛→省略），跨品牌 | 不會 |
 | `../ja_ticket_grammar.yaml` | 通用傳票修飾詞文法（`変更X` / `Xに変更` / `変)X`），跨品牌。**只做提案不做認定** | 不會 |
 | `menu_aliases.yaml` | 本品牌的菜名身份判定 | 不會 |
-| `menu_modifiers.yaml` | 本品牌的修飾列判定（哪一列是修改、換掉哪一軸） | 不會 |
+| `menu_modifiers.yaml` | 本品牌的修飾列判定（哪一列是修改、換掉哪一軸）、套餐 size 列的主餐規則、客戶菜單缺的套餐（`extra_sets`） | 不會 |
 | `menus_mapping.yaml` | 客戶 xlsx 的忠實投影 | **會，整份覆蓋** |
 
 所以任何人工判斷都不可以寫進 `menus_mapping.yaml`。
@@ -405,6 +405,26 @@ key 也可以寫縮寫 `ticket` / `sticker`。值打錯會在載入設定時直�
 
 `legacy` = `logic/yoshinoya/order_parser.py`（依吉野家傳票版面寫的版本）；
 `table` = `logic/szm/order_parser.py`（Suzumo 的表格解析，會用到 `vocab_ticket`）。
+
+### `ticket_cv_assist` — 大傳票 CV 輔助（實驗中）
+
+```yaml
+ticket_cv_assist: true     # 不寫 = false
+```
+
+只對 `ticket_parser: legacy` 有效。打開後，大傳票（`order_ticket`）改成「版面交給 CV、字交給 det」：
+
+1. **det 之前先用表格框線決定方向**：数欄（最窄那欄）在左 = 正向。方向可信（表格高度剛好是
+   整數個列距、表格左邊有方框）就只跑一次 det、一輪 rec，省掉「翻轉比對 / 轉180重讀」。
+   log：`[OCR#n ■ ticket] 路徑=CV版面98ms(轉180)+CV定向`
+2. **左邊有方框或数欄有字的列才是品項**；`■■追加■■`、`●テイクアウト●`、`▲▲取消▲▲` 是段落標題。
+   取消段落裡的品項目前**只記 log、照常核對**。
+3. **det 框依位置分到 CV 的列與欄**；det 漏框、只框到一部分、或字對菜單不完整的格子才用 CV 框
+   補讀，log 標 `[CV補救]`。單號優先用 det 框，沒有才讀 CV 框。
+4. **找不到表格**（紙被切到、疊在別張上）或方向不可信時，走原本的流程，結果跟關閉時一樣。
+
+實作在 `logic/yoshinoya/ticket_cv_layout.py`（版面）與 `ticket_cv_assist.py`（分工與補救）；
+在機器上離線比較兩條路的準確率與耗時：`python3 tools/ticket_cv_probe.py --out <資料夾> "<傳票 crop 或 --frames 整張畫面>"`。
 
 ---
 

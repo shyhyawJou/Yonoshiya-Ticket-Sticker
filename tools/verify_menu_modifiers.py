@@ -48,7 +48,7 @@ import yaml  # noqa: E402
 from logic.menu_alias import build_menu_index, load_alias_knowledge  # noqa: E402
 from logic.text_utils import normalize_text  # noqa: E402
 from logic.ticket_modifiers import (  # noqa: E402
-    load_modifier_knowledge, resolve_modifiers,
+    load_extra_sets, load_modifier_knowledge, resolve_modifiers,
 )
 
 TASKS_DIR = os.path.join(
@@ -80,6 +80,15 @@ class Brand:
             ticket_pool.append(name)
             sticker_pool.extend(subs)
             rows.append((name, subs))
+        # 與 config.load_config 相同：人工補的套餐（menu_modifiers.yaml 的 set_size_rows.extra_sets）
+        known = {n for n, _ in rows}
+        self.extra_sets = set()
+        for name, subs in load_extra_sets(os.path.join(self.dir, "menu_modifiers.yaml")):
+            if name not in known:
+                ticket_pool.append(name)
+                sticker_pool.extend(subs)
+                rows.append((name, subs))
+                self.extra_sets.add(name)
 
         know = load_alias_knowledge(
             SHARED_READINGS, os.path.join(self.dir, "menu_aliases.yaml")
@@ -95,7 +104,7 @@ class Brand:
             key = self.ticket_index.canonical_or_self(name)
             combo = [self.sticker_index.canonical_or_self(s) for s in subs]
             combos = self.menu_variants.setdefault(key, [])
-            if combo and combo not in combos:
+            if (combo or name in self.extra_sets) and combo not in combos:
                 combos.append(combo)
 
         self.sticker_names = {self.sticker_index.canonical_or_self(s)
@@ -120,7 +129,8 @@ class Brand:
         from logic.order_requirements import OrderRequirements
         variants = self.menu_variants.get(ticket_name) or [[ticket_name]]
         primary = OrderRequirements.pick_primary_variant(ticket_name, variants)
-        return sum(1 for sub in primary if self.modifiers.is_slot(axis, sub))
+        slots = sum(1 for sub in primary if self.modifiers.is_removable(axis, sub))
+        return 0 if (slots and len(primary) <= 1) else slots   # 單點的湯不算槽位
 
     def state_machine(self):
         """只為了呼叫 requirements.expand_parsed_items —— 它不會用到 bus/parser/matcher。"""
@@ -239,10 +249,76 @@ CHG_TON = "変更とん汁"              # 貼紙 ※変更豚汁
 CHG_SUFFIX = "しじみ汁変更"         # 2026-09-21 現場加的寫法，靠自動推導認出
 PLAIN_SOUP = "しじみ汁"             # 單品湯，不是修飾列
 PLAIN_ASARI = "あさり汁"            # 單品湯，且是湯軸成員 -> 不可以當錨
+PLAIN_MISO = "みそ汁"               # 單點的味噌湯 -> 不可以被刪
+SET_TON = "牛丼お新香とん汁ｾｯﾄ"     # sub_items = [お新香, 豚汁]：預設湯不是 みそ汁
+SET_POTATO = "ｾｯﾄポテトみそ汁"      # sub_items = [ポテトサラダ, みそ汁]
+DRESSING = "ごまドレッシング"
+CHG_ASARI = "変更あさり汁"          # 貼紙 ※変更あさり
 BOWL = "牛丼・並"
+# 套餐的主餐 size 印在下一列（set_size_rows）
+SET_CHEESE = "D)ﾁｰｽﾞ牛丼ｻﾗﾀﾞS"       # サラダ、みそ汁
+SET_NEGITAMA = "D)ねぎ玉牛丼ｻﾗﾀﾞS"   # サラダ、みそ汁、玉子
+SET_MENTAI = "D)明高ﾏﾖ牛丼ｻﾗﾀﾞS"    # サラダ、みそ汁
+SET_PAIR = "D)牛からペアｾｯﾄ"        # extra_sets 人工補的，本身不印貼紙
+KARAAGE6 = "から揚げ６個"        # 傳票印 唐揚げ６個，等價層折成 から揚げ6個
+
+# 2026-10-28 起湯軸的設定（menu_modifiers.yaml）：anchor=anywhere、remove_slots=[みそ汁]。
+# 場景的第 4 欄可以暫時改掉軸設定（例如 show_removed），只在該場景有效。
 
 SCENARIOS = [
     # (說明, 傳票列 [(品名, 數量)], 檢查函式)
+    (
+        "size 列：チーズ牛丼套餐下面的 並 -> 只留 チーズ牛丼並盛",
+        [(SET_CHEESE, 1), ("並", 1)],
+        lambda r: (
+            r["union"]["チーズ牛丼並盛"] == 1 and r["union"]["牛丼並"] == 0
+            and len(r["combos"]) == 1 and r["display"].get("チーズ牛丼並盛") == 1
+        ),
+    ),
+    (
+        "size 列：ねぎ玉牛丼套餐下面的 並 -> 牛丼並 + ねぎ（玉子 在套餐裡）",
+        [(SET_NEGITAMA, 1), ("並", 1)],
+        lambda r: (
+            r["union"]["牛丼並"] == 1 and r["union"]["ねぎ"] == 1 and r["union"]["玉子"] == 1
+            and r["union"]["チーズ牛丼並盛"] == 0 and len(r["combos"]) == 1
+        ),
+    ),
+    (
+        "size 列：明太高菜マヨ牛丼套餐下面的 大 -> 明太高菜マヨ牛丼大 + 明太高菜マヨ",
+        [(SET_MENTAI, 1), ("大", 1)],
+        lambda r: (
+            r["union"]["明太高菜マヨ牛丼大"] == 1 and r["union"]["明太高菜マヨ"] == 1
+            and r["union"]["牛丼大"] == 0 and len(r["combos"]) == 1
+        ),
+    ),
+    (
+        "size 列：一般套餐（牛丼お新香みそ汁セット）下面的 並 -> 一般牛丼",
+        [(SET, 1), ("並", 1)],
+        lambda r: r["union"]["牛丼並"] == 1 and r["union"]["チーズ牛丼並盛"] == 0 and len(r["combos"]) == 1,
+    ),
+    (
+        "現場傳票 319：D)牛からペアｾｯﾄ（人工補的）+ 並 + 並 + 唐揚げ６個 -> 牛丼並 x2",
+        [(SET_PAIR, 1), ("並", 1), ("並", 1), (KARAAGE6, 1)],
+        lambda r: (
+            r["union"]["牛丼並"] == 2 and r["union"]["チーズ牛丼並盛"] == 0
+            and len(r["combos"]) == 1 and N(SET_PAIR) not in r["union"]
+        ),
+    ),
+    (
+        "size 列上方沒有套餐：維持原本的一對多（4 種主餐任一）",
+        [("並", 1)],
+        lambda r: len(r["combos"]) == 4,
+    ),
+    (
+        "size 列跟套餐之間隔了普通品項：不算屬於套餐，維持一對多",
+        [(SET_CHEESE, 1), (KARAAGE6, 1), ("並", 1)],
+        lambda r: len(r["combos"]) == 4,
+    ),
+    (
+        "size 列跟套餐之間隔了換湯列：跳過修飾列，照樣認得套餐",
+        [(SET_CHEESE, 1), (CHG_SHIJIMI, 1), ("並", 1)],
+        lambda r: r["union"]["チーズ牛丼並盛"] == 1 and r["union"]["みそ汁"] == 0 and len(r["combos"]) == 1,
+    ),
     (
         "套餐 + 換湯：みそ汁 被換成 ※変更しじみ",
         [(BOWL, 1), (SET, 1), (CHG_SHIJIMI, 1)],
@@ -283,9 +359,61 @@ SCENARIOS = [
         lambda r: r["union"]["※変更しじみ"] == 1 and r["unattached"] == 1,
     ),
     (
-        "換湯列印在套餐上方：規則只往上找，所以錨不到（不亂猜）",
+        "換湯列印在套餐上方：上面沒有套餐就往下找，みそ汁 照樣刪（2026-10-28 起）",
         [(CHG_SHIJIMI, 1), (SET, 1)],
+        lambda r: r["union"]["みそ汁"] == 0 and r["unattached"] == 0,
+    ),
+    (
+        "變更品項全部印在最下面：兩個套餐、兩個換湯列都在最後，兩碗 みそ汁 都刪",
+        [(SET, 1), (SET2, 1), (BOWL, 1), (CHG_SHIJIMI, 1), (CHG_TON, 1)],
+        lambda r: (
+            r["union"]["みそ汁"] == 0
+            and r["display"].get("みそ汁", 0) == 0
+            and r["union"]["※変更しじみ"] == 1
+            and r["unattached"] == 0
+        ),
+    ),
+    (
+        "現場傳票 853：3 個 ｾｯﾄポテトみそ汁 + 最下面 変更とん汁 x1、変更あさり汁 x2，三碗 みそ汁 全刪",
+        [(SET_POTATO, 1), (DRESSING, 1), (SET_POTATO, 1), (DRESSING, 1), (SET_POTATO, 1), (DRESSING, 1),
+         (CHG_TON, 1), (CHG_ASARI, 2)],
+        lambda r: (
+            r["union"]["みそ汁"] == 0
+            and all(c.get("みそ汁", 0) == 0 for c in r["combos"])
+            and r["union"]["※変更あさり"] == 2
+            and r["unattached"] == 0
+        ),
+    ),
+    (
+        "換湯份數比套餐多：変更あさり汁 x2 只有一個套餐，換一碗、剩 1 份回報錨不到",
+        [(SET, 1), (CHG_ASARI, 2)],
+        lambda r: r["union"]["みそ汁"] == 0 and r["unattached"] == 1,
+    ),
+    (
+        "預設湯是 豚汁 的套餐：不在 remove_slots 裡，看到換湯不刪、錨不到",
+        [(SET_TON, 1), (CHG_SHIJIMI, 1)],
+        lambda r: r["union"]["豚汁"] == 1 and r["unattached"] == 1,
+    ),
+    (
+        "豚汁套餐 + みそ汁套餐 + 換湯：只刪 みそ汁，豚汁 不動",
+        [(SET_TON, 1), (SET, 1), (CHG_SHIJIMI, 1)],
+        lambda r: r["union"]["みそ汁"] == 0 and r["union"]["豚汁"] == 1 and r["unattached"] == 0,
+    ),
+    (
+        "單點的 みそ汁 不可以被刪：只有單點湯 + 換湯時錨不到",
+        [(PLAIN_MISO, 1), (CHG_SHIJIMI, 1)],
         lambda r: r["union"]["みそ汁"] == 1 and r["unattached"] == 1,
+    ),
+    (
+        "show_removed=true：みそ汁 照樣顯示、貼了算 OK，但不算完成條件",
+        [(SET, 1), (CHG_SHIJIMI, 1)],
+        lambda r: (
+            r["union"]["みそ汁"] == 1                                  # 貼了不報錯誤品項
+            and r["display"].get("みそ汁") == 1                        # 前端照樣列出
+            and all(c.get("みそ汁", 0) == 0 for c in r["combos"])      # 不算完成條件
+            and r["subs"] and all(s["displayed"] for s in r["subs"])
+        ),
+        {"show_removed": True},
     ),
     (
         "一個套餐被換兩次：第二次沒有槽位可用，錨不到",
@@ -337,19 +465,28 @@ def run_scenarios(b: Brand) -> int:
     sm = b.state_machine()
     failed = 0
     print(f"\n{'=' * 72}\n場景回歸（錨定規則）\n{'=' * 72}")
-    for desc, items, check in SCENARIOS:
+    import dataclasses
+    know = sm.requirements.modifier_knowledge
+    for desc, items, check, *knobs in SCENARIOS:
         norm_items = [(N(n), q) for n, q in items]
         missing = [n for n, _ in norm_items if n not in b.menu_variants]
         if missing:
             print(f"  [skip] {desc}\n         菜單裡沒有: {missing}")
             continue
-        union, display, combos, _alias = sm.requirements.expand_parsed_items(norm_items)
+        saved = dict(know.axes)
+        if knobs and "soup" in know.axes:   # 暫時改湯軸設定，只在這個場景有效
+            know.axes["soup"] = dataclasses.replace(know.axes["soup"], **knobs[0])
+        try:
+            union, display, combos, _alias = sm.requirements.expand_parsed_items(norm_items)
+        finally:
+            know.axes.clear(); know.axes.update(saved)
         result = {
             "union": Counter(union),
             "display": Counter({k: v for d in display for k, v in d.items()
                                 if v is not None}),
             "combos": combos,
             "unattached": len(sm.requirements.last_unattached_modifiers),
+            "subs": list(sm.requirements.last_substitutions),
         }
         ok = False
         try:

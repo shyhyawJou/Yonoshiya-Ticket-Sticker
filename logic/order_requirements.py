@@ -201,12 +201,15 @@ class OrderRequirements:
         那碗湯，不是「附湯的套餐」。不排除的話，傳票上單獨點的一碗湯會變成
         合法的錨定對象，換湯就可能扣掉它而不是套餐裡那碗（實測傳票
         441 號同時有 `しじみ汁変更` 與單品 `あさり汁`，只是順序剛好沒踩到）。
+
+        只算「變更時要刪的」那種（軸的 remove_slots，湯軸目前只有 みそ汁）：附 豚汁 的套餐
+        看到變更湯不會被錨定、也不會被扣。
         """
         if not self.modifier_knowledge:
             return 0
         variants = self.menu_variants.get(ticket_name) or [[ticket_name]]
         primary = self.pick_primary_variant(ticket_name, variants)
-        slots = sum(1 for sub in primary if self.modifier_knowledge.is_slot(axis, sub))
+        slots = sum(1 for sub in primary if self.modifier_knowledge.is_removable(axis, sub))
         if slots and len(primary) <= 1:
             return 0
         return slots
@@ -223,7 +226,7 @@ class OrderRequirements:
         for sub in list(counter.keys()):
             if left <= 0:
                 break
-            if not self.modifier_knowledge.is_slot(axis, sub):
+            if not self.modifier_knowledge.is_removable(axis, sub):
                 continue
             take = min(left, counter[sub])
             if take <= 0:
@@ -248,13 +251,19 @@ class OrderRequirements:
                              部分 —— 那正是本專案最該避免的失效方式，所以
                              也扣，讓它走 WRONG_ITEM。
 
+        軸設了 show_removed: true 時**只扣 combos**（2026-10-28）：現場可能同時貼みそ汁與
+        變更湯、也可能只貼變更湯，客戶還在決定前端要不要列出那碗みそ汁。所以
+        display 照樣列出、union 照樣收（貼了算 OK，不報 WRONG_ITEM），但不算完成條件 ——
+        只貼變更湯也能 TRAY_COMPLETED。
+
         回傳實際被換掉的品項（給 log 與 MQTT 回報用）。
         """
         removed: Counter = Counter()
         for counter in variant_counters:
             removed.update(self._remove_axis_slot(counter, mod.axis, mod.applied))
-        self._remove_axis_slot(union, mod.axis, mod.applied)
-        self._remove_axis_slot(primary_counts, mod.axis, mod.applied)
+        if not self.modifier_knowledge.show_removed(mod.axis):
+            self._remove_axis_slot(union, mod.axis, mod.applied)
+            self._remove_axis_slot(primary_counts, mod.axis, mod.applied)
         return removed
 
     @staticmethod
@@ -270,7 +279,8 @@ class OrderRequirements:
             else:
                 notes.append(f"共 {len(variants)} 種組合，也接受 {others}")
         for sub in substitutions:
-            notes.append(f"替換 {sub['axis']} 槽 {sub['from']}→{sub['to']}")
+            notes.append(f"替換 {sub['axis']} 槽 {sub['from']}→{sub['to']}"
+                         + ("（照樣顯示、不算完成條件）" if sub.get("displayed") else ""))
         return f"{item_name}×{item_num} → {shown}" + (f"（{'；'.join(notes)}）" if notes else "")
 
     def log_mapping(self, tray_id, order_number, expected_items_list, tag="") -> None:
@@ -318,6 +328,10 @@ class OrderRequirements:
         `※変更しじみ` 是真的會印、要核對的），但**額外**會從錨定到的那一列
         扣掉一個湯槽位。錨定與軸的判定在 logic/ticket_modifiers.py，扣除在
         _apply_substitution。沒有 menu_modifiers.yaml 的品牌完全不受影響。
+
+        2026-10-28：變更品項可能全部印在傳票最下面，換湯改成「整張傳票裡找套餐附的
+        みそ汁 刪掉」（湯軸 anchor: anywhere、remove_slots: [みそ汁]），被刪的那碗要不要
+        照樣送前端由 show_removed 決定。設定都在 menu_modifiers.yaml 的湯軸。
         """
         expanded_expected_items = []
         expected_items_list = []
@@ -353,6 +367,18 @@ class OrderRequirements:
             # 沒登記變體的品項，視為「只有一個變體、內容就是它自己」，
             # 這樣底下的流程不需要為單品項再分岔一次。
             variants = self.menu_variants.get(item_name) or [[item_name]]
+            size_note = ""
+            if line.size_rule is not None:
+                # size 列（`並`）：只留套餐對應的那一種主餐（見 ticket_modifiers.resolve_set_sizes）
+                kept = [v for v in variants if self.modifier_knowledge.set_sizes.matches(line.size_rule, v)]
+                if kept:
+                    size_note = f"（套餐 {line.size_set} 的主餐 {line.size_rule.label()}）"
+                    variants = kept
+                else:
+                    logger.warning(
+                        f"[tray_state_machine] size 列 '{item_name}'（套餐 '{line.size_set}'）的變體 "
+                        f"{variants} 沒有一個是主餐 {line.size_rule.label()}，維持原本的一對多"
+                    )
             primary = self.pick_primary_variant(item_name, variants)
 
             # 純異寫群組：同一道菜的不同寫法，統一成主變體的名字。
@@ -423,6 +449,7 @@ class OrderRequirements:
                         "本次替換未生效"
                     )
                     continue
+                shown = self.modifier_knowledge.show_removed(mod.axis)
                 for sub, count in removed.items():
                     self.last_substitutions.append({
                         "axis": mod.axis,
@@ -430,10 +457,13 @@ class OrderRequirements:
                         "from": sub,
                         "to": mod.ticket_name,
                         "quantity": count,
+                        # True = 被換掉的那份仍在 expected_items 裡（照樣顯示、貼了算 OK、不算完成條件）
+                        "displayed": shown,
                     })
                 logger.info(
                     f"[tray_state_machine] '{item_name}' 依 '{mod.ticket_name}' "
-                    f"扣除 {dict(removed)}（軸={mod.axis}）"
+                    f"扣除 {dict(removed)}（軸={mod.axis}"
+                    + ("，前端照樣顯示、不算完成條件" if shown else "") + "）"
                 )
 
             for sub, count in union.items():
@@ -445,7 +475,7 @@ class OrderRequirements:
             self.last_mapping_lines.append(self.describe_mapping(
                 item_name, item_num, primary_counts, union, variants, is_spelling_group,
                 self.last_substitutions[subs_before:],
-            ))
+            ) + size_note)
 
         self.last_unconfirmed_quantity = unconfirmed
         return (expanded_expected_items, expected_items_list,
