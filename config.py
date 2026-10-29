@@ -340,6 +340,24 @@ class DebugSheetCfg:
     slow_render_s: float = 5.0
 
 
+@dataclass
+class FrameLabelCfg:
+    """全幀的 mmrotate 偵測標籤檔（utils/frame_labeler.py）。
+
+    每存一張 full_screen 全幀，在同一個資料夾輸出同檔名的 .json（X-AnyLabeling 格式），內容是這一幀
+    mmrotate 偵測到的每個物件（rotation 框、類別名、信心）。不含 OCR 結果。
+    跟 debug_sheet 一樣，整段可以不寫，全部欄位都有預設值。
+
+    enabled:         false = 不輸出。
+    image_wait_sec:  標籤要等全幀寫成檔才寫（沒有圖的 JSON 沒用）。全幀由另一條執行緒寫，最多等這麼久；
+                     等不到（寫檔佇列丟棄 / 寫檔失敗）就不寫這份標籤。
+    max_queue:       背景佇列上限；滿了丟棄並警告，不拖慢辨識。
+    """
+    enabled: bool = True
+    image_wait_sec: float = 10.0
+    max_queue: int = 200
+
+
 def _parse_hhmm(value, default: str) -> str:
     """YAML 1.1 會把沒加引號的 1:00 / 10:30 當成 60 進位整數（= 60 / 630），這裡轉回 HH:MM。
     （有前導零的 01:00 不會被轉，本來就是字串。）"""
@@ -381,6 +399,7 @@ class Config:
     order_guard: OrderGuardCfg = field(default_factory=OrderGuardCfg)
     cloud_upload: CloudUploadCfg = field(default_factory=CloudUploadCfg)
     debug_sheet: DebugSheetCfg = field(default_factory=DebugSheetCfg)
+    frame_label: FrameLabelCfg = field(default_factory=FrameLabelCfg)
     # 該部署「真正會出現」的詞彙。與 menus_ticket/menus_sticker 分開，
     # 因為後者來自 menus_mapping.yaml（吉野家 1235 筆），拿來當小場景的
     # 模糊比對候選會大量錯配。留空則退回舊行為。
@@ -842,6 +861,14 @@ def load_config(config_path: str, overrides=None) -> Config:
             slow_render_s=float(ds.get("slow_render_s", DebugSheetCfg.slow_render_s)),
         )
 
+        # 全幀的 mmrotate 標籤檔：舊 config 沒這一段也能載入，整段用 dataclass 的預設值
+        fl = base.get("frame_label") or {}
+        frame_label_cfg = FrameLabelCfg(
+            enabled=bool(fl.get("enabled", FrameLabelCfg.enabled)),
+            image_wait_sec=float(fl.get("image_wait_sec", FrameLabelCfg.image_wait_sec)),
+            max_queue=max(1, int(fl.get("max_queue", FrameLabelCfg.max_queue))),
+        )
+
         # Camera
         ca = base["camera_params"]
         bright_ctrl = base["birghtness_controller"]
@@ -881,6 +908,7 @@ def load_config(config_path: str, overrides=None) -> Config:
             order_guard=order_guard_cfg,
             cloud_upload=cloud_upload_cfg,
             debug_sheet=debug_sheet_cfg,
+            frame_label=frame_label_cfg,
             vocab_ticket=vocab_ticket,
             vocab_sticker=vocab_sticker,
             mode=mode,

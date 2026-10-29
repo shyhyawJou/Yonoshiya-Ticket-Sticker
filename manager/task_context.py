@@ -43,7 +43,8 @@ class TaskContext:
 
     # ---------- 載入 ----------
 
-    def load_task(self, task: str, on_recording_start=None, on_recording_stop=None, get_video_filename=None) -> None:
+    def load_task(self, task: str, on_recording_start=None, on_recording_stop=None, get_video_filename=None,
+                  save_frame=None) -> None:
         """
         安全地載入指定任務的設定檔、AI 模型和邏輯引擎。
         """
@@ -59,6 +60,7 @@ class TaskContext:
         self._on_recording_start = on_recording_start
         self._on_recording_stop = on_recording_stop
         self._get_event_video_filename = get_video_filename
+        self._save_frame_cb = save_frame          # save_frame(tag)：存一張全幀（醬料包判定用）
 
         class_names = [c.name for c in cfg.classes]
         self.cfg = cfg
@@ -104,6 +106,7 @@ class TaskContext:
             on_recording_start=self._on_recording_start,
             on_recording_stop=self._on_recording_stop,
             get_video_filename=self._get_event_video_filename,
+            save_frame=self._save_frame_cb,
         )
 
         # --- init ocr ---
@@ -314,6 +317,7 @@ class TaskContext:
                 on_recording_start=self._on_recording_start,
                 on_recording_stop=self._on_recording_stop,
                 get_video_filename=self._get_event_video_filename,
+                save_frame=self._save_frame_cb,
             )
         except Exception as e:
             logger.error(f"[MODE] 切換模式失敗，退回 '{old_mode}': {e}")

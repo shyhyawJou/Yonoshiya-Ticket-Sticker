@@ -58,6 +58,7 @@ class TrayStateMachine:
         wrong_item_strong_score: float = 0.0,
         wrong_item_strong_conf: float = 0.9,
         debug_sheet=None,
+        save_frame=None,
     ):
         from logic.known_class_items import CLASS_TO_ITEM_NAME
         self.object_class_items = dict(CLASS_TO_ITEM_NAME if object_class_items is None else object_class_items)
@@ -90,6 +91,8 @@ class TrayStateMachine:
         # 除錯總覽圖（utils/debug_sheet.py）：兩個 reader 與本類別共用同一份收集 hooks。
         # 只讀不寫、錯誤全部吞掉；debug_sheet=None 或停用時全部是 no-op，不影響任何判定。
         self.debug = debug_sheet
+        # save_frame(tag)：醬料包下 OK/NG 結論時存一張全幀（None = 不存）。見 resolve_known_class_items
+        self.save_frame = save_frame
         self.debug_hooks = ReaderDebugHooks(
             debug_sheet, order_parser, sticker_matcher, self.requirements,
             confirm_fn=lambda: self.sticker_reader.wrong_item_confirm,
@@ -273,6 +276,12 @@ class TrayStateMachine:
                 logger.info(f"[tray state machine] 已知物件 {matched_item}, 匹配狀況: {match_status}")
                 self.sticker_reader.settle(tray, tray_id, ts, matched_item, match_status)
                 self.debug_hooks.known(tray, tray_id, ts, item_name, matched_item, match_status)
+                # 醬料包沒有「送出 OCR」那一幀，結論當下的全幀要自己存（OK / NG 都存，標籤 sauce）
+                if self.save_frame is not None:
+                    try:
+                        self.save_frame("sauce")
+                    except Exception as e:
+                        logger.error(f"[tray state machine] 醬料包全幀存檔失敗（略過，不影響判定）: {e!r}")
 
     def resolve_wrong_item_removal(self, trays: Dict[str, Tray]) -> None:
         """

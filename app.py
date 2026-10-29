@@ -14,7 +14,8 @@ import cv2
 from loguru import logger
 
 from utils.clip_video import Clip, PeriodicClipRecorder
-from utils.frame_writer import AsyncFrameWriter
+from utils.frame_writer import AsyncFrameWriter, full_screen_tag
+from utils.frame_labeler import AsyncFrameLabelWriter
 from utils import clock_guard
 from utils.disk_guard import DiskGuard
 from utils.perf_stats import LOOP_PROFILER, ocr_done_line
@@ -66,6 +67,7 @@ class StreamManager:
         # --- 主迴圈共享狀態 ---
         self.ocr_data = None
         self.tmp_frame = None
+        self.tmp_detections = []     # 跟 tmp_frame 同一輪的 mmrotate 偵測結果，full_screen 的標註檔要用
 
         # --- 錄影 ---
         self.save_dir = RECORD_ROOT
@@ -134,8 +136,13 @@ class StreamManager:
             on_recording_start=self.start_event_recording,
             on_recording_stop=self.stop_event_recording,
             get_video_filename=self.get_event_video_filename,
+            save_frame=self._save_full_screen,      # 醬料包判定時存全幀（見 TrayStateMachine.resolve_known_class_items）
         )
         self.task.bus.on_command(self._handle_cmd)
+
+        # --- 全幀的 mmrotate 標籤檔（X-AnyLabeling JSON）：存 full_screen 的當下，在圖旁邊輸出同檔名的 .json ---
+        # 見 utils/frame_labeler.py
+        self.frame_labeler = AsyncFrameLabelWriter(self.task.cfg.frame_label)
 
         # 錄影 watchdog 只是保險：訂單本身有 order_guard.timeout_sec 超時收尾
         # （寫 CSV + 重置 + 停錄影），這裡刻意多留 30 秒，正常情況一定是訂單先收。
@@ -343,12 +350,50 @@ class StreamManager:
     def _handle_cmd(self, cmd: str, payload: dict) -> None:
         self.commands.handle(cmd, payload)
 
-    def _save_frame(self, frame, folder_name: str) -> None:
+    def _save_frame(self, frame, folder_name: str, tag: str = "") -> str | None:
+        """回傳預定的檔名；寫檔佇列滿了被丟棄、或出錯時回傳 None。"""
         try:
-            self.frame_writer.save(frame.copy(), self.save_dir, folder_name)
+            return self.frame_writer.save(frame.copy(), self.save_dir, folder_name, tag=tag)
 
         except Exception as e:
             logger.error(f"儲存影像失敗 (Folder: {folder_name}): {e}")
+            return None
+
+    def _frame_detections(self) -> list:
+        """這一幀的 mmrotate 偵測結果，轉成純數字（背景執行緒不碰會被主迴圈改掉的物件）。
+        每項 (類別名, 信心, xyxy 8 個數字, xywhr 5 個數字)。"""
+        out = []
+        for d in self.tmp_detections or []:
+            try:
+                out.append((str(d.cls_name), float(d.conf), tuple(float(v) for v in d.xyxy),
+                            tuple(float(v) for v in d.xywhr)))
+            except Exception:
+                continue
+        return out
+
+    def _save_full_screen(self, tag: str) -> None:
+        """存一張當下的原始全幀到 full_screen，檔名帶「為什麼存」的標籤；並在旁邊輸出同檔名的 mmrotate 偵測標籤檔。
+
+        標籤：ticket / sticker / ticket-extra = 送 OCR 的那一幀；sauce = 醬料包（不走 OCR）下 OK/NG 結論的那一幀。
+        標籤檔只有偵測結果（不含 OCR），所以存圖的當下就能輸出，不用等 OCR 結果。
+        """
+        folder = f"{str(self.save_dir)}/{self.event_recorder.date}/full_screen"
+        name = self._save_frame(self.tmp_frame, folder, tag=tag)
+        try:
+            self._submit_frame_label(folder, name)
+        except Exception as e:
+            logger.error(f"[frame_label] 提交失敗（略過，不影響辨識）: {e!r}")
+
+    def _submit_frame_label(self, folder: str, name: str | None) -> None:
+        """把這一幀的偵測結果交給背景輸出成標籤檔。name 是 _save_frame 回傳的檔名；None = 這張被寫檔佇列丟掉了。"""
+        labeler = self.frame_labeler
+        if not labeler.enabled:
+            return
+        if name is None:                                  # 沒有圖可以配對
+            labeler.note_missing_frame()
+            return
+        h, w = self.tmp_frame.shape[:2]
+        labeler.submit(image_path=Path(folder) / name, frame_wh=(w, h), detections=self._frame_detections())
 
     def _check_event_record_timeout(self, now_ts):
         if not self.event_recorder.is_running:
@@ -528,6 +573,7 @@ class StreamManager:
                 t_now = time.perf_counter(); stage["apply"] = 1000 * (t_now - t_prev); t_prev = t_now
 
                 out, detections = mmr.detect(frame, self.show_box)
+                self.tmp_detections = detections          # 之後這一輪存 full_screen 時，標註檔要寫這一幀的偵測結果
                 stage.update(getattr(mmr, "last_timing", None) or {})
                 t_prev = time.perf_counter()
 
@@ -549,7 +595,7 @@ class StreamManager:
                             continue
 
                         # self._save_frame(warped_img, f"{str(self.save_dir)}/{self.event_recorder.date}/ocr_cut")
-                        self._save_frame(self.tmp_frame, f"{str(self.save_dir)}/{self.event_recorder.date}/full_screen")
+                        self._save_full_screen(full_screen_tag(task["type"]))
 
                         metadata = {
                             "tray_id": task["tray_id"],
@@ -655,6 +701,8 @@ class StreamManager:
         if getattr(self, "disk_guard", None) is not None:
             self.disk_guard.stop()
 
+        if getattr(self, "frame_labeler", None) is not None:
+            self.frame_labeler.stop(wait=True)   # 標籤檔很小，佇列裡的會寫完才結束
         if self.frame_writer:
             self.frame_writer.stop(wait=True)
         if self.event_recorder.is_running:

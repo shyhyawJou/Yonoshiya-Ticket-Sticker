@@ -371,6 +371,66 @@ python3 tools/debug_sheet_bench.py --stickers 20 --orders 10
 注意：App 按 reset 作廢的訂單不會出圖。
 crontab 的雲端上傳（`aibox_uploader/`）**預設不會上傳這個資料夾**（它的 `image.dirs` 預設只有 `full_screen`，設定在 `aibox_uploader/aibox_uploader.py`），這裡的 `cloud_upload.folders` 也只管 app 內建上傳。檔名已符合上傳器的規則（只含英數與 `._-`、以日期開頭），要上傳時把 `debug_sheet` 加進它的 `dirs` 即可；但這些圖在 Dashboard 上會被當成哪一類媒體、容量與流量是否可接受，我沒有驗證過。
 
+### `frame_label` — 全幀的 mmrotate 標籤檔（選填）
+
+整段可以不寫，不寫就是下表的預設值。
+
+每存一張 `full_screen` 全幀，就在**同一個資料夾**輸出**同檔名**的 `.json`：X-AnyLabeling 格式（格式見 `good_example`），
+內容是**這一幀 mmrotate 偵測到的每一個物件**。座標都是整張全幀的座標，`imageWidth` / `imageHeight` 是全幀的大小，
+所以直接用 X-AnyLabeling 開 `full_screen` 資料夾就能看到、修正。**不含 OCR 結果**，所以存圖的當下就輸出，不用等 OCR。
+
+```
+<日期>/full_screen/20261028_052109_217_sticker.jpg      全幀（原本就有）
+<日期>/full_screen/20261028_052109_217_sticker.json     這一幀的偵測標籤（新）
+<日期>/full_screen/20261028_052109_341_sauce.jpg        醬料包的全幀
+<日期>/full_screen/20261028_052109_341_sauce.json       同樣是偵測標籤
+```
+
+四種全幀（`ticket`、`sticker`、`ticket-extra`、`sauce`）都有；這一幀偵測不到任何物件就不寫檔。
+
+```yaml
+frame_label:
+  enabled: true
+  image_wait_sec: 10.0
+  max_queue: 200
+```
+
+| key | 預設 | 意義 | 調整建議 |
+| --- | --- | --- | --- |
+| `enabled` | `true` | `false` = 不輸出（不建背景執行緒，也不蒐集偵測結果） | 磁碟或 log 吃緊時先關 |
+| `image_wait_sec` | `10.0` | 標籤要等全幀寫成檔才寫（沒有圖的 JSON 沒用）。全幀由另一條執行緒寫，最多等這麼久；等不到就不寫這份標籤並警告 | 寫檔很慢時加大 |
+| `max_queue` | `200` | 背景佇列上限，滿了丟棄並用 loguru 警告（每 50 筆一則），不拖慢辨識 | |
+
+**每個偵測框（shape）**
+
+| 欄位 | 內容 |
+| --- | --- |
+| `label` | 偵測的類別名（`order_ticket`、`order_sticker`、醬料包、盤子…） |
+| `shape_type` | `rotation`（X-AnyLabeling 的旋轉框） |
+| `points` | 4 個角點（xyxyxyxy，即 `Detection.xyxy`），已經是全幀座標，順序是偵測器的 pt1~pt4 |
+| `direction` | 偵測器的旋轉角 `r`（弧度），原樣放入，不取負、不換算 |
+| `score` | 偵測信心 |
+| `attributes` | `source: "mmrotate"` 與原始 `xywhr`（中心 x、y、寬、高、弧度） |
+
+**`direction` 與角點順序**
+
+- **單位與正負號都已確認**：X-AnyLabeling 的 `direction` 是弧度、順時針為正；偵測器的 `r` 也是弧度、順時針為正
+  （影像座標 y 向下，`r` > 0 時寬軸往畫面下方轉，用 `xywhr2xyxyxyxy` 實際算過），兩邊一樣所以直接用。
+- **還沒確認的**：0 度時是不是「寬邊沿 +x」（跟偵測器 `r` = 0 一樣）；另外角點順序是偵測器的 pt1~pt4
+  （`r` = 0 時依序是右下、右上、左上、左下，視覺上逆時針），沒有重排成「左上起、順時針」。
+  開發環境沒有 X-AnyLabeling 可以開來看，上機後請開一張標籤檔確認框的角度對不對；不對的話只要改
+  `frame_labeler.detection_shapes` 一處。`points` 本身直接來自偵測器、已經是全幀座標，DOTA / YOLO-OBB 這類匯出用的就是這 4 個角點。
+
+**限制（請看一下）**
+
+- **全幀沒存成就沒有標籤**：寫檔佇列滿了丟掉的那一幀、或 `image_wait_sec` 內沒出現的，標籤跳過（log 有警告）。所以 JSON 一定有對應的圖。
+- 偵測結果是 mmrotate **當下的輸出**（已過各類別信心門檻與 NMS），是複查 / 當訓練資料的起點，不是標準答案。
+- 偵測結果是**存圖那一輪**的快照（主迴圈 `mmr.detect` 之後、`logic.update` 之前記下），不會被之後的幀蓋掉。
+- **上傳器**：`aibox_uploader` 只上傳 `.mp4 / .jpg / .jpeg / .png`，`.json` 會被略過、不影響上傳，但它的 log 會每個 `.json` 記一行
+  「略過非媒體檔」，量跟 `full_screen` 的圖一樣多。rclone 搬日期資料夾時 `.json` 會一起搬。
+- 量：每存一張全幀就多一個 JSON（每個約幾 KB，偵測框越多越大）。一張 NG 貼紙被反覆重讀，就會有很多個。
+- 舊版（曾經有 OCR 文字框的 `ocr_label:` 區段）如果還留在 config.yaml 裡，會被直接忽略，不會報錯，可以刪掉。
+
 ### `cloud_upload` — 雲端上傳（app 內建，v3.3.0 起關閉）
 
 v3.3.0 起上傳改由 crontab 執行 `aibox_uploader/aibox_uploader.sh`，這一段維持 `enabled: false`。
