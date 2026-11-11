@@ -11,7 +11,7 @@ ocr_routes:
 - `cv_table`：使用表格格線、條碼方向及儲存格墨跡取框，後續仍使用現有 DLA REC。
 - `cv_ink`：單詞貼紙墨跡輪廓取框，沿用 CLS 及 REC。貼紙字距變化大，預設不用此法。
 - `det`：保留原 DET → 方向判定 → CLS／REC。
-- 欄位省略時回到 DET。`ticket`／`sticker` 內部任務名稱會自動對應正式類別名稱。
+- 欄位省略時回到 DET。`ticket`／`ticket_extra`／`stub`／`sticker` 內部任務名稱會自動對應正式類別名稱（`stub` = 客戶聯 `small_order_ticket`）。
 - 這只是既有 OCR 任務的處理方式，不會讓未被狀態機排入 OCR 的其他物件自動產生任務。
 
 吉野家的 `ticket_cv_assist`（見 `tasks/ocr/yoshinoya/README.md`）不是這裡的路由：大傳票仍走 `det`，只是 AsyncOCR 在 det 之前先用 `logic/yoshinoya/ticket_cv_layout.py` 決定方向（跳過翻轉比對），版面再交給解析器做 det 框分格與漏框補讀。找不到表格時照 `det` 原流程。

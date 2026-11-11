@@ -67,6 +67,7 @@ class StreamManager:
         # --- 主迴圈共享狀態 ---
         self.ocr_data = None
         self.tmp_frame = None
+        self.tmp_frame_ts = 0.0      # tmp_frame 從相機拿到的時間（time.time()），訂單照片組的時間差用
         self.tmp_detections = []     # 跟 tmp_frame 同一輪的 mmrotate 偵測結果，full_screen 的標註檔要用
 
         # --- 錄影 ---
@@ -137,6 +138,9 @@ class StreamManager:
             on_recording_stop=self.stop_event_recording,
             get_video_filename=self.get_event_video_filename,
             save_frame=self._save_full_screen,      # 醬料包判定時存全幀（見 TrayStateMachine.resolve_known_class_items）
+            # 每筆訂單的照片組（config 的 order_photo，見 manager/order_photo.py）
+            save_photo=self._save_full_screen,
+            frame_time=lambda: self.tmp_frame_ts,
         )
         self.task.bus.on_command(self._handle_cmd)
 
@@ -371,18 +375,23 @@ class StreamManager:
                 continue
         return out
 
-    def _save_full_screen(self, tag: str) -> None:
+    def _save_full_screen(self, tag: str) -> str | None:
         """存一張當下的原始全幀到 full_screen，檔名帶「為什麼存」的標籤；並在旁邊輸出同檔名的 mmrotate 偵測標籤檔。
 
-        標籤：ticket / sticker / ticket-extra = 送 OCR 的那一幀；sauce = 醬料包（不走 OCR）下 OK/NG 結論的那一幀。
+        標籤：ticket / sticker / ticket-extra = 送 OCR 的那一幀；sauce = 醬料包（不走 OCR）下 OK/NG 結論的那一幀；
+        No<單號>-start / No<單號>-final-<結果> = 訂單照片組（manager/order_photo.py）。
         標籤檔只有偵測結果（不含 OCR），所以存圖的當下就能輸出，不用等 OCR 結果。
+        回傳預定的檔名（寫檔佇列滿了被丟掉時是 None）。
         """
+        if self.tmp_frame is None:
+            return None
         folder = f"{str(self.save_dir)}/{self.event_recorder.date}/full_screen"
         name = self._save_frame(self.tmp_frame, folder, tag=tag)
         try:
             self._submit_frame_label(folder, name)
         except Exception as e:
             logger.error(f"[frame_label] 提交失敗（略過，不影響辨識）: {e!r}")
+        return name
 
     def _submit_frame_label(self, folder: str, name: str | None) -> None:
         """把這一幀的偵測結果交給背景輸出成標籤檔。name 是 _save_frame 回傳的檔名；None = 這張被寫檔佇列丟掉了。"""
@@ -511,6 +520,7 @@ class StreamManager:
                     frame = camera.get_frame(timeout=1.0)
                     if frame is None:
                         continue
+                    self.tmp_frame_ts = time.time()
                     self.tmp_frame = frame.copy()
                 else:
                     ok, frame = camera.read()
@@ -561,6 +571,14 @@ class StreamManager:
                         # 傳票的菜單區域下界（吉野家 parser 才有），跟著這份 OCR 結果給 overlay 畫
                         pop_line = getattr(logic.order_parser, "pop_menu_bottom_line", None)
                         ocr_result["menu_bottom_line"] = pop_line() if pop_line else None
+                        # 客戶聯（stub）的 CV 補救定位數量框（橘框），跟著這份 OCR 結果給 overlay 畫
+                        if metadata["type"] == "stub":
+                            t_obj = logic.trays.get(metadata["tray_id"])
+                            ocr_result["fallback_rects"] = (
+                                list(t_obj.stub.fallback_rects)
+                                if (t_obj is not None and t_obj.stub is not None)
+                                else []
+                            )
                     apply_ms = 1000 * (time.perf_counter() - t_apply)
                     logger.info(ocr_done_line(
                         metadata, drained_mono, apply_ms,
@@ -839,7 +857,7 @@ def main():
     parser.add_argument("--profile", choices=["yoshinoya", "suzumo"])
     task = parser.parse_args().profile or "ocr"
     # 目前僅供人工辨識：StreamManager 沒有用這個參數，也沒有經 MQTT 對外發布
-    version = "3.3.1"
+    version = "3.4.2"
 
     # 一次開機的起點，log 裡往上找這行就是這一輪的開頭（模型檔名見後面的 [dla_guard]）
     logger.info(f"{'=' * 20} [程式啟動] v{version} task={task} pid={os.getpid()} {'=' * 20}")

@@ -1,20 +1,29 @@
 #!/usr/bin/env python3
 """aibox_uploader —— AI Box 每日上傳程式（給 crontab 一天執行一次）。
 
-依 AIBOX_UPLOAD_v1.2.8.md 規格上傳一家店、一個營業日的檔案：CSV 與 log 經 API，影片與高清影像直傳 S3。
+依 AIBOX_UPLOAD_v1.3.0.md 規格上傳一家店、一個營業日的檔案：CSV 與 log 經 API，影片、高清影像、
+debug_sheet 與 CSV 原檔（v1.3.0 其他檔案上傳）直傳 S3。
 要上傳哪些副檔名、到哪些資料夾找，都寫在設定檔（JSON），改設定檔就好，不必改程式。
 
 用法：
     python3 aibox_uploader.py all   --store 07c6 --prefix-path /data --date 20261012 --config /etc/yoshinoya_ai/aibox_uploader.json
     python3 aibox_uploader.py video --store 07c6 --prefix-path /data --date 20261012
+    python3 aibox_uploader.py debug --store 07c6 --prefix-path /data --date 20261012   # 只送 debug_sheet
+    python3 aibox_uploader.py csv,log --store 07c6 --prefix-path /data --date 20261012 # 只送 CSV 與 log
     python3 aibox_uploader.py all   --store 07c6 --prefix-path /data --dry-run      # 只列出會上傳哪些檔案，不連線
 
 上傳方式（第一個參數）：
-    all    log → CSV → 影片＋高清影像（CSV 成功才送影片，規格 §1；高清影像與 log 不受 CSV 影響，照常送出）
-    csv    只送 CSV（POST /api/ingest/csv）
+    all    log → CSV（→ CSV 原檔存 S3）→ debug_sheet → 影片＋高清影像
+           （CSV 成功才送影片，規格 §1；其他項目不受 CSV 影響，照常送出）
+    csv    只送 CSV（POST /api/ingest/csv）；成功後再把同一個 .csv 原檔（不壓縮）經 v1.3.0「其他檔案上傳」
+           直傳 S3：extra/<店>/<日>/csv/<檔名>（設定檔 csv_s3）。這一步失敗算失敗、會補傳，但不擋影片
     log    只送當日 log（POST /api/ingest/log，規格 §6）
+    debug  只送 debug_sheet：<date>/debug_sheet/ 的 .json / .jpg 打包成 <date>_debug_sheet.zip，
+           經 v1.3.0「其他檔案上傳」直傳 S3（/api/ingest/extra/presign → PUT → /api/ingest/extra/complete）
     video  只送影片（直傳 S3，規格 §4）
     image  只送高清影像（直傳 S3，規格 §4）
+    組合   用逗號（或 +）組合多項，例如 csv,log、csv,log,debug：依 all 的順序只跑列出的項目；
+           組合裡有 csv 與 video 時，一樣 CSV 成功才送影片。列出的 csv / log 找不到檔案算失敗（all 才算 SKIP）
 
 遇到錯誤不中斷：每個檔案各自重試，同一個檔案失敗 max_attempts 次（預設 3，可設定）就暫停這個檔案、
 換下一個，直到所有檔案都處理完，最後列出結果。規格說不要重試的錯誤（HTTP 4xx）與檔案本身的問題
@@ -44,8 +53,10 @@ import json
 import logging
 import os
 import re
+import shutil
 import sys
 import time
+import zipfile
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -57,12 +68,31 @@ import aibox_upload as ab  # noqa: E402
 
 log = logging.getLogger("aibox_uploader")
 
-MODES = ("all", "csv", "log", "video", "image")
-KINDS = ("csv", "log", "video", "image")
-KIND_LABEL = {"csv": "CSV", "log": "log", "video": "影片", "image": "高清影像"}
+MODES = ("all", "csv", "log", "debug", "video", "image")
+KINDS = ("csv", "log", "debug_sheet", "video", "image")
+KIND_LABEL = {"csv": "CSV", "log": "log", "debug_sheet": "debug_sheet", "video": "影片", "image": "高清影像"}
 # 每一類能設定的副檔名受 API 限制：CSV / log 的檔名格式是規格固定的；媒體只收這四種（§4.4），
-# 多放一種伺服器會把整批網址請求都拒絕（HTTP 400），所以在啟動時就擋下
-KIND_EXTS = {"csv": {".csv"}, "log": {".log"}, "video": set(ab.MEDIA_EXTS), "image": set(ab.MEDIA_EXTS)}
+# 多放一種伺服器會把整批網址請求都拒絕（HTTP 400），所以在啟動時就擋下。
+# debug_sheet 是打包成 zip 才上傳，zip 裡放什麼 API 不管；這裡只收 utils/debug_sheet.py 會寫的種類
+DEBUG_EXTS = {".json", ".jpg", ".jpeg", ".png"}
+KIND_EXTS = {"csv": {".csv"}, "log": {".log"}, "debug_sheet": DEBUG_EXTS,
+             "video": set(ab.MEDIA_EXTS), "image": set(ab.MEDIA_EXTS)}
+
+# v1.3.0「其他檔案上傳」：流程與影片直傳相同，位置 extra/<店>/<日>/<category>/<檔名>，同名重傳會覆蓋
+EXTRA_PRESIGN = "/api/ingest/extra/presign"
+EXTRA_COMPLETE = "/api/ingest/extra/complete"
+EXTRA_CONTENT_TYPE = "application/octet-stream"  # 規格：其他檔案的 PUT 一律用這個 Content-Type
+DEBUG_CATEGORY = "debug_sheet"                   # category 固定（英數、-、_，1–32 字）
+EXTRA_CATEGORY_RE = re.compile(r"[A-Za-z0-9_-]{1,32}")
+CSV_S3_CATEGORY = "csv"                          # CSV 原檔另存 S3：extra/<店>/<日>/csv/<檔名>（不壓縮）
+CSV_S3_CATEGORY_ENV = "YOSHINOYA_CSV_S3_CATEGORY"
+ZIP_STORED_EXTS = {".jpg", ".jpeg", ".png"}      # 影像本身已壓縮，不再壓縮（雲端用 Range 直接讀）
+DEBUG_TMP_DIR = "/mnt/reserved/tmp/aibox_uploader"  # 暫存 zip；不可放在 <prefix>/<日>/（rclone move 會搬走）
+DEBUG_TMP_DIR_ENV = "YOSHINOYA_DEBUG_TMP_DIR"
+DEBUG_MIN_FREE_MB = 100                          # 打包後暫存空間至少還要剩這麼多
+DEBUG_MIN_FREE_ENV = "YOSHINOYA_DEBUG_MIN_FREE_MB"
+DEBUG_MAX_ZIP_MB = 5120                          # 規格：其他檔案單檔 ≤ 5 GB
+DEBUG_MAX_ZIP_ENV = "YOSHINOYA_DEBUG_MAX_ZIP_MB"
 
 MAX_ATTEMPTS = 3                       # 同一個檔案最多試幾次
 MAX_ATTEMPTS_ENV = "YOSHINOYA_MAX_ATTEMPTS"
@@ -98,6 +128,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "state_dir": ".aibox_uploader",  # 補傳清單的資料夾；相對路徑接在 <prefix> 底下
         "skip_existing": True,  # 補傳時先問伺服器哪些媒體已在 S3，只傳缺的
     },
+    "debug_sheet": {          # debug_sheet 打包上傳（v1.3.0 其他檔案上傳）；要找的資料夾與副檔名在 targets.debug_sheet
+        "tmp_dir": None,       # 暫存 zip 的資料夾；None → YOSHINOYA_DEBUG_TMP_DIR → /mnt/reserved/tmp/aibox_uploader
+        "min_free_mb": None,   # 打包後暫存空間至少要剩幾 MB；None → YOSHINOYA_DEBUG_MIN_FREE_MB → 100
+        "max_zip_mb": None,    # zip 上限；None → YOSHINOYA_DEBUG_MAX_ZIP_MB → 規格的 5120（5 GB）
+    },
+    "csv_s3": {               # CSV 經 /api/ingest/csv 成功後，原檔再經 /api/ingest/extra 直傳 S3（不壓縮）
+        "enabled": True,
+        "category": None,      # None → YOSHINOYA_CSV_S3_CATEGORY → csv（英數、-、_，1–32 字，會轉小寫）
+    },
     "run_log": {              # 這支程式自己的 log 檔
         "enabled": True,
         "dir": "csv_logs",                       # 相對路徑接在 <prefix>/<date>/ 底下
@@ -106,6 +145,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "targets": {              # 每一類要到哪些資料夾找、上傳哪些副檔名
         "csv": {"dirs": ["csv_logs"], "exts": [".csv"]},
         "log": {"dirs": ["stream_log"], "exts": [".log"]},
+        "debug_sheet": {"enabled": True, "dirs": ["debug_sheet"], "exts": [".json", ".jpg"]},  # enabled=false 關閉
         "video": {"dirs": ["event"], "exts": [".mp4"]},
         "image": {"dirs": ["full_screen"], "exts": [".jpg", ".jpeg", ".png"]},
     },
@@ -184,13 +224,31 @@ class Settings:
     catch_up_days: int = CATCH_UP_DAYS
     catch_up_dir: str = ".aibox_uploader"
     skip_existing: bool = True
+    debug_tmp_dir: str = DEBUG_TMP_DIR
+    debug_min_free_bytes: int = DEBUG_MIN_FREE_MB * 1024 * 1024
+    debug_max_zip_bytes: int = DEBUG_MAX_ZIP_MB * 1024 * 1024
+    csv_s3: bool = True
+    csv_s3_category: str = CSV_S3_CATEGORY
 
 
 def resolve_settings(cfg: dict, args: argparse.Namespace) -> Settings:
     api = ab.resolve_media_api(cfg["media_api"])
-    retry, s3, cu = cfg["retry"], cfg["s3"], cfg["catch_up"]
+    retry, s3, cu, ds = cfg["retry"], cfg["s3"], cfg["catch_up"], cfg["debug_sheet"]
     explicit_attempts = args.max_attempts if args.max_attempts is not None else retry.get("max_attempts")
+    mb = 1024 * 1024
+    cs = cfg["csv_s3"]
+    category = str(cs.get("category") or os.environ.get(CSV_S3_CATEGORY_ENV) or CSV_S3_CATEGORY).strip()
+    if not EXTRA_CATEGORY_RE.fullmatch(category):
+        raise ab.ConfigError(f"csv_s3.category 只能用英數、-、_，1–32 字元：{category!r}")
     return Settings(
+        csv_s3=bool(cs.get("enabled", True)),
+        csv_s3_category=category.lower(),  # 伺服器會轉小寫，這裡先轉，log 與實際位置一致
+        debug_tmp_dir=str(ds.get("tmp_dir") or os.environ.get(DEBUG_TMP_DIR_ENV) or DEBUG_TMP_DIR),
+        debug_min_free_bytes=int(ab.env_number(DEBUG_MIN_FREE_ENV, ds.get("min_free_mb"), DEBUG_MIN_FREE_MB,
+                                               label="debug_sheet.min_free_mb", cast=float, minimum=0,
+                                               unit=" MB") * mb),
+        debug_max_zip_bytes=int(ab.env_number(DEBUG_MAX_ZIP_ENV, ds.get("max_zip_mb"), DEBUG_MAX_ZIP_MB,
+                                              label="debug_sheet.max_zip_mb", cast=float, unit=" MB") * mb),
         catch_up=bool(cu.get("enabled", True)) and not args.no_catch_up,
         catch_up_runs=ab.env_number(CATCH_UP_RUNS_ENV, cu.get("max_runs"), CATCH_UP_RUNS,
                                     label="catch_up.max_runs", unit=" 次"),
@@ -259,7 +317,7 @@ def resolve_day(text: str | None) -> str:
 
 
 # ── 錯誤分類與重試 ──────────────────────────────────────────────────────────
-# 重試也不會成功的錯誤：伺服器明確拒絕（4xx，規格 §7 說不要重試），或檔案本身的問題
+# 重試也不會成功的錯誤：伺服器明確拒絕（4xx，規格 v1.3.0 §8 說不要重試），或檔案本身的問題
 PERMANENT = (ab.ApiError, ab.LocalCheckError, FileNotFoundError, IsADirectoryError, NotADirectoryError,
              UnicodeDecodeError, csv.Error)
 
@@ -447,15 +505,17 @@ class FileState:
     error: str = ""
 
 
-def _fail(ctx: Ctx, s: FileState, err: str, permanent: bool = False) -> None:
+def _fail(ctx: Ctx, s: FileState, err: str, permanent: bool = False, pos: str = "") -> None:
+    """pos：log 開頭的進度，例如「S3 上傳 2/836：」；只有逐支 PUT 時才有。"""
     s.attempts += 1
     s.error = err
     if permanent or s.attempts >= ctx.st.max_attempts:
         s.paused = True
         why = "重試也不會成功" if permanent else f"失敗 {s.attempts} 次"
-        log.error("%s：%s —— %s；暫停這個檔案的上傳，繼續下一個", s.path.name, err, why)
+        log.error("%s%s：%s —— %s；暫停這個檔案的上傳，繼續下一個", pos, s.path.name, err, why)
     else:
-        log.warning("%s：第 %d/%d 次失敗 —— %s（稍後重試）", s.path.name, s.attempts, ctx.st.max_attempts, err)
+        log.warning("%s%s：第 %d/%d 次失敗 —— %s（稍後重試）", pos, s.path.name, s.attempts, ctx.st.max_attempts,
+                    err)
 
 
 def upload_media_files(ctx: Ctx, client: ab.Client, files: list[Path]) -> list[FileState]:
@@ -496,8 +556,9 @@ def upload_media_files(ctx: Ctx, client: ab.Client, files: list[Path]) -> list[F
             for j, s in enumerate(chunk):
                 if s.paused:
                     continue
+                pos = f"S3 上傳 {i + j + 1}/{len(pending)}："  # 這一輪的第幾支（成功、失敗都印）
                 if not s.path.is_file():
-                    _fail(ctx, s, "檔案已不存在（可能已被移走或刪除）", permanent=True)
+                    _fail(ctx, s, "檔案已不存在（可能已被移走或刪除）", permanent=True, pos=pos)
                     continue
                 margin = min(st.s3.refresh_margin, expires / 2)
                 if time.monotonic() - issued >= expires - margin:  # 網址快過期：剩下的重新取
@@ -507,23 +568,23 @@ def upload_media_files(ctx: Ctx, client: ab.Client, files: list[Path]) -> list[F
                         break
                 u = uploads.get(s.path.name)
                 if not u or not u.get("url"):
-                    _fail(ctx, s, "取得上傳網址的回應裡沒有這個檔案")
+                    _fail(ctx, s, "取得上傳網址的回應裡沒有這個檔案", pos=pos)
                     continue
                 t0 = time.monotonic()
                 try:
                     size = s.path.stat().st_size
                     out = ab.s3_put(client.s3, s.path, u, timeout=(ab.CONNECT_TIMEOUT, st.s3.put_timeout))
                 except OSError as e:  # 檔案讀到一半被刪除、權限不足
-                    _fail(ctx, s, describe(e), permanent=isinstance(e, FileNotFoundError))
+                    _fail(ctx, s, describe(e), permanent=isinstance(e, FileNotFoundError), pos=pos)
                     continue
                 except Exception as e:  # noqa: BLE001
-                    _fail(ctx, s, describe(e))
+                    _fail(ctx, s, describe(e), pos=pos)
                     continue
                 if out.ok:
                     put_ok.add(s.path.name)
-                    log.info("S3 上傳：%s（%s，%.1f 秒）", s.path.name, ab.human(size), time.monotonic() - t0)
+                    log.info("%s%s（%s，%.1f 秒）", pos, s.path.name, ab.human(size), time.monotonic() - t0)
                 else:
-                    _fail(ctx, s, out.detail)
+                    _fail(ctx, s, out.detail, pos=pos)
         # §4.3：回報這一輪所有還在進行的檔名（伺服器會實際到 S3 確認，傳到了就算數）
         names = [s.path.name for s in pending if not s.paused]
         confirmed = _complete(ctx, client, names, payload)
@@ -645,6 +706,219 @@ def step_media(ctx: Ctx, client: ab.Client | None, kinds: list[str], csv_ok: boo
     return results + [Result(item, "OK", f"{counts} / {ab.human(total)}，全部確認在 S3")]
 
 
+# ── 上傳：debug_sheet（v1.3.0 其他檔案上傳）───────────────────────────────
+def check_debug_tmp(ctx: Ctx) -> None:
+    """暫存資料夾在一開始就檢查：必須是絕對路徑，而且不可以在 <prefix>/<日>/ 底下 ——
+    03:05 起的 rclone move 會把日期資料夾整個搬到 OneDrive，暫存的 zip 會被一起搬走。"""
+    if not ctx.cfg["targets"]["debug_sheet"].get("enabled", True):
+        return
+    tmp = Path(ctx.st.debug_tmp_dir)
+    if not (tmp.is_absolute() or tmp.root):
+        raise ab.ConfigError(f"debug_sheet.tmp_dir 必須是絕對路徑，實際為 {tmp}")
+    try:
+        rel = tmp.resolve().relative_to(ctx.prefix.resolve())
+    except ValueError:
+        return  # 不在 <prefix> 底下
+    if rel.parts and re.fullmatch(r"\d{8}", rel.parts[0]):
+        raise ab.ConfigError(f"debug_sheet.tmp_dir 不可以放在 <prefix>/<日>/ 底下（rclone move 會把它一起搬走）：{tmp}")
+
+
+def find_debug_sheet(ctx: Ctx) -> list[Path]:
+    """<prefix>/<日>/debug_sheet/ 裡要打包的檔案。資料夾不存在不算失敗。
+
+    跳過 . 開頭與 .tmp 結尾的檔（utils/debug_sheet.py 先寫 .tmp 再改名，這些是寫到一半的）。
+    """
+    seen: dict[str, Path] = {}
+    for d in ctx.dirs("debug_sheet"):
+        if not d.is_dir():
+            log.info("沒有 debug_sheet 資料夾：%s —— 略過", d)
+            continue
+        n = 0
+        for p in _list_dir(ctx, "debug_sheet", d):
+            if p.name.startswith(".") or p.name.lower().endswith(".tmp"):
+                continue
+            if p.suffix.lower() not in ctx.exts("debug_sheet"):
+                continue
+            try:
+                if not p.is_file():
+                    continue
+            except OSError as e:
+                ctx.problems.append(f"{p}：{describe(e)}")
+                continue
+            if p.name in seen:  # zip 的根目錄只能有一個同名檔
+                ctx.problems.append(f"{p}：與 {seen[p.name]} 同名（zip 裡只能放一個），沒有打包")
+                continue
+            seen[p.name] = p
+            n += 1
+        log.info("掃描 debug_sheet 資料夾 %s：%d 檔（副檔名 %s）", d, n,
+                 "、".join(ctx.cfg["targets"]["debug_sheet"]["exts"]))
+    return [seen[k] for k in sorted(seen)]
+
+
+def _size(p: Path) -> int:
+    try:
+        return p.stat().st_size
+    except OSError:
+        return 0
+
+
+def _remove(p: Path) -> None:
+    try:
+        if p.exists():
+            p.unlink()
+    except OSError as e:
+        log.warning("無法刪除暫存檔 %s：%s", p, describe(e))
+
+
+def pack_debug_sheet(files: list[Path], zpath: Path) -> tuple[int, int]:
+    """打包成 zip：檔案放在根目錄、保留原檔名；影像 ZIP_STORED、其他 ZIP_DEFLATED；allowZip64、不加密、不分割。
+
+    雲端用 HTTP Range 先讀檔尾的目錄、再讀個別檔案，所以寫在可 seek 的一般檔案上（不用串流寫法）。
+    先寫 <檔名>.tmp，完成才 os.replace 成正式檔名。回傳 (打包檔數, 原始總大小)。
+    """
+    tmp = zpath.with_name(zpath.name + ".tmp")
+    n = raw = 0
+    try:
+        with zipfile.ZipFile(tmp, "w", allowZip64=True, strict_timestamps=False) as zf:
+            for p in files:
+                how = zipfile.ZIP_STORED if p.suffix.lower() in ZIP_STORED_EXTS else zipfile.ZIP_DEFLATED
+                try:
+                    zf.write(p, arcname=p.name, compress_type=how)
+                except FileNotFoundError:  # 掃描之後才被移走：少這一檔，其他照常打包
+                    log.warning("debug_sheet：%s 在打包時已不存在 —— 略過", p.name)
+                    continue
+                n += 1
+                raw += zf.getinfo(p.name).file_size
+        os.replace(tmp, zpath)
+    finally:
+        _remove(tmp)
+    return n, raw
+
+
+def _extra_payload(ctx: Ctx, names: list[str], category: str = DEBUG_CATEGORY) -> dict:
+    """v1.3.0 的 presign 與 complete 請求本體相同：比媒體多一個 category。"""
+    return {"store_code": ctx.store, "biz_date": ctx.day, "category": category, "files": list(names)}
+
+
+def upload_extra(ctx: Ctx, client: ab.Client, path: Path, category: str = DEBUG_CATEGORY) -> str:
+    """一次嘗試：presign → PUT → complete。失敗就拋例外，由 try_file 計次重試；
+    complete 回 missing 也算失敗，下一次從取網址重做。presign / complete 回 4xx 依規格不重試。"""
+    name = path.name
+    payload = _extra_payload(ctx, [name], category)
+    data = client.post_json(EXTRA_PRESIGN, payload, attempts=1)
+    u = next((u for u in (data.get("uploads") or []) if isinstance(u, dict) and u.get("name") == name), None)
+    if not u or not u.get("url"):
+        raise ab.TransientError("取得上傳網址的回應裡沒有這個檔案")
+    headers = {str(k): str(v) for k, v in (u.get("headers") or {}).items()}
+    if not any(k.lower() == "content-type" for k in headers):
+        headers["Content-Type"] = EXTRA_CONTENT_TYPE
+    out = ab.s3_put(client.s3, path, {**u, "headers": headers}, timeout=(ab.CONNECT_TIMEOUT, ctx.st.s3.put_timeout))
+    if not out.ok:
+        raise ab.TransientError(f"S3 上傳失敗：{out.detail}")
+    done = client.post_json(EXTRA_COMPLETE, payload, attempts=1)
+    if name not in (done.get("stored") or []):
+        raise ab.TransientError("回報完成時伺服器在 S3 找不到這個檔案（missing）—— 重新取網址再傳")
+    return "已確認在 S3"
+
+
+def _extra_stored(ctx: Ctx, client: ab.Client, name: str, category: str = DEBUG_CATEGORY) -> bool:
+    """補傳前先問伺服器是否已在 S3（complete 只確認、不改動）。問不到就當成還沒傳。"""
+    try:
+        data = client.post_json(EXTRA_COMPLETE, _extra_payload(ctx, [name], category), attempts=1)
+    except Exception as e:  # noqa: BLE001
+        log.warning("補傳：無法確認 %s 是否已在 S3（%s）—— 重新上傳", name, describe(e))
+        return False
+    return name in (data.get("stored") or [])
+
+
+def step_debug_sheet(ctx: Ctx, client: ab.Client | None) -> Result:
+    """把 <日>/debug_sheet/ 打包成 <日>_debug_sheet.zip，經 /api/ingest/extra 直傳 S3。
+
+    暫存 zip 放在 debug_sheet.tmp_dir（不在 <prefix>/<日>/ 底下），不論成功、失敗或 dry-run，結束都刪掉。
+    """
+    item = KIND_LABEL["debug_sheet"]
+    if not ctx.cfg["targets"]["debug_sheet"].get("enabled", True):
+        return Result(item, "SKIP", "設定檔已關閉（targets.debug_sheet.enabled = false）")
+    files = find_debug_sheet(ctx)
+    if not files:
+        return Result(item, "SKIP", f"沒有要上傳的 debug_sheet 檔案（找過 {', '.join(str(d) for d in ctx.dirs('debug_sheet'))}）")
+    tmp_dir = Path(ctx.st.debug_tmp_dir)
+    zpath = tmp_dir / f"{ctx.day}_{DEBUG_CATEGORY}.zip"
+    try:
+        t0 = time.monotonic()
+        try:
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            # zip 最大約等於原始大小（影像不壓縮）加上每檔的目錄項；打包完還要留 min_free 給其他程式
+            raw = sum(_size(p) for p in files)
+            need = raw + 1024 * len(files) + ctx.st.debug_min_free_bytes
+            free = shutil.disk_usage(tmp_dir).free
+            if free < need:
+                return Result(item, "FAIL", f"暫存空間不足：{tmp_dir} 剩 {ab.human(free)}，打包 {len(files)} 檔需要約 "
+                                            f"{ab.human(need)}（含保留 {ab.human(ctx.st.debug_min_free_bytes)}）—— 這次不上傳")
+            n, raw = pack_debug_sheet(files, zpath)
+        except OSError as e:
+            return Result(item, "FAIL", f"無法在 {tmp_dir} 打包 zip：{describe(e)}")
+        if n == 0:
+            return Result(item, "SKIP", "debug_sheet 檔案在打包時都已不存在")
+        size = zpath.stat().st_size
+        kinds = {}
+        for p in files:
+            kinds[p.suffix.lower()] = kinds.get(p.suffix.lower(), 0) + 1
+        counts = "、".join(f"{e} {c}" for e, c in sorted(kinds.items()))
+        log.info("debug_sheet：打包 %d 檔（%s，原始 %s）→ %s（%s，%.1f 秒）", n, counts, ab.human(raw), zpath,
+                 ab.human(size), time.monotonic() - t0)
+        if size > ctx.st.debug_max_zip_bytes:
+            return Result(item, "FAIL", f"{zpath.name} {ab.human(size)}，超過上限 {ab.human(ctx.st.debug_max_zip_bytes)}")
+        if ctx.dry_run:
+            return Result(item, "OK", f"[dry-run] 打包 {n} 檔（{counts}）→ {zpath.name} {ab.human(size)}，沒有上傳")
+        if ctx.catching_up and ctx.st.skip_existing and _extra_stored(ctx, client, zpath.name):
+            log.info("補傳：%s 已在 S3，略過", zpath.name)
+            return Result(item, "OK", f"{zpath.name} 已在 S3（補傳略過）")
+        t1 = time.monotonic()
+        ok, _, err = try_file(ctx, f"debug_sheet {zpath.name}", lambda: upload_extra(ctx, client, zpath))
+        sec = time.monotonic() - t1
+        if ok:
+            log.info("debug_sheet：上傳 %s（%s）完成，%.1f 秒", zpath.name, ab.human(size), sec)
+            return Result(item, "OK", f"{n} 檔（{counts}）→ {zpath.name} {ab.human(size)}，上傳 {sec:.1f} 秒，已確認在 S3")
+        return Result(item, "FAIL", f"{zpath.name}（{n} 檔，{ab.human(size)}）：{err}")
+    finally:
+        _remove(zpath)  # 成功、失敗、dry-run 都刪掉暫存檔
+
+
+# ── 上傳：CSV 原檔另存 S3（v1.3.0 其他檔案上傳）────────────────────────────
+CSV_S3_ITEM = "CSV→S3"
+
+
+def step_csv_s3(ctx: Ctx, client: ab.Client | None) -> Result:
+    """CSV 經 /api/ingest/csv 成功之後才呼叫：把同一個 .csv 原檔（不壓縮）經 /api/ingest/extra 直傳 S3，
+    位置 extra/<店>/<日>/<csv_s3.category>/<檔名>，同名重傳會覆蓋。
+
+    這一步失敗只影響它自己（結束代碼 1、列入補傳）；訂單已經寫進 Dashboard，不擋影片。
+    """
+    category = ctx.st.csv_s3_category
+    if not ctx.st.csv_s3:
+        return Result(CSV_S3_ITEM, "SKIP", "設定檔已關閉（csv_s3.enabled = false）")
+    path = find_named(ctx, "csv", f"{ctx.day}_{ctx.store}.csv")
+    if path is None:  # step_csv 剛成功，正常不會發生（檔案在這之間被移走）
+        return Result(CSV_S3_ITEM, "FAIL", f"找不到 {ctx.day}_{ctx.store}.csv")
+    where = f"extra/{ctx.store}/{ctx.day}/{category}/{path.name}"
+    if not ab.MEDIA_NAME_RE.match(path.name):
+        return Result(CSV_S3_ITEM, "FAIL", f"{path.name}：檔名只能用英數、'.'、'-'、'_'，且不超過 200 字元")
+    size = _size(path)
+    if ctx.dry_run:
+        return Result(CSV_S3_ITEM, "OK", f"[dry-run] 會上傳 {path.name}（{ab.human(size)}）到 S3 {where}")
+    if ctx.catching_up and ctx.st.skip_existing and _extra_stored(ctx, client, path.name, category):
+        log.info("補傳：%s 已在 S3，略過", where)
+        return Result(CSV_S3_ITEM, "OK", f"{path.name} 已在 S3（補傳略過）")
+    t0 = time.monotonic()
+    ok, _, err = try_file(ctx, f"CSV→S3 {path.name}", lambda: upload_extra(ctx, client, path, category))
+    sec = time.monotonic() - t0
+    if ok:
+        log.info("CSV→S3：上傳 %s（%s）完成，%.1f 秒", where, ab.human(size), sec)
+        return Result(CSV_S3_ITEM, "OK", f"{path.name}（{ab.human(size)}）→ {where}，{sec:.1f} 秒，已確認在 S3")
+    return Result(CSV_S3_ITEM, "FAIL", f"{path.name}：{err}（訂單已寫入 Dashboard，只有原檔沒存到 S3）")
+
+
 def guarded(item: str, fn, *args) -> list[Result]:
     """最後一道防線：步驟裡任何沒預料到的例外都轉成 FAIL，其他步驟照常進行、結果一定印出。"""
     try:
@@ -655,19 +929,43 @@ def guarded(item: str, fn, *args) -> list[Result]:
         return [Result(item, "FAIL", describe(e))]
 
 
+def mode_items(mode: str) -> list[str]:
+    """模式拆成項目：all → 全部；csv,log → ["csv", "log"]。"""
+    return list(MODES[1:]) if mode == "all" else mode.split(",")
+
+
+def parse_mode(text: str) -> str:
+    """第一個參數：單一模式，或用逗號（或 +）組合，例如 csv,log。回傳正規化的寫法（依 MODES 排序、去重複）。"""
+    parts = [p.strip().lower() for p in re.split(r"[,+]", text or "")]
+    bad = [p for p in parts if p not in MODES]
+    if bad:
+        raise argparse.ArgumentTypeError(
+            f"上傳方式只能是 {' / '.join(MODES)}，或用逗號組合（例如 csv,log），實際為 {text!r}")
+    if "all" in parts:
+        return "all"  # all 已經包含全部
+    return ",".join(m for m in MODES if m in parts)
+
+
 def run(ctx: Ctx, client: ab.Client | None) -> list[Result]:
-    if ctx.mode == "csv":
-        return guarded("csv", step_csv, ctx, client)
-    if ctx.mode == "log":
-        return guarded("log", step_log, ctx, client)
-    if ctx.mode in ("video", "image"):
-        return guarded(KIND_LABEL[ctx.mode], step_media, ctx, client, [ctx.mode])
-    # all：log 與 CSV／媒體無關，先送；CSV 成功才送影片（§1），高清影像不受 CSV 影響
-    results = guarded("log", step_log, ctx, client)
-    csv_result = guarded("csv", step_csv, ctx, client)
-    results += csv_result
-    csv_ok = csv_result[0].status == "OK"
-    results += guarded("影片＋高清影像", step_media, ctx, client, ["video", "image"], csv_ok)
+    """依 all 的順序只跑這次模式包含的項目（單一模式、組合模式、all 都走這裡）。"""
+    want = set(mode_items(ctx.mode))
+    results: list[Result] = []
+    # log 與 CSV／媒體無關，先送；CSV 成功才送影片（§1），高清影像不受 CSV 影響
+    if "log" in want:
+        results += guarded("log", step_log, ctx, client)
+    csv_ok = True
+    if "csv" in want:
+        csv_result = guarded("csv", step_csv, ctx, client)
+        results += csv_result
+        csv_ok = csv_result[0].status == "OK"
+        if csv_ok:  # /api/ingest/csv 成功後，原檔再送 S3；這一步的成敗不影響影片
+            results += guarded(CSV_S3_ITEM, step_csv_s3, ctx, client)
+    # debug_sheet 檔小、不受 CSV 影響，排在影片之前：03:05 起 rclone move 會把資料夾搬走，要趕在那之前傳完
+    if "debug" in want:
+        results += guarded("debug_sheet", step_debug_sheet, ctx, client)
+    media = [k for k in ("video", "image") if k in want]
+    if media:
+        results += guarded("＋".join(KIND_LABEL[k] for k in media), step_media, ctx, client, media, csv_ok)
     return results
 
 
@@ -840,9 +1138,10 @@ def report(ctx: Ctx, results: list[Result], elapsed: float) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="aibox_uploader.py", description="AI Box 每日上傳程式（API v1.2.8）",
+    p = argparse.ArgumentParser(prog="aibox_uploader.py", description="AI Box 每日上傳程式（API v1.3.0）",
                                 formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
-    p.add_argument("mode", choices=MODES, help="上傳方式：all / csv / log / video / image")
+    p.add_argument("mode", type=parse_mode, metavar="MODE",
+                   help="上傳方式：all / csv / log / debug / video / image，或用逗號組合，例如 csv,log")
     p.add_argument("--store", help="店家代碼（優先於設定檔的 store）")
     p.add_argument("--prefix-path", help="上傳檔案的根目錄，日期資料夾在它底下（優先於設定檔的 prefix_path）")
     p.add_argument("--date", help="日期資料夾名稱 YYYYMMDD，也可以 today / yesterday（預設 yesterday，本機時間）")
@@ -850,7 +1149,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-attempts", type=int,
                    help=f"同一個檔案失敗幾次就暫停（優先於設定檔 retry.max_attempts，再來是 {MAX_ATTEMPTS_ENV}，預設 {MAX_ATTEMPTS}）")
     p.add_argument("--dry-run", action="store_true",
-                   help="只列出會上傳哪些檔案（含補傳清單裡的日期），不連線、不需要金鑰、不改補傳清單")
+                   help="只列出會上傳哪些檔案（含補傳清單裡的日期），不連線、不需要金鑰、不改補傳清單；"
+                        "debug_sheet 會實際打包並記錄檔數與大小，結束後刪掉暫存 zip")
     p.add_argument("--no-catch-up", action="store_true", help="這次不補傳先前失敗的日期（清單保留，下次照常補傳）")
     p.add_argument("-v", "--verbose", action="store_true", help="輸出除錯訊息")
     return p
@@ -949,6 +1249,7 @@ def main(argv: list[str] | None = None) -> int:
             raise ab.ConfigError("需要上傳檔案的根目錄：請給 --prefix-path，或在設定檔寫 prefix_path")
         ctx = Ctx(args.mode, store, resolve_day(args.date), Path(prefix), cfg, resolve_settings(cfg, args),
                   args.dry_run)
+        check_debug_tmp(ctx)
         conn = Conn(ctx)
         if not ctx.st.catch_up:
             return process_date(ctx, conn, cfg_from)[0]
@@ -958,7 +1259,9 @@ def main(argv: list[str] | None = None) -> int:
         code, err, missing = process_date(ctx, conn, cfg_from)
         if not ctx.dry_run:
             # 日期資料夾不存在（--date 打錯、那天沒營業）不列入補傳；本來就在清單裡的則放棄
-            pending.settle(ctx.day, {ctx.mode: err}, folder_missing=missing)
+            # 組合模式拆成單項記錄（csv,log 失敗 → 記 csv 與 log），補傳時逐項重跑
+            outcomes = {ctx.mode: err} if ctx.mode == "all" else {m: err for m in mode_items(ctx.mode)}
+            pending.settle(ctx.day, outcomes, folder_missing=missing)
             pending.save()
         codes = [code] + catch_up(ctx, conn, pending, cfg_from)
         if len(codes) > 1 or pending.gave_up or pending.days:

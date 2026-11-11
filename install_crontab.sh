@@ -7,7 +7,8 @@
 #   2. 從專案內的 rclone_settings/rclone.conf 複製金鑰到 /root/.config/rclone/rclone.conf
 #      （如果專案內沒有該檔案，會 fallback 檢查系統是否已有現成金鑰）
 #   3. 建立 log 目錄
-#   4. 寫入 crontab 排程（自動上傳 stream 影片到 onedrive）
+#   4. 補回雲端上傳腳本 aibox_uploader.sh 的執行權限（zip 部署會把它弄丟，cron 直接執行它）
+#   5. 寫入 crontab 排程（自動上傳 stream 影片到 onedrive）
 #
 # 排程時間：凌晨 03:05 起約兩小時（03:05 / 03:35 / 04:05 / 04:35 觸發，flock 防重疊；
 #   主機當地時間，之後主機會實際跑在日本，故即為日本時間）。
@@ -74,7 +75,13 @@ mkdir -p /mnt/reserved/restart_logs/
 echo "已確認 /mnt/reserved/restart_logs/ 存在"
 
 echo ""
-echo "===== 4. 寫入 crontab ====="
+echo "===== 4. 雲端上傳腳本執行權限 ====="
+# 下面 01:00 那行 cron 直接執行它，沒有執行權限就不會跑；zip 部署解開後可能沒有執行權限（實驗機看到的是 rw-rw-rw-）
+chmod 755 /home/root/ocr_mmr_dla/aibox_uploader/aibox_uploader.sh
+echo "已設定 /home/root/ocr_mmr_dla/aibox_uploader/aibox_uploader.sh 為 755"
+
+echo ""
+echo "===== 5. 寫入 crontab ====="
 
 # 用暫存檔組出這次要寫入的排程區塊，避免跳脫字元問題
 CRON_BLOCK_FILE=$(mktemp)

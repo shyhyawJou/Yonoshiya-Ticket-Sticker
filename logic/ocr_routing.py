@@ -1,5 +1,5 @@
 """Validated per-object text detector choices, shared by NUC and DLA."""
-ALIASES = {"ticket": "order_ticket", "sticker": "order_sticker"}
+ALIASES = {"ticket": "order_ticket", "ticket_extra": "order_ticket", "stub": "small_order_ticket", "sticker": "order_sticker"}
 BACKENDS = {"cv_table", "cv_ink", "det"}
 
 

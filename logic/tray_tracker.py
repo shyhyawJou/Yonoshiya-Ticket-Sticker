@@ -4,7 +4,7 @@ tray_tracker.py
 TrayTracker 擁有並管理 `trays` 字典本身的生命週期：
     - 追蹤既有 tray 的位置（IoU 比對、drift 平滑）
     - 從未匹配的偵測結果中累積候選，門檻到了才建立新 tray
-    - 追蹤 tray 內的 ticket / sticker 位置與穩定度 (stable_frames)
+    - 追蹤 tray 內的 ticket / sticker / stub 位置與穩定度 (stable_frames)
     - reset / remove 等硬重置操作
 
 刻意設計成「只管資料本身該長什麼樣子，不管這些資料接下來要拿去做
@@ -22,7 +22,7 @@ from typing import Dict, List
 
 from loguru import logger
 from logic.geometry import get_polygon_centroid, is_center_in_polygon, iou_poly_poly, shrink_rect, center_shift_ratio, PolygonXYXY
-from logic.models import Tray, TrackedItem
+from logic.models import Stub, Tray, TrackedItem, note_seen_together
 from logic.known_class_items import STABLE_CONFIRM_CLASSES
 from logic.sticker_pending_buffer import StickerPendingBuffer
 
@@ -227,14 +227,16 @@ class TrayTracker:
                 return
         item.stable_frames += 1
 
-    def update_ticket_and_stickers(self, ticket_dets: list, sticker_dets: list, ticket_mat_dets: list = None) -> None:
+    def update_ticket_and_stickers(self, ticket_dets: list, sticker_dets: list, ticket_mat_dets: list = None, stub_dets: list = None) -> None:
         """
         2-1. 更新每個 tray 的 ticket 追蹤與穩定度
         2-2. 更新每個 tray 的 sticker 追蹤與穩定度
              - STABLE_CONFIRM_CLASSES 這幾類：需連續 K_sticker_new 幀偵測到
                同類別、位置相近的候選，才正式建立進 tray.stickers
              - 其餘類別：維持原本行為，偵測一幀就建立
+        2-3. 更新每個 tray 的 stub 追蹤與穩定度
         """
+        stub_dets = stub_dets or []
         for tray_id, tray in self.trays.items():
 
             if tray.missing_count > 0:
@@ -312,6 +314,7 @@ class TrayTracker:
             #     幽靈 bbox，導致它真正離開又回來時，被系統當成第二個新物件。
             # --- 尋找這幀沒被匹配到的貼紙，累加 missing_count ---
             detected_indices = matched_sticker_indices | newly_created_indices
+            note_seen_together([tray.stickers[i] for i in detected_indices])   # 分辨「被移動」與「另一張」
             for idx, ts in enumerate(tray.stickers):
                 if idx in detected_indices:
                     ts.missing_count = 0
@@ -335,3 +338,59 @@ class TrayTracker:
                 ts for ts in tray.stickers
                 if not (ts.is_missing and ts.has_notified_missing)
             ]
+
+            # --- stub ---
+            tray_stubs = [
+                d for d in stub_dets
+                if tray.rect is None or is_center_in_polygon(get_polygon_centroid(d.xyxy), tray.rect)
+            ]
+            self._update_stub(tray, tray_stubs)
+
+    def _update_stub(self, tray: Tray, stub_dets: list) -> None:
+        if stub_dets:
+            d = stub_dets[0]
+            if tray.stub is not None and len(stub_dets) > 1:
+                best_d = max(stub_dets, key=lambda cand: iou_poly_poly(cand.xyxy, tray.stub.item.bbox))
+                if iou_poly_poly(best_d.xyxy, tray.stub.item.bbox) > 0.25:
+                    d = best_d
+
+            s_rect, s_xywhr = d.xyxy, d.xywhr
+            if tray.stub is None:
+                tray.stub = Stub(
+                    item=TrackedItem(
+                        bbox=s_rect,
+                        xywhr=s_xywhr,
+                        cls_name=getattr(d, "cls_name", "small_order_ticket"),
+                    )
+                )
+                return
+
+            cur = tray.stub.item
+            if iou_poly_poly(s_rect, cur.bbox) > 0.25:
+                self._advance_stable(cur, s_rect, f"stub@{tray.id}")
+                cur.bbox = s_rect
+                cur.xywhr = s_xywhr
+                cur.missing_count = 0
+                cur.is_missing = False
+                return
+
+            if tray.stub.result is None and not cur.is_ocr_busy:
+                tray.stub = Stub(
+                    item=TrackedItem(
+                        bbox=s_rect,
+                        xywhr=s_xywhr,
+                        cls_name=getattr(d, "cls_name", "small_order_ticket"),
+                    )
+                )
+            return
+
+        if tray.stub is None:
+            return
+
+        cur = tray.stub.item
+        if not cur.is_checked and not cur.is_ocr_busy:
+            cur.stable_frames = 0
+        if not cur.is_ocr_busy:
+            cur.missing_count += 1
+        if tray.stub.result is None and cur.missing_count > self.sticker_missing_frame:
+            tray.stub = None

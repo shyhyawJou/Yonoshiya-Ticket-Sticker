@@ -15,6 +15,7 @@ from config import PresetRoiCfg, RoiCfg, save_preset_roi
 from logic_engine import LogicEngine
 from ocr_engine import AsyncOCR
 from mmr_engine import Rotated_RTMDET
+from manager.order_photo import OrderPhoto
 
 
 class TaskContext:
@@ -38,13 +39,14 @@ class TaskContext:
         self.config_path: Optional[Path] = None
         self._on_recording_start = None
         self._on_recording_stop = None
+        self.order_photo = None
 
         self.ocr_result_queue: "queue.Queue" = queue.Queue()
 
     # ---------- 載入 ----------
 
     def load_task(self, task: str, on_recording_start=None, on_recording_stop=None, get_video_filename=None,
-                  save_frame=None) -> None:
+                  save_frame=None, save_photo=None, frame_time=None) -> None:
         """
         安全地載入指定任務的設定檔、AI 模型和邏輯引擎。
         """
@@ -78,6 +80,13 @@ class TaskContext:
             mqtt_kwargs["client_id"] = cfg.mqtt.client_id
         self.bus = MqttBus(MqttSettings(**mqtt_kwargs))
 
+        # --- 每筆訂單的照片組（config 的 order_photo；不寫 = 關閉）---
+        # save_photo(tag) 存一張高清全幀到 full_screen/、frame_time() 是這一幀的取像時間，都由 app.py 提供。
+        # 跟 bus 一起建、一起留著：切換模式重建 LogicEngine 時沿用同一個（App 回報的配對不會斷）
+        self.order_photo = None
+        if save_photo is not None:
+            self.order_photo = OrderPhoto(cfg.order_photo, self.bus, save_photo, frame_time or time.time)
+
         # --- DLA 載入守衛 ---
         # 必須在任何模型載入之前套用。config.yaml 沒有 dla_guard 那一段時，
         # 這些欄位都是 dataclass 預設值，行為就是「啟用、最多連續重開 2 次」。
@@ -107,6 +116,7 @@ class TaskContext:
             on_recording_stop=self._on_recording_stop,
             get_video_filename=self._get_event_video_filename,
             save_frame=self._save_frame_cb,
+            order_photo=self.order_photo,
         )
 
         # --- init ocr ---
@@ -318,6 +328,7 @@ class TaskContext:
                 on_recording_stop=self._on_recording_stop,
                 get_video_filename=self._get_event_video_filename,
                 save_frame=self._save_frame_cb,
+                order_photo=self.order_photo,
             )
         except Exception as e:
             logger.error(f"[MODE] 切換模式失敗，退回 '{old_mode}': {e}")

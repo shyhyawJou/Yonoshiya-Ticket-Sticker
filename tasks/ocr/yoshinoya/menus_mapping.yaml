@@ -722,14 +722,6 @@ mapping:
       - 追い飯
       - ﾆﾝﾆｸﾏｼﾏｼだれ
       - 半熟玉子
-  - name: 牛丼･ｱﾀﾏ(キムチ)
-    sub_items:
-      - 牛丼　アタマ
-      - キムチ
-  - name: 牛丼･超特(キムチ)
-    sub_items:
-      - 牛丼　超特
-      - キムチ
   - name: D)ｽﾀﾐﾅ超特盛丼
     sub_items:
       - ｽﾀﾐﾅ超特盛丼
@@ -1055,14 +1047,6 @@ mapping:
   - name: D)とろろ
     sub_items:
       - とろろ
-  - name: 牛丼･小(キムチ)
-    sub_items:
-      - 牛丼　小
-      - キムチ
-  - name: 牛丼･並(キムチ)
-    sub_items:
-      - 牛丼　並
-      - キムチ
   - name: D)牛丼･小(ﾈｷﾞﾗｰ)
     sub_items:
       - 牛丼　小
@@ -1866,6 +1850,160 @@ mapping:
     sub_items:
       - 牛おろし丼
       - たれ
+  - name: ★肉２倍盛
+    sub_items:
+      - 肉２倍盛
+  - name: 牛ハヤシ(肉ﾀﾞｸ)
+    sub_items:
+      - 肉だく牛ハヤシライス
+  - name: 豚ﾛｰｽ生姜丼･並
+    sub_items:
+      - ﾛｰｽ生姜丼 並
+  - name: 豚ﾛｰｽ生姜丼･大
+    sub_items:
+      - ﾛｰｽ生姜丼 大
+  - name: 豚ﾛｰｽ生姜ｻﾗ･並
+    sub_items:
+      - ﾛｰｽ生姜皿 並
+  - name: 豚ﾛｰｽ生姜ｻﾗ･大
+    sub_items:
+      - ﾛｰｽ生姜皿 大
+  - name: タコ(旨から)
+    sub_items:
+      - ﾀｺﾗｲｽ･旨辛
+      - サルサ
+  - name: タコ(あま旨)
+    sub_items:
+      - ﾀｺﾗｲｽ･甘旨
+      - トマト
+  - name: 別 旨辛ｻﾙｻ
+    sub_items:
+      - 旨辛サルサ
+  - name: 別 甘旨ﾄﾏﾄ
+    sub_items:
+      - 甘旨トマト
+  - name: ﾋﾞﾌﾀｺ(旨から)
+    sub_items:
+      - ビフタコｻﾙｻ
+  - name: ﾋﾞﾌﾀｺ(あま旨)
+    sub_items:
+      - ビフタコﾄﾏﾄ
+  - name: そば･並(肉ﾐｿ)(酢･ﾗｰ
+    sub_items:
+      - 肉味噌牛丼並
+      - 油そば
+      - 酢･ラー油
+  - name: そば･ｱﾀﾏ(肉ﾐｿ)(酢･ﾗｰ
+    sub_items:
+      - 肉味噌牛丼アタマ
+      - 油そば
+      - 酢･ラー油
+  - name: そば･大(肉ﾐｿ)(酢･ﾗｰ
+    sub_items:
+      - 肉味噌牛丼大
+      - 油そば
+      - 酢･ラー油
+  - name: そば･特(肉ﾐｿ)(酢･ﾗｰ
+    sub_items:
+      - 肉味噌牛丼特
+      - 油そば
+      - 酢･ラー油
+  - name: そば･超特(肉ﾐｿ)(酢･ﾗｰ
+    sub_items:
+      - 肉味噌牛丼超特
+      - 油そば
+      - 酢･ラー油
+  - name: そば･小(肉ﾐｿ)(酢･ﾗｰ
+    sub_items:
+      - 肉味噌牛丼小
+      - 油そば
+      - 酢･ラー油
+  - name: そば･並(ｷﾑﾁ)(酢･ﾗｰ
+    sub_items:
+      - キムチ牛丼並
+      - 油そば
+      - 酢･ラー油
+  - name: そば･ｱﾀﾏ(ｷﾑﾁ)(酢･ﾗｰ
+    sub_items:
+      - ｷﾑﾁ牛丼ｱﾀﾏ
+      - 油そば
+      - 酢･ラー油
+  - name: そば･大(ｷﾑﾁ)(酢･ﾗｰ
+    sub_items:
+      - キムチ牛丼大
+      - 油そば
+      - 酢･ラー油
+  - name: そば･特(ｷﾑﾁ)(酢･ﾗｰ
+    sub_items:
+      - キムチ牛丼特
+      - 油そば
+      - 酢･ラー油
+  - name: そば･超特(ｷﾑﾁ)(酢･ﾗｰ
+    sub_items:
+      - ｷﾑﾁ牛丼超特
+      - 油そば
+      - 酢･ラー油
+  - name: そば･小(ｷﾑﾁ)(酢･ﾗｰ
+    sub_items:
+      - キムチ牛丼小
+      - 油そば
+      - 酢･ラー油
+  - name: そば･並(ﾈｷﾞﾗｰ)(酢･ﾗｰ
+    sub_items:
+      - ﾈｷﾞﾗｰ油牛丼並
+      - 油そば
+      - 酢･ラー油
+  - name: そば･ｱﾀﾏ(ﾈｷﾞﾗｰ)(酢･ﾗｰ
+    sub_items:
+      - ネギラー油牛丼アタマ
+      - 油そば
+      - 酢･ラー油
+  - name: そば･大(ﾈｷﾞﾗｰ)(酢･ﾗｰ
+    sub_items:
+      - ﾈｷﾞﾗｰ油牛丼大
+      - 油そば
+      - 酢･ラー油
+  - name: そば･特(ﾈｷﾞﾗｰ)(酢･ﾗｰ
+    sub_items:
+      - ﾈｷﾞﾗｰ油牛丼特
+      - 油そば
+      - 酢･ラー油
+  - name: そば･超特(ﾈｷﾞﾗｰ)(酢･ﾗｰ
+    sub_items:
+      - ネギラー油牛丼超特
+      - 油そば
+      - 酢･ラー油
+  - name: そば･小(ﾈｷﾞﾗｰ)(酢･ﾗｰ
+    sub_items:
+      - ﾈｷﾞﾗｰ油牛丼小
+      - 油そば
+      - 酢･ラー油
+  - name: 牛丼(ｷﾑﾁ)みそ汁ｾｯﾄ
+    sub_items:
+      - キムチ
+      - みそ汁
+  - name: 牛丼(ｷﾑﾁ)とん汁ｾｯﾄ
+    sub_items:
+      - キムチ
+      - 豚汁
+  - name: CP鍋膳･牛すき
+    sub_items:
+      - 牛すき鍋膳
+      - 玉子
+  - name: CP鍋膳･牛すき2倍
+    sub_items:
+      - 牛すき鍋膳 肉２倍
+      - 玉子
+  - name: CP単)牛すき
+    sub_items:
+      - 単)牛すき
+      - 玉子
+  - name: CP鍋FP3食
+    sub_items:
+      - 牛鍋ＦＰ３食
+  - name: CP鍋FP4食
+    sub_items:
+      - 牛鍋ＦＰ４食
   - name: 和風ドレッング
     sub_items:
       - 和風ドレッング
@@ -1885,20 +2023,46 @@ mapping:
     sub_items:
       - ポテトサラダ
       - みそ汁
+  - name: 牛丼･ｱﾀﾏ(キムチ)
+    sub_items:
+      - ｷﾑﾁ牛丼ｱﾀﾏ
+  - name: 牛丼･ｱﾀﾏ(キムチ)
+    sub_items:
+      - 牛丼　アタマ
+      - キムチ
+  - name: 牛丼･超特(キムチ)
+    sub_items:
+      - ｷﾑﾁ牛丼超特
+  - name: 牛丼･超特(キムチ)
+    sub_items:
+      - 牛丼　超特
+      - キムチ
+  - name: 牛丼･小(キムチ)
+    sub_items:
+      - キムチ牛丼小
+  - name: 牛丼･小(キムチ)
+    sub_items:
+      - 牛丼　小
+      - キムチ
+  - name: 牛丼･並(キムチ)
+    sub_items:
+      - キムチ牛丼並
+  - name: 牛丼･並(キムチ)
+    sub_items:
+      - 牛丼　並
+      - キムチ
   - name: 牛丼･超特
     sub_items:
       - 牛丼 超特盛
   - name: 牛丼･超特
     sub_items:
       - 牛丼　超特
-      - 酢･ラー油
   - name: 牛丼･アタマ
     sub_items:
       - 牛丼　ｱﾀﾏ大
   - name: 牛丼･アタマ
     sub_items:
       - 牛丼　アタマ
-      - 酢･ラー油
   - name: 牛丼･小(ねぎ玉)
     sub_items:
       - 牛丼 小盛
@@ -1908,7 +2072,6 @@ mapping:
     sub_items:
       - 牛丼　小
       - ねぎ
-      - 酢･ラー油
       - 玉子
   - name: 牛丼･並(ねぎ玉)
     sub_items:
@@ -1919,7 +2082,6 @@ mapping:
     sub_items:
       - 牛丼　並
       - ねぎ
-      - 酢･ラー油
       - 玉子
   - name: 牛丼･アタマ(ねぎ玉)
     sub_items:
@@ -1930,7 +2092,6 @@ mapping:
     sub_items:
       - 牛丼　アタマ
       - ねぎ
-      - 酢･ラー油
       - 玉子
   - name: 牛丼･大(ねぎ玉)
     sub_items:
@@ -1941,7 +2102,6 @@ mapping:
     sub_items:
       - 牛丼　大
       - ねぎ
-      - 酢･ラー油
       - 玉子
   - name: 牛丼･特(ねぎ玉)
     sub_items:
@@ -1952,7 +2112,6 @@ mapping:
     sub_items:
       - 牛丼　特
       - ねぎ
-      - 酢･ラー油
       - 玉子
   - name: 牛丼･超特(ねぎ玉)
     sub_items:
@@ -1963,7 +2122,6 @@ mapping:
     sub_items:
       - 牛丼　超特
       - ねぎ
-      - 酢･ラー油
       - 玉子
   - name: 牛丼･小(ねぎ半熟)
     sub_items:
@@ -2331,8 +2489,7 @@ mapping:
       - チーズ
   - name: 牛丼･大(キムチ)
     sub_items:
-      - 牛丼　大盛
-      - キムチ
+      - キムチ牛丼大
   - name: 牛丼･大(キムチ)
     sub_items:
       - 牛丼　大
@@ -2340,24 +2497,12 @@ mapping:
   - name: 牛丼･並
     sub_items:
       - 牛丼　並
-  - name: 牛丼･並
-    sub_items:
-      - 牛丼　並
-      - 酢･ラー油
   - name: 牛丼･大
     sub_items:
       - 牛丼　大
-  - name: 牛丼･大
-    sub_items:
-      - 牛丼　大
-      - 酢･ラー油
   - name: 牛丼･特
     sub_items:
       - 牛丼　特
-  - name: 牛丼･特
-    sub_items:
-      - 牛丼　特
-      - 酢･ラー油
   - name: 牛丼･アタマ(チーズ)
     sub_items:
       - 牛丼　アタマ
@@ -2384,8 +2529,7 @@ mapping:
       - チーズ
   - name: 牛丼･特(キムチ)
     sub_items:
-      - 牛丼　特盛
-      - キムチ
+      - キムチ牛丼特
   - name: 牛丼･特(キムチ)
     sub_items:
       - 牛丼　特
@@ -2530,21 +2674,12 @@ mapping:
       - 追い飯
       - ﾆﾝﾆｸﾏｼﾏｼだれ
       - 玉子
-  - name: ★肉２倍盛
-    sub_items:
-      - 肉２倍盛
   - name: 単)タルタル
     sub_items:
       - 単)タルタル
   - name: 単)タルタル
     sub_items:
       - タルタル
-  - name: から牛･ｱﾀﾏ
-    sub_items:
-      - から牛　頭
-  - name: から牛･アタマ
-    sub_items:
-      - から牛 ｱﾀﾏ
   - name: から揚げ３個
     sub_items:
       - から揚げ３個
@@ -2569,10 +2704,6 @@ mapping:
   - name: 牛丼･小
     sub_items:
       - 牛丼　小
-  - name: 牛丼･小
-    sub_items:
-      - 牛丼　小
-      - 酢･ラー油
   - name: D）★肉２倍盛
     sub_items:
       - 牛皿肉２倍盛
@@ -2688,17 +2819,6 @@ mapping:
   - name: 変更ご飯増量(無料
     sub_items:
       - ご飯大盛り
-  - name: W牛ｻﾗ･ﾈｷﾞ塩ｶﾙﾋﾞ弁当
-    sub_items:
-      - W牛皿･塩ｶﾙﾋﾞ弁当
-      - ご飯
-  - name: W牛ｻﾗ･ﾈｷﾞ塩ｶﾙﾋﾞ弁当
-    sub_items:
-      - W牛皿･ﾈｷﾞ塩ｶﾙﾋﾞ弁当
-      - ご飯
-  - name: 牛ハヤシ(肉ﾀﾞｸ)
-    sub_items:
-      - 肉だく牛ハヤシライス
   - name: D)牛丼・ｱﾀﾏ
     sub_items:
       - 牛丼  ｱﾀﾏ大
@@ -2811,7 +2931,3 @@ mapping:
   - name: 肉２倍盛
     sub_items:
       - 肉2倍盛
-  - name: 肉2倍盛
-    sub_items:
-      - 肉2倍盛
-      - 玉子

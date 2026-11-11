@@ -9,7 +9,8 @@
             —— 補讀後兩種讀法取比對分數高的，同分用 det
       數量  det 框 + predict_quantity（只解碼 1~9 的正方形 crop），一致就用、不一致取信心高的，
             都讀不到但数欄有墨跡就當 1（跟 legacy 的預設 1 一樣，只是這裡有方框 / 墨跡證明這列是品項）
-      單號  CV 單號框附近的 det 框；沒有才用 CV 框讀
+      單號  CV 單號框附近的 det 框；沒有才用 CV 框讀。CV 找不到單號框時，改取表格上方偏右
+            （_find_order_no 的搜尋範圍）字最高的 det 數字框
 
 為什麼不直接全用 CV 框讀：rec 是拿 det 的切圖訓練的，CV 框給 rec 平均讀得比 det 框差
 （2026-10 的 41 張測試：只用 CV 框 27 張全對、現行 det 32 張、這個分工 38/39）。
@@ -82,6 +83,9 @@ class CvAssist:
         if not layout.ok:
             logger.info(f"[CV輔助] 找不到表格（{layout.reason}，{layout_txt}），改用原本的解析")
             return None
+        if layout.cut_side:
+            logger.info(f"[CV輔助] 表格{'右' if layout.cut_side == 'right' else '左'}側外框在傳票框外"
+                        f"（偵測框比傳票窄），外框位置由数欄 / 金額欄線推算")
 
         cells, det_order = self._assign_det_boxes(layout, dt_boxes, rec_res)
         rows_dbg: List[dict] = []
@@ -149,6 +153,13 @@ class CvAssist:
         ob, th = layout.order_no_box, layout.text_h
         cells: dict = {}
         orders = []
+        # CV 沒找到單號框時（光線不均、單號被壓到…），det 讀到的數字不能就這樣丟掉：
+        # 改收 _find_order_no 搜尋的那一塊（表格上方偏右）裡的數字框，挑字最高的（單號是表格上方最大的字）
+        loose = []
+        if ob is None:
+            left, _, _, right = layout.cols
+            tw, yt = right - left, layout.y_top
+            region = (left + 0.40 * tw, right + 0.08 * tw, yt - 6.0 * th, yt - 0.4 * th)
         from logic.yoshinoya.order_parser import normalize_order_number
         for idx, (box, (text, conf)) in enumerate(zip(dt_boxes, rec_res)):
             if conf < (_MIN_DET_SCORE_NEGI if text.startswith("ねぎ") else _MIN_DET_SCORE):
@@ -159,12 +170,19 @@ class CvAssist:
             if no and ob is not None and ob[0] - 2 * th < cx < ob[2] + 2 * th and ob[1] - th < cy < ob[3] + th:
                 orders.append((float(conf), no))
                 continue
+            if no and ob is None and region[0] < cx < region[1] and region[2] < cy < region[3]:
+                loose.append((float(p[:, 1].max() - p[:, 1].min()), float(conf), no))
+                continue
             cell = layout.cell_of(cx, cy)
             if cell is not None:
                 # 跨進数欄：左緣在数欄右界（該高度的位置，欄線可能是斜的）左邊
                 cells.setdefault(cell, []).append(_DetBox(idx, float(p[:, 0].min()), float(p[:, 0].max()),
                                                           text.strip(), float(conf),
                                                           p[:, 0].min() < float(layout.col_x(1, cy)) - 2))
+        if loose:
+            _, conf, no = max(loose)
+            logger.info(f"[CV輔助] 單號：CV 找不到單號框，改用表格上方的 det 數字「{no}」（conf={conf:.2f}）")
+            return cells, no
         return cells, (max(orders)[1] if orders else None)
 
     def _resolve(self, text: str):

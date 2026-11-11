@@ -25,9 +25,9 @@ VARIANTS = [
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--det", default="tasks/ocr/yoshi_det_v01_03.dla")
+    ap.add_argument("--det", default="tasks/ocr/yoshi_det_v01_05.dla")
     ap.add_argument("--cls", default="tasks/ocr/cls_v2.dla")
-    ap.add_argument("--rec", default="tasks/ocr/yoshi_rec_v01_05.dla")
+    ap.add_argument("--rec", default="tasks/ocr/yoshi_rec_v01_08_01.dla")
     ap.add_argument("--dict", default="tasks/ocr/yoshinoya/japan_dict.txt")
     ap.add_argument("images", nargs="+")
     args = ap.parse_args()

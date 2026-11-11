@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import time
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 from loguru import logger
 
 from logic.geometry import iou_poly_poly, is_center_in_polygon, PolygonXYXY, get_polygon_centroid, center_shift_ratio
-from logic.models import Tray, TrackedItem, TrayState
+from logic.models import Stub, Tray, TrackedItem, TrayState, note_seen_together
 from logic.known_class_items import STABLE_CONFIRM_CLASSES
 from logic.sticker_pending_buffer import StickerPendingBuffer
 
@@ -211,6 +211,22 @@ class SingleOrderTracker:
                 get_polygon_centroid(d.xyxy), self.ticket_exclude_roi_polygon
             )
         ]
+        
+    def _filter_stub_dets(self, stub_dets: list) -> list:
+        """
+        stub（客戶聯）跟主 ticket 套用同一個排除區域：中心點落在
+        ticket_exclude_roi_polygon 內的偵測不納入，避免 stub 一出現在畫面
+        就開始累積 stable_frames 並觸發 OCR。
+        子類別（例如 PresetRoiTracker）可覆寫成自己的 ROI 規則。
+        """
+        if self.ticket_exclude_roi_polygon is None:
+            return stub_dets
+        return [
+            d for d in stub_dets
+            if not is_center_in_polygon(
+                get_polygon_centroid(d.xyxy), self.ticket_exclude_roi_polygon
+            )
+        ]
     
     def _filter_ticket_mat_dets(self, ticket_mat_dets: list) -> list:
         """
@@ -310,7 +326,7 @@ class SingleOrderTracker:
                 return
         item.stable_frames += 1
 
-    def update_ticket_and_stickers(self, ticket_dets: list, sticker_dets: list, ticket_mat_dets: list = None) -> None:
+    def update_ticket_and_stickers(self, ticket_dets: list, sticker_dets: list, ticket_mat_dets: list = None,stub_dets: list = None) -> None:
         if self.tray_id not in self.trays:
             self._create_tray()
         tray = self.trays[self.tray_id]
@@ -456,6 +472,7 @@ class SingleOrderTracker:
         tray.pending_stickers = self.pending_buffer.prune(tray.pending_stickers, matched_pending_indices)
 
         detected_indices = matched_sticker_indices | newly_created_indices
+        note_seen_together([tray.stickers[i] for i in detected_indices])   # 分辨「被移動」與「另一張」
         for idx, ts in enumerate(tray.stickers):
             if idx in detected_indices:
                 ts.missing_count = 0
@@ -475,6 +492,9 @@ class SingleOrderTracker:
             ts for ts in tray.stickers
             if not (ts.is_missing and ts.has_notified_missing)
         ]
+        
+        # --- stub（客戶聯 small_order_ticket，一筆訂單最多一張，與主 ticket 獨立追蹤）---
+        self._update_stub(tray, self._filter_stub_dets(stub_dets or []))
 
         # ------------------------------------------------------------
         # 收尾觸發:判斷方法可透過 finalize_mode 抽換("ticket_leave" / "ticket_mat"),
@@ -486,3 +506,53 @@ class SingleOrderTracker:
             tray.missing_count = self.tray_missing_frame + 1
         else:
             tray.missing_count = 0
+    
+    def _update_stub(self, tray: Tray, stub_dets: list) -> None:
+        if stub_dets:
+            d = stub_dets[0]
+            if tray.stub is not None and len(stub_dets) > 1:
+                best_d = max(stub_dets, key=lambda cand: iou_poly_poly(cand.xyxy, tray.stub.item.bbox))
+                if iou_poly_poly(best_d.xyxy, tray.stub.item.bbox) > 0.25:
+                    d = best_d
+
+            s_rect, s_xywhr = d.xyxy, d.xywhr
+            if tray.stub is None:
+                tray.stub = Stub(
+                    item=TrackedItem(
+                        bbox=s_rect,
+                        xywhr=s_xywhr,
+                        cls_name=getattr(d, "cls_name", "small_order_ticket"),
+                    )
+                )
+                return
+
+            cur = tray.stub.item
+            if iou_poly_poly(s_rect, cur.bbox) > 0.25:
+                self._advance_stable(cur, s_rect, "stub")
+                cur.bbox = s_rect
+                cur.xywhr = s_xywhr
+                cur.missing_count = 0
+                cur.is_missing = False
+                return
+
+            # 位置明顯不同且原本尚未鎖定結果、也沒在跑 OCR，換成新的 stub
+            if tray.stub.result is None and not cur.is_ocr_busy:
+                tray.stub = Stub(
+                    item=TrackedItem(
+                        bbox=s_rect,
+                        xywhr=s_xywhr,
+                        cls_name=getattr(d, "cls_name", "small_order_ticket"),
+                    )
+                )
+            return
+
+        if tray.stub is None:
+            return
+
+        cur = tray.stub.item
+        if not cur.is_checked and not cur.is_ocr_busy:
+            cur.stable_frames = 0
+        if not cur.is_ocr_busy:
+            cur.missing_count += 1
+        if tray.stub.result is None and cur.missing_count > self.sticker_missing_frame:
+            tray.stub = None

@@ -28,6 +28,9 @@ from logic.text_utils import normalize_text, FuzzyMatcher
 # === Step 2 重構：訂單解析 / 貼紙比對 ===
 from logic.yoshinoya.order_parser import OrderParser
 from logic.readers.sticker_matcher import StickerMatcher
+from logic.yoshinoya.stub_parser import StubParser, StubTicketConfig
+from logic.readers.date_label import DateLabelConfig, DateLabelReader
+from logic.yoshinoya.stub_cv_det import enhance_stub_detections
 
 # === Step 3 重構：tray 資料結構 / 追蹤 / 狀態機 ===
 from logic.models import Tray, TrayState, TrackedItem  # noqa: F401  (對外相容：舊呼叫端可能 import 這些名稱)
@@ -77,7 +80,7 @@ class LogicEngine:
     """
 
     def __init__(self, cfg: Config, bus: MqttBus, mmr: Rotated_RTMDET, rec_path: str, dict_path: str, on_recording_start=None, on_recording_stop=None, get_video_filename=None,
-                 save_frame=None):
+                 save_frame=None, order_photo=None):
         self.cfg = cfg
         self.bus = bus
         self.mmr = mmr
@@ -88,6 +91,9 @@ class LogicEngine:
         # save_frame(tag)：請 App 存一張當下的原始全幀。醬料包不走 OCR、沒有「送出 OCR」那一幀，
         # 所以在它下 OK/NG 結論時由狀態機呼叫（None = 不存）。
         self.save_frame = save_frame
+        # order_photo：每筆訂單的照片組（manager/order_photo.py::OrderPhoto；None = 不拍）。
+        # 傳票確認時 on_start、收尾時 on_final（要在重置事件發出前，App 才截得到最終畫面）
+        self.order_photo = order_photo
 
         #### 2026/06/24 by Chris
         self.menus_ticket = [normalize_text(m, ignore_space=True) for m in cfg.menus_ticket]
@@ -153,6 +159,34 @@ class LogicEngine:
             vocab_sticker=self.vocab_sticker or None,
             menu_index=self.sticker_index,
         )
+        
+        # 客戶聯（stub / small_order_ticket）解析器
+        profile_name = getattr(cfg, "profile_name", None) or "yoshinoya"
+        base_dir = Path(__file__).resolve().parent
+        stub_yaml = base_dir / "tasks" / "ocr" / str(profile_name) / "stub_ticket.yaml"
+        if not stub_yaml.is_file():
+            stub_yaml = base_dir / "tasks" / "ocr" / "yoshinoya" / "stub_ticket.yaml"
+        self.stub_cfg = StubTicketConfig.from_yaml(str(stub_yaml))
+        self.stub_parser: Optional[StubParser] = None
+        if self.stub_cfg.enabled:
+            self.stub_parser = StubParser(
+                menus=self.vocab_ticket or self.menus_ticket,
+                cfg=self.stub_cfg,
+                menu_index=self.ticket_index,
+            )
+            logger.info(
+                f"[stub] 客戶聯（{self.stub_cfg.class_name}）已啟用：stable_frames={self.stub_cfg.stable_frames}, "
+                f"max_attempts={self.stub_cfg.max_attempts}"
+            )
+
+        # 沙拉日期標籤（readers/date_label.py）。資料夾不存在（其他品牌）= 關閉
+        label_yaml = (base_dir / "tasks" / "ocr" / str(profile_name)
+                      / "reference_img" / "salad_date_label" / "label.yaml")
+        date_label_cfg = DateLabelConfig.from_yaml(str(label_yaml))
+        # 參考圖輔助讀欄位用的 rec 跟大傳票 CV 補讀同一個（StandaloneRecDLA.predict_text）
+        self.date_label = (DateLabelReader(date_label_cfg, self.sticker_matcher,
+                                           rec_pred=self.rec_pred)
+                           if date_label_cfg.enabled else None)
 
         # === 參數讀取設定 ===
         self.N = int(cfg.stability.n_settle_frame)
@@ -260,6 +294,7 @@ class LogicEngine:
             # 狀態機會把所有相關流程當 no-op。
             modifier_knowledge=getattr(cfg, "modifier_knowledge", None),
             n_settle_frame=self.N,
+            sticker_settle_frame=int(getattr(cfg.stability, "sticker_settle_frame", 0) or 0),
             on_recording_start=self.on_recording_start,
             max_item_qty=self.order_guard.max_item_qty,
             wrong_item_confirm=int(getattr(cfg.stability, "wrong_item_confirm", 0) or 0),
@@ -267,6 +302,8 @@ class LogicEngine:
             wrong_item_strong_conf=float(getattr(cfg.stability, "wrong_item_strong_conf", 0.9) or 0),
             debug_sheet=self.debug_sheet,
             save_frame=self.save_frame,
+            stub_parser=self.stub_parser,
+            date_label=self.date_label,
         )
 
         # CSV log 跟影片放在同一個日期資料夾底下 (<root>/<日期>/csv_logs/)，
@@ -379,6 +416,9 @@ class LogicEngine:
         for tray_id, tray in list(self.trays.items()):
             if tray_ids is None or tray_id in tray_ids:
                 self._log_order_end(tray_id, tray, reason, "中止（未寫 CSV）")
+                # 訂單照片組：排定還沒拍的最終照當下取消（tray 之後會換成全新的，
+                # photo_started / photo_completed 跟著歸零，下一筆訂單重新拍）
+                self._call_order_photo("cancel", tray_id, reason)
 
     def refresh_preset_roi(self) -> None:
         """
@@ -417,7 +457,7 @@ class LogicEngine:
     def update(self, frame: np.ndarray, detections: List[Detection]):
         """
         1. 追蹤 tray盤 (餐盤)
-        2. 分配並追蹤盤內的 ticket (訂單) 與 sticker (貼紙)，計算穩定度
+        2. 分配並追蹤盤內的 ticket (訂單) 與 sticker (貼紙) 與 stub (客戶聯)，計算穩定度
         3. 依據狀態機生成 OCR Task
         4. 處理消失過久的 tray（截圖 + CSV log + 移除）
         """
@@ -429,12 +469,25 @@ class LogicEngine:
         ticket_dets: List[Detection] = []
         ticket_mat_dets: List[Detection] = []
         sticker_dets: List[Detection] = []
+        stub_dets: List[Detection] = []
+        stub_cls_name = self.stub_cfg.class_name if self.stub_parser is not None else None
+        if self.stub_parser is not None:
+            detections = enhance_stub_detections(
+                frame,
+                detections,
+                stub_cls_name=stub_cls_name,
+                enable_candidate_fallback=self.stub_cfg.enable_candidate_fallback,
+                enable_full_image_fallback=self.stub_cfg.enable_full_image_fallback,
+                enable_roi_refinement=self.stub_cfg.enable_roi_refinement,
+            )
 
         for d in detections:
             if d.cls_name == "tray":
                 tray_dets.append(d)
             elif d.cls_name == "order_ticket":
                 ticket_dets.append(d)
+            elif stub_cls_name and d.cls_name == stub_cls_name: # small order ticket
+                stub_dets.append(d)
             elif d.cls_name == "order_sticker":
                 sticker_dets.append(d)
                 # logger.info(f"[logic engine] sticker det: {d}")
@@ -445,7 +498,7 @@ class LogicEngine:
                 ticket_mat_dets.append(d)
 
         self.tracker.update_tray_positions(tray_dets, ts_utc)
-        self.tracker.update_ticket_and_stickers(ticket_dets, sticker_dets, ticket_mat_dets)
+        self.tracker.update_ticket_and_stickers(ticket_dets, sticker_dets, ticket_mat_dets, stub_dets=stub_dets)
         self._mark_order_starts()
         
         # ========================================================
@@ -460,6 +513,10 @@ class LogicEngine:
         self.state_machine.resolve_missing_extra_tickets(self.trays)
         self.state_machine.heartbeat_wrong_items(self.trays)
         tasks = self.state_machine.generate_tasks(self.trays) # 一般貼紙:才需要送 OCR
+
+        # 訂單照片組：醬料包 / 錯誤品項移除走到 TRAY_COMPLETED 是在上面這幾行；排定的時間到了就拍
+        self._check_completed_photos()
+        self._call_order_photo("tick")
 
         self._finalize_missing_trays(frame, ts_utc)
         self.debug_sheet.set_frame(None)
@@ -493,6 +550,14 @@ class LogicEngine:
             )
         finally:
             self.debug_sheet.set_ocr_meta(None)
+
+        # 訂單照片組的「開始」：主票剛確認（TICKET_READY 會設 order_started_mono），每筆只拍一次
+        tray = self.trays.get(tray_id)
+        if (self.order_photo is not None and item_type == "ticket" and tray is not None
+                and tray.order_started_mono is not None and not tray.photo_started):
+            tray.photo_started = True
+            self._call_order_photo("on_start", tray_id, tray.order_number)
+        self._check_completed_photos()   # 貼紙比對成功 → TRAY_COMPLETED 走的是這條
 
         # === single 模式專屬修正 ===
         # TicketReader.apply_ticket_result 解析失敗時，只會把
@@ -576,6 +641,10 @@ class LogicEngine:
             row = self._build_csv_row(tray_id, tray, frame, ts_utc)
             self.csv.log(row)
             self._finalize_debug_sheet(tray_id, tray, row, timed_out)
+            # 一定要在 remove_tray 之前：那裡會發重置事件，App 會清掉畫面。
+            # OK / NGtoOK 的最終照在完成時就排定了，這裡只拍 NG（或完成後馬上收尾、還沒拍到的）
+            self._call_order_photo("on_close", tray_id, tray.order_number, row["final_status"],
+                                   tray.photo_completed)
             result = row["final_status"]
             for key, label in (("missing_item", "缺"), ("wrong_item", "錯誤")):
                 if row[key]:
@@ -595,6 +664,34 @@ class LogicEngine:
         # 一定要在 remove_tray 之後：remove_tray 會經過 reset_tray_states，那裡會把閘門打開
         if timed_out:
             self.tracker.hold_tickets_until_clear(tray_id)
+
+    def _check_completed_photos(self) -> None:
+        """訂單照片組的最終照（OK / NGtoOK）：剛進 COMPLETED 就排定，退回未完成就取消。
+        三條 TRAY_COMPLETED 路徑（一般完成 / 醬料包 / 錯誤品項移除）都只看 tray.state，不必各自掛。
+        結果的判法跟 _build_csv_row 的 final_status 一樣。"""
+        if self.order_photo is None:
+            return
+        for tray_id, tray in self.trays.items():
+            done = tray.state == TrayState.COMPLETED
+            if done and not tray.photo_completed:
+                tray.photo_completed = True
+                self._call_order_photo("on_completed", tray_id, tray.order_number,
+                                       "NGtoOK" if tray.ever_had_wrong_item else "OK")
+            elif not done:
+                # 退回未完成、或被 reset 換成新的 Tray（新 Tray 的 photo_completed 本來就是 False）：
+                # 還沒拍的那組都取消，免得在已清空的畫面上拍
+                tray.photo_completed = False
+                self._call_order_photo("on_reverted", tray_id)
+        self._call_order_photo("prune", set(self.trays))   # tray 模式整個 tray 被刪掉的
+
+    def _call_order_photo(self, method: str, *args) -> None:
+        """照片組只是紀錄，出錯不能影響訂單收尾"""
+        if self.order_photo is None:
+            return
+        try:
+            getattr(self.order_photo, method)(*args)
+        except Exception as e:
+            logger.warning(f"[訂單照片] {method} 失敗（略過）: {e!r}")
 
     def _finalize_debug_sheet(self, tray_id: str, tray, row: dict, timed_out: bool) -> None:
         """把這筆訂單的總覽圖排進背景渲染佇列。用的是剛寫進 CSV 的同一份 row，兩邊結論一定一致。"""

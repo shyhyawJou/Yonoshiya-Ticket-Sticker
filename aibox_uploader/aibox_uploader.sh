@@ -11,10 +11,12 @@
 #
 # 用法：
 #   aibox_uploader.sh [MODE] [其他 aibox_uploader.py 參數…]
-#     MODE：all（預設）/ csv / log / video / image
+#     MODE：all（預設）/ csv / log / debug / video / image（debug = 只送 debug_sheet）
+#           也可以用逗號組合，例如 csv,log（只送 CSV 與 log）、csv,log,debug
 #     其他參數放在後面，會蓋過這支腳本算出來的值；給了 --date 就用它、不再加昨天的日期，例如手動補傳指定日：
 #       aibox_uploader.sh all --date 20261010
 #       aibox_uploader.sh video --date 20261010 --dry-run
+#       aibox_uploader.sh debug --date 20261103                 # 手動補傳某天的 debug_sheet
 #
 # crontab（crontab -e；每天 03:10 執行，輸出另外留一份）：
 #   10 3 * * * /opt/yoshinoya_ai/aibox_uploader.sh all >> /var/log/yoshinoya_ai/aibox_uploader.cron.log 2>&1
@@ -25,7 +27,7 @@ set -euo pipefail
 # ── 常數（依門市環境修改）──────────────────────────────────────────────────
 ENV_FILE="${ENV_FILE:-/etc/yoshinoya_ai/cloud_upload.env}"          # 機密設定：YOSHINOYA_API_KEY、YOSHINOYA_CA、YOSHINOYA_STORE_CODE
 CONFIG_FILE="${CONFIG_FILE:-/etc/yoshinoya_ai/aibox_uploader.json}" # aibox_uploader.py 的設定檔
-PREFIX_PATH="${PREFIX_PATH:-/mnt/reserved/record/stream}"           # 上傳檔案的根目錄：<PREFIX_PATH>/<YYYYMMDD>/csv_logs …
+PREFIX_PATH="${PREFIX_PATH:-/mnt/reserved/record/stream}"                                  # 上傳檔案的根目錄：<PREFIX_PATH>/<YYYYMMDD>/csv_logs …
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 UPLOADER="${UPLOADER:-$SCRIPT_DIR/aibox_uploader.py}"
 PYTHON="${PYTHON:-python3}"
@@ -53,10 +55,21 @@ env_value() {
 
 MODE="${1:-all}"
 [ $# -gt 0 ] && shift
-case "$MODE" in
-  all|csv|log|video|image) ;;
-  *) log "錯誤：上傳方式必須是 all / csv / log / video / image，實際為「$MODE」"; exit 2 ;;
-esac
+# 單一模式，或用逗號（或 +）組合，例如 csv,log、csv,log,debug；每一項都要是認得的模式
+MODE_OK=1
+IFS=',+' read -r -a MODE_PARTS <<< "$MODE"
+[ -n "$MODE" ] || MODE_OK=0
+[[ "$MODE" == *[,+] ]] && MODE_OK=0           # 結尾多一個逗號（csv,）：read 會把最後的空項目丟掉，另外擋
+for part in ${MODE_PARTS[@]+"${MODE_PARTS[@]}"}; do
+  case "$part" in
+    all|csv|log|debug|video|image) ;;
+    *) MODE_OK=0 ;;                             # 含空項目（csv,,log、,csv）
+  esac
+done
+if [ "$MODE_OK" -eq 0 ]; then
+  log "錯誤：上傳方式必須是 all / csv / log / debug / video / image，或用逗號組合（例如 csv,log），實際為「$MODE」"
+  exit 2
+fi
 
 # ── 1. API 金鑰：從設定檔取得並 export（設定檔沒有時，沿用已經設定的環境變數）────────
 KEY="$(env_value YOSHINOYA_API_KEY "$ENV_FILE" || true)"

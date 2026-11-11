@@ -88,6 +88,8 @@ class TicketLayout:
     # 版面判錯方向時這兩條不會同時成立 —— 倒過來看的話方框在表格右邊，根本不在搜尋範圍
     orientation_ok: bool = False
     orientation_note: str = ""
+    # 轉正後哪一側的外框在 crop 外（mmr 的框比傳票窄）："" / "right"。外框位置是推算的，見 _fit_cols_cut
+    cut_side: str = ""
 
     def col_x(self, i: int, y):
         """第 i 條欄線（0 左框、1 数欄右界、2 金額欄左界、3 右框）在高度 y 的 x；y 可以是陣列。
@@ -349,17 +351,58 @@ def _fit_cols(xs: List[float], w: int, mirrored: bool):
     return best
 
 
-def _find_table(hm: np.ndarray, vm: np.ndarray):
-    """回傳 (cols, mirrored, y_top, y_header, y_bottom, 斜率, y_mid) 或 None。
+# 橫框線的端點離影像邊緣這麼近（px）就算「畫到邊緣」，見 _fit_cols_cut
+_EDGE_PX = 4
+
+
+def _fit_cols_cut(xs: List[float], w: int, mirrored: bool):
+    """金額欄那一側的外框在影像外（mmr 的框比傳票窄、切掉了一截）時，用另外三條線推算外框。
+
+    2026-11-10 實驗機單號 4：傳票右邊被切掉，金額 `1,51…` 只剩一半，右框不在 crop 裡，
+    _fit_cols 湊不出四條線 → 找不到表格 → det 漏讀的兩列（`大`、`つゆだく`）沒有 CV 補讀。
+    品項只需要数欄與品名欄（品名欄 = 数欄右界到金額欄左界），金額欄缺一截不影響。
+
+    外框位置用金額欄左界的典型比例推：tw = (a - L) / _AMT_AT（倒過來時以右框起算）。
+    推出來的外框**一定要落在影像外**，否則外框本來就該看得到，這組線不可信；
+    数欄右界也要落在 _QTY_FRAC 範圍內。回傳格式同 _fit_cols。
+    呼叫端另外要求上框、底線都畫到影像邊緣（傳票真的被切掉的證據），見 _find_table。
+    """
+    best = None
+    for i, outer in enumerate(xs):
+        if mirrored:       # 倒過來：数欄在右、金額欄在左，切掉的是左框
+            inner = [x for x in xs if x < outer - 3]
+            pairs = [(q, a) for a in inner for q in inner if a < q]
+        else:
+            inner = [x for x in xs if x > outer + 3]
+            pairs = [(q, a) for q in inner for a in inner if q < a]
+        for q, a in pairs:
+            tw = abs(outer - a) / _AMT_AT
+            far = outer - tw if mirrored else outer + tw
+            if tw < 0.5 * w or (0 <= far <= w):
+                continue
+            f = abs(q - outer) / tw
+            if not (_QTY_FRAC[0] < f < _QTY_FRAC[1]):
+                continue
+            cand = (abs(f - _QTY_AT), (far, a, q, outer) if mirrored else (outer, q, a, far))
+            if best is None or cand[0] < best[0]:
+                best = cand
+    return best
+
+
+def _find_table(hm: np.ndarray, vm: np.ndarray, allow_cut: bool = False):
+    """回傳 (cols, mirrored, y_top, y_header, y_bottom, 斜率, y_mid, 切掉的一側) 或 None。
 
     cols 是影像上由左到右的四條欄線在表格垂直中點 y_mid 的 x；斜率是各自的 dx/dy。
+    切掉的一側：""（四條線都在影像裡），或 "left" / "right"（該側外框在影像外，見 _fit_cols_cut）。
+    allow_cut=False 只收四條線都找得到的組合。True 時四條線的組合仍優先，一組都沒有才用
+    外框被切掉的組合 —— 呼叫端要先在每個方向都用 False 找過一輪（見 analyze）。
     """
     h, w = hm.shape
     hl = _h_lines(hm)
     # 貼著影像邊緣的直線是紙張邊緣 / 背景，不是欄線（右框可能離邊緣只有 5 px，只排除最外 3 px）
     vl = [v for v in _v_lines(vm) if 3 < v[0] < w - 3]
     tol = max(4.0, 0.012 * h)
-    cands = []
+    cands, cut_cands = [], []
     for i, (yt, tx0, tx1) in enumerate(hl):
         for yb, bx0, bx1 in hl[i + 1:]:
             if yb - yt < 0.06 * h:
@@ -376,28 +419,43 @@ def _find_table(hm: np.ndarray, vm: np.ndarray):
                     xs.append(x); slope_of[x] = k
             anchored = [x for x, y0, y1, _ in inside if abs(y0 - yt) <= 2 * tol and abs(y1 - yb) <= 2 * tol]
             for mirrored in (False, True):
-                fit = _fit_cols(xs, w, mirrored)
-                if fit is None:
-                    continue
-                err, cols = fit
-                L, R = cols[0], cols[3]
-                tw = R - L
-                # 上框、底線都要橫過表格的一半以上（光線不均時只抓得到一部分）
-                if (min(tx1, R) - max(tx0, L)) < 0.5 * tw or (min(bx1, R) - max(bx0, L)) < 0.5 * tw:
-                    continue
-                if sum(1 for c in cols if any(abs(c - x) < 6 for x in anchored)) < 2:
-                    continue
-                cands.append((yb - yt, err, cols, mirrored, yt, yb, tuple(slope_of[c] for c in cols)))
+                for cut in ((False, True) if allow_cut else (False,)):
+                    if cut:
+                        # 切掉的那一側，上框與底線都要畫到影像邊緣：表格真的延伸到 crop 外
+                        if mirrored and not (tx0 <= _EDGE_PX and bx0 <= _EDGE_PX):
+                            continue
+                        if not mirrored and not (tx1 >= w - _EDGE_PX and bx1 >= w - _EDGE_PX):
+                            continue
+                        fit = _fit_cols_cut(xs, w, mirrored)
+                    else:
+                        fit = _fit_cols(xs, w, mirrored)
+                    if fit is None:
+                        continue
+                    err, cols = fit
+                    L, R = cols[0], cols[3]
+                    tw = R - L
+                    # 上框、底線都要橫過表格的一半以上（光線不均時只抓得到一部分）
+                    if (min(tx1, R) - max(tx0, L)) < 0.5 * tw or (min(bx1, R) - max(bx0, L)) < 0.5 * tw:
+                        continue
+                    if sum(1 for c in cols if any(abs(c - x) < 6 for x in anchored)) < 2:
+                        continue
+                    side = ("left" if mirrored else "right") if cut else ""
+                    # 推算出來的外框沒有自己的斜率，沿用同一側最近那條欄線（金額欄左界）的
+                    slopes = tuple(slope_of.get(c, slope_of.get(cols[1] if mirrored else cols[2], 0.0))
+                                   for c in cols)
+                    (cut_cands if cut else cands).append((yb - yt, err, cols, mirrored, yt, yb, slopes, side))
+    cands = cands or cut_cands
     if not cands:
         return None
     tallest = max(c[0] for c in cands)
-    _, _, cols, mirrored, yt, yb, slopes = min((c for c in cands if c[0] >= 0.9 * tallest), key=lambda c: c[1])
+    _, _, cols, mirrored, yt, yb, slopes, side = min((c for c in cands if c[0] >= 0.9 * tallest),
+                                                     key=lambda c: c[1])
     L, R = cols[0], cols[3]
     tw = R - L
     # 表頭底線：倒過來時表頭在下面，取靠下框那條
     spans = [y for y, x0, x1 in hl if yt + 4 < y < yb - 4 and (min(x1, R) - max(x0, L)) >= 0.5 * tw]
     y_header = (spans[-1] if mirrored else spans[0]) if spans else None
-    return cols, mirrored, yt, y_header, yb, slopes, (yt + yb) / 2
+    return cols, mirrored, yt, y_header, yb, slopes, (yt + yb) / 2, side
 
 
 # ----------------------------------------------------------------------------
@@ -524,6 +582,12 @@ def _find_order_no(gray: np.ndarray, cols, y_top: float, th: float) -> Optional[
     if x1 - x0 < 10 or y1 - y0 < 10:
         return None
     sub = gray[y0:y1, x0:x1]
+    # 先除掉背景亮度再 Otsu：這一區常有明暗漸層（20261105_182635 半邊在陰影裡），
+    # 全域門檻會把暗的那半整塊當成墨水，單號跟陰影黏成一大塊被下面的高度條件濾掉。
+    # close 的核比筆畫粗，估出來的背景不含字
+    k = int(2 * th) | 1
+    bg = cv2.morphologyEx(sub, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (k, k)))
+    sub = cv2.divide(sub, bg, scale=255)
     _, bw_img = cv2.threshold(sub, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
     n, _, stats, _ = cv2.connectedComponentsWithStats(bw_img, 8)
     rh, rw = bw_img.shape
@@ -556,28 +620,36 @@ def analyze(crop_bgr: np.ndarray) -> TicketLayout:
     mask0 = _ink_mask(cv2.cvtColor(clean, cv2.COLOR_BGR2GRAY))
 
     found = None
-    for base in (0, 90):
-        m = _rotate_quarter(mask0, base)
-        hh, ww = m.shape
-        angle = _estimate_skew(m)
-        R = cv2.getRotationMatrix2D((ww / 2, hh / 2), angle, 1.0)
-        mask = cv2.warpAffine(m, R, (ww, hh), flags=cv2.INTER_NEAREST)
-        hm, vm = _line_masks(mask, max(15, int(hh * 0.035)))
-        t = _find_table(hm, vm)
-        if t is not None:
-            found = (base, angle, R, mask, hm, vm, t)
+    prepared = {}
+    # 兩個方向都先找「四條欄線都在」的表格，都找不到才接受外框被切掉的（_fit_cols_cut）。
+    # 反過來的話，錯的方向偶爾也湊得出一組推算的線，會搶在對的方向之前（2026-11 回歸 7 張）
+    for allow_cut in (False, True):
+        for base in (0, 90):
+            if base not in prepared:
+                m = _rotate_quarter(mask0, base)
+                hh, ww = m.shape
+                angle = _estimate_skew(m)
+                R = cv2.getRotationMatrix2D((ww / 2, hh / 2), angle, 1.0)
+                mask = cv2.warpAffine(m, R, (ww, hh), flags=cv2.INTER_NEAREST)
+                prepared[base] = (angle, R, mask) + tuple(_line_masks(mask, max(15, int(hh * 0.035))))
+            angle, R, mask, hm, vm = prepared[base]
+            t = _find_table(hm, vm, allow_cut)
+            if t is not None:
+                found = (base, angle, R, mask, hm, vm, t, allow_cut)
+                break
+        if found is not None:
             break
     if found is None:
         return TicketLayout(ok=False, reason="找不到表格框線")
 
-    base, angle, R, mask, hm, vm, t = found
+    base, angle, R, mask, hm, vm, t, allow_cut = found
     rotate = base
     if t[1]:
         # 数欄（最窄那欄）在右邊 = 整張倒過來。去斜是繞影像中心轉，跟轉 180 度可以交換，
         # 所以已經去斜的遮罩直接轉 180 度即可，角度與 R 都沿用
         rotate = (base + 180) % 360
         mask, hm, vm = (cv2.rotate(x, cv2.ROTATE_180) for x in (mask, hm, vm))
-        t = _find_table(hm, vm)
+        t = _find_table(hm, vm, allow_cut)
     hh, ww = mask.shape
     gray = cv2.warpAffine(cv2.cvtColor(_rotate_quarter(clean, rotate), cv2.COLOR_BGR2GRAY), R, (ww, hh),
                           flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
@@ -589,7 +661,7 @@ def analyze(crop_bgr: np.ndarray) -> TicketLayout:
     if t is None:
         return TicketLayout(ok=False, reason="轉正後找不到表格框線", rotate=rotate, angle=angle,
                             image=image, matrix=matrix)
-    cols, mirrored, yt, yh, yb, slopes, y_mid = t
+    cols, mirrored, yt, yh, yb, slopes, y_mid, cut_side = t
     if mirrored:
         return TicketLayout(ok=False, reason="轉正後数欄仍在右邊", rotate=rotate, angle=angle,
                             image=image, matrix=matrix)
@@ -672,6 +744,11 @@ def analyze(crop_bgr: np.ndarray) -> TicketLayout:
     order_box = _find_order_no(gray, cols, yt, th)
     n_item = sum(1 for r in rows if r.kind == "item")
     n_chk = sum(1 for r in rows if r.has_check)
+    if cut_side and n_item == 0:
+        # 推算外框的表格只在找得到品項列時才信。2026-11 回歸：真表格被釘上去的小票蓋住時，
+        # 紙張邊緣與釘書針的線也湊得出一組，那個「表格」是整張紙、裡面沒有品項列
+        return TicketLayout(ok=False, reason=f"推算外框（{cut_side}側在框外）的表格裡沒有品項列",
+                            rotate=rotate, angle=angle, image=image, matrix=matrix)
     if n_item == 0:
         o_ok, o_note = False, "沒有品項列"
     elif n_chk == 0:
@@ -683,7 +760,8 @@ def analyze(crop_bgr: np.ndarray) -> TicketLayout:
     return TicketLayout(ok=True, rotate=rotate, angle=angle, image=image, matrix=matrix,
                         orientation_ok=o_ok, orientation_note=o_note,
                         cols=cols, col_slopes=slopes, y_mid=y_mid, y_top=yt, y_header=yh, y_bottom=yb,
-                        text_h=th, rows=rows, order_no_box=order_box, rec_image=rec_image, grid=grid)
+                        text_h=th, rows=rows, order_no_box=order_box, rec_image=rec_image, grid=grid,
+                        cut_side=cut_side)
 
 
 def pad_quad(quad: np.ndarray, th: float, shape, px: float = 0.1, py: float = 0.1) -> np.ndarray:

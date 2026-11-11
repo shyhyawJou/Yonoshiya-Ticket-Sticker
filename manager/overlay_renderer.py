@@ -108,6 +108,13 @@ class OverlayRenderer:
                 box_color = (0, 0, 255) if is_bad else (0, 255, 0)
                 cv2.polylines(vis_frame, [transformed_pts], isClosed=True, color=box_color, thickness=2)
 
+        # 客戶聯（stub）的 CV 補救定位數量框（橘色 BGR=(0, 140, 255)）
+        fallback_rects = ocr_data.get("fallback_rects") or []
+        for fx0, fy0, fx1, fy1 in fallback_rects:
+            f_pts = np.array([[[fx0, fy0], [fx1, fy0], [fx1, fy1], [fx0, fy1]]], dtype="float32")
+            orig_f_pts = cv2.transform(f_pts, M_inv_affine).reshape(4, 2).astype(int)
+            cv2.polylines(vis_frame, [orig_f_pts], isClosed=True, color=(0, 140, 255), thickness=2)
+
         # 傳票的菜單區域下界（OrderParser 找到的表格底線），紅線以下的文字不算品項
         menu_bottom_line = ocr_data.get("menu_bottom_line")
         if menu_bottom_line is not None:

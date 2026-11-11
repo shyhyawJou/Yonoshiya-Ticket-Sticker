@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import socket
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Optional, Callable, List, Union
@@ -66,6 +67,12 @@ class MqttBus:
         self.s = settings or MqttSettings()
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id=self.s.client_id)
         self._on_cmd_cb: Optional[Callable[[str, dict], None]] = None
+        # subscribe() 註冊的其他 topic（suffix -> callback(payload: dict)），重連時重新訂閱
+        self._subs: dict = {}
+        # hold_publishes()：暫時把要發的訊息排隊，時間到依原順序一次發出
+        self._hold_lock = threading.Lock()
+        self._held: list = []
+        self._hold_timer: Optional[threading.Timer] = None
         self.client.on_connect = self._on_connect
         self.client.on_disconnect = self._on_disconnect
         self.client.on_message = self._on_message
@@ -110,6 +117,7 @@ class MqttBus:
             self._lwt_client.loop_start()
 
     def disconnect(self) -> None:
+        self._flush_held()   # 延後中的訊息先發掉，不要跟著連線一起消失
         # 順序很重要：要先 disconnect() 再 loop_stop()。
         # loop_start() 底下是 loop_forever()，DISCONNECT 封包得靠那個 thread 送出去；
         # 先 loop_stop() 會讓封包還沒送出 thread 就停了，broker 只能等 socket 關閉
@@ -130,7 +138,49 @@ class MqttBus:
     # ---------- publishing helpers ----------
     def publish_json(self, topic_suffix: str, payload: Union[dict, list], retain: bool = False, qos: int = 1) -> None:
         topic = self._topic(topic_suffix)
-        self.client.publish(topic, json.dumps(payload, ensure_ascii=False), qos=qos, retain=retain)
+        data = json.dumps(payload, ensure_ascii=False)
+        with self._hold_lock:
+            if self._hold_timer is not None:
+                self._held.append((topic, data, qos, retain))
+                return
+        self.client.publish(topic, data, qos=qos, retain=retain)
+
+    def publish_app_cmd(self, name: str, payload: Optional[dict] = None) -> None:
+        """送指令給 App：<base>/<session>/app/cmd/<name>（例如 ocr/v1/app/cmd/screenshot）。
+        不經過 hold_publishes，一定馬上送出。"""
+        self.client.publish(self._topic(f"app/cmd/{name}"), json.dumps(payload or {}, ensure_ascii=False), qos=1)
+
+    def hold_publishes(self, seconds: float) -> None:
+        """接下來 seconds 秒內要發的訊息先排隊，時間到依原順序一次發出。
+
+        用在訂單收尾：先請 App 截圖，收尾的重置事件晚一點才到，App 才不會截到已清空的畫面。
+        已經在延後中就不再延長（不會因為連續呼叫而一直壓著）。
+        """
+        if seconds <= 0:
+            return
+        with self._hold_lock:
+            if self._hold_timer is not None:
+                return
+            self._hold_timer = threading.Timer(seconds, self._flush_held)
+            self._hold_timer.daemon = True
+            self._hold_timer.start()
+
+    def _flush_held(self) -> None:
+        with self._hold_lock:   # 在鎖裡發完：這段期間主迴圈新發的訊息會排在後面，順序不亂
+            if self._hold_timer is not None:
+                self._hold_timer.cancel()
+                self._hold_timer = None
+            held, self._held = self._held, []
+            for topic, data, qos, retain in held:
+                self.client.publish(topic, data, qos=qos, retain=retain)
+        if held:
+            logger.info(f"[mqtt] 延後的 {len(held)} 則訊息已送出")
+
+    def subscribe(self, topic_suffix: str, cb: Callable[[dict], None]) -> None:
+        """訂閱 <base>/<session>/<topic_suffix>，收到就呼叫 cb(payload)。在 MQTT 執行緒裡呼叫，cb 要快、要自己處理例外。"""
+        self._subs[topic_suffix] = cb
+        if self.client.is_connected():
+            self.client.subscribe(self._topic(topic_suffix), qos=1)
 
     def publish_system(self, payload: dict) -> None:
         """System-level events."""
@@ -177,6 +227,8 @@ class MqttBus:
             return
         logger.info(f"[mqtt] 已連線 client_id={self.s.client_id}")
         self.client.subscribe(self._topic("cmd/#"), qos=1)
+        for suffix in self._subs:
+            self.client.subscribe(self._topic(suffix), qos=1)
         self.publish_system({"ts": self._now(), "type": "backend_online"})
 
     def _on_disconnect(self, client: mqtt.Client, userdata: Any, rc: int) -> None:
@@ -210,6 +262,14 @@ class MqttBus:
             cmd = command_from_topic.strip().lower()
             if self._on_cmd_cb and cmd:
                 self._on_cmd_cb(cmd, payload)
+            return
+
+        for suffix, cb in self._subs.items():
+            if msg.topic == self._topic(suffix):
+                try:
+                    cb(payload)
+                except Exception as e:
+                    logger.warning(f"[mqtt] {msg.topic} 的處理失敗（略過）: {e!r}")
         
     # ---------- utils ----------
     def _topic(self, suffix: str) -> str:

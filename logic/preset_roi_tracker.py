@@ -70,3 +70,17 @@ class PresetRoiTracker(SingleOrderTracker):
             d for d in ticket_dets
             if is_center_in_polygon(get_polygon_centroid(d.xyxy), self.ticket_roi_polygon)
         ]
+    
+    def _filter_stub_dets(self, stub_dets: list) -> list:
+        """
+        只保留中心點落在 ticket_roi 內的 stub_ticket 偵測。
+        同一時刻 ROI 內若有多張同號碼的 stub_ticket(現場允許的情境),
+        交由基底類別既有的「取第一張、其餘警告」邏輯處理,這裡
+        只負責篩掉「不在 ROI 內」的偵測。
+        """
+        return [
+            d for d in stub_dets
+            if is_center_in_polygon(
+                get_polygon_centroid(d.xyxy), self.ticket_roi_polygon
+            )
+        ]

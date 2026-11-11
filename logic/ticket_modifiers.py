@@ -38,6 +38,11 @@ ticket_modifiers.py
            anywhere 先往上、沒有再往下（2026-10-28：POS 可能把變更品項都印在最下面）。
            可刪的成員由軸的 remove_slots 決定（湯軸目前只刪 みそ汁）。
 
+持帰り列（2026-11-10）走同一套錨定：`玉子(持帰り)` 跟外帶套餐附的玉子是同一張貼紙，
+所以每個名稱含 持帰り 的品項各自成一軸，可扣的就是它自己的貼紙（derive_takeout_rows）。
+不印貼紙的套餐（label_less_sets）與客戶菜單缺的套餐（extra_sets）是對菜單本身的覆寫，
+在建菜名索引之前由 apply_set_overrides 套用。
+
 刻意零依賴（只用 re / dataclasses / loguru），所以在 Windows 開發機上
 可以完整驗證，不需要 DLA 或相機。菜單知識由呼叫端注入，槽位數量由
 呼叫端以 callable 提供（狀態機才知道 menu_variants）。
@@ -88,11 +93,39 @@ class AxisCfg:
     # slots 仍是「哪些貼紙算這一軸」的完整定義（自動推導修飾列要用），兩者分開。
     removable: frozenset = frozenset()
     anchor: str = ANCHOR_ABOVE
-    # 被刪的那一份照樣送前端顯示、貼了算 OK，只是不算完成條件（見 menu_modifiers.yaml）
+    # 被刪的那一份怎麼處理（menu_modifiers.yaml 的 show_removed: false / true / optional）
+    #   show_removed=True      照樣送前端顯示、貼了算 OK，只是不算完成條件
+    #   optional_removed=True  前端不列、不算完成條件，但貼了也收（不報錯誤品項）
+    #   兩者都 False           前端不列、不算完成條件，貼了報錯誤品項
     show_removed: bool = False
+    optional_removed: bool = False
+    # 錨不到時要不要回報（log WARNING + TICKET_READY 的 unattached_modifiers）。
+    # 換湯錨不到代表傳票版面跟假設不同，要回報；持帰り列錨不到只是單純加點，不回報。
+    report_unattached: bool = True
 
     def can_remove(self, sticker_name: str) -> bool:
         return sticker_name in (self.removable or self.slots)
+
+
+# 持帰り列自動產生的軸名前綴（軸名 = 前綴 + 那一列的貼紙），見 ModifierKnowledge.derive_takeout_rows
+TAKEOUT_AXIS_PREFIX = "takeout:"
+
+
+@dataclass(frozen=True)
+class TakeoutCfg:
+    """持帰り列（menu_modifiers.yaml 的 takeout_rows）。
+
+    外帶時 POS 會把套餐附的小菜另外印一列（`玉子(持帰り)`），但貼紙只有一張：
+    套餐 sub_items 裡那顆玉子跟這一列是同一張貼紙。這一列照常展開，
+    再從傳票上有這個附屬品的套餐扣掉一份。
+    """
+
+    markers: Tuple[str, ...] = ()
+    anchor: str = ANCHOR_ANYWHERE
+    exclude: frozenset = frozenset()
+
+    def __bool__(self) -> bool:
+        return bool(self.markers)
 
 
 @dataclass(frozen=True)
@@ -237,6 +270,7 @@ class ModifierKnowledge:
         self.not_modifier: Set[str] = {self._norm(n) for n in not_modifier}
         self.grammar = grammar or TicketGrammar()
         self.set_sizes: SetSizeCfg = SetSizeCfg()
+        self.takeout: TakeoutCfg = TakeoutCfg()
 
     def __bool__(self) -> bool:
         return bool(self.rules) or bool(self.set_sizes)
@@ -284,6 +318,27 @@ class ModifierKnowledge:
     def show_removed(self, axis: str) -> bool:
         cfg = self.axes.get(axis)
         return bool(cfg and cfg.show_removed)
+
+    def optional_removed(self, axis: str) -> bool:
+        """被刪的那一份是「貼了也收」嗎（show_removed: optional）"""
+        cfg = self.axes.get(axis)
+        return bool(cfg and cfg.optional_removed and not cfg.show_removed)
+
+    def removed_mode(self, axis: str) -> str:
+        """log 用：被刪的那一份怎麼處理"""
+        if self.show_removed(axis):
+            return "照樣顯示、不算完成條件"
+        if self.optional_removed(axis):
+            return "不顯示、貼了也收、不算完成條件"
+        return "不顯示、貼了報錯誤品項"
+
+    def reports_unattached(self, axis: str) -> bool:
+        cfg = self.axes.get(axis)
+        return cfg.report_unattached if cfg else True
+
+    @staticmethod
+    def is_takeout_axis(axis: str) -> bool:
+        return axis.startswith(TAKEOUT_AXIS_PREFIX)
 
     def slot_members(self, axis: str) -> frozenset:
         cfg = self.axes.get(axis)
@@ -364,6 +419,60 @@ class ModifierKnowledge:
                 f"[ticket_modifiers] 自動推導出 {len(derived)} 筆修飾列: "
                 + ", ".join(f"{r.ticket}->{r.axis}" for r in derived)
             )
+        return derived
+
+    def derive_takeout_rows(self, menu_variants: Dict[str, List[List[str]]]) -> List[SubstitutionRule]:
+        """把菜單裡名稱含 takeout_rows.markers（持帰り）的傳票品名登記成修飾列。
+
+        2026-11-10 客戶說明：外帶時 POS 會把套餐附的小菜另外印成一列
+        （`とじ丼 並(玉子)` 下面多一列 `玉子(持帰り)`），但貼紙只有一張 ——
+        套餐 sub_items 裡那顆玉子，是 xlsx 為了讓貼紙機跟 POS 連動才寫的。
+        內用時不會多這一列，套餐的玉子照常要核對。
+
+        每一列各自成一軸（軸名 = TAKEOUT_AXIS_PREFIX + 它自己的貼紙），可扣的就是
+        它自己的貼紙，所以 `玉子(持帰り)` 只會扣套餐裡的 玉子，不會扣到別的。
+        錨定沿用 resolve_modifiers：先往上找最近的、上面沒有再往下（anchor）；
+        單品列（只有一個貼紙的 `玉子`）不當錨。錨不到 = 單純加點一份外帶，照常核對、
+        不回報。
+
+        規則（看到持帰り就扣）是人工決定一次的（menu_modifiers.yaml 記了決定者），
+        個別的列由菜單推導，所以 xlsx 改版新增的持帰り品項不用再登記。
+        人工台帳（substitutions）已經登記的列優先，exclude 可以排除特定列。
+        必須在 derive_from_menu 之後呼叫：這些軸的 slots 是一般菜名，
+        不可以拿去當「変更標記剝掉後落在哪一軸」的證據。
+        """
+        cfg = self.takeout
+        if not cfg:
+            return []
+        derived: List[SubstitutionRule] = []
+        for ticket_name in sorted(menu_variants):
+            key = self._norm(ticket_name)
+            if not any(m in key for m in cfg.markers):
+                continue
+            if key in self.rules or key in cfg.exclude:
+                continue
+            stickers = frozenset(
+                self._norm(sub) for combo in (menu_variants.get(ticket_name) or []) for sub in combo
+            )
+            if not stickers:
+                continue
+            label = "・".join(sorted(stickers))
+            axis_name = TAKEOUT_AXIS_PREFIX + label
+            if axis_name not in self.axes:
+                self.axes[axis_name] = AxisCfg(
+                    name=axis_name, slots=stickers, display=f"外帶 {label}",
+                    anchor=cfg.anchor, show_removed=False, report_unattached=False,
+                )
+            rule = SubstitutionRule(
+                ticket=ticket_name, axis=axis_name,
+                note="持帰り列：跟套餐附的是同一張貼紙，扣掉套餐那一份",
+            )
+            self.rules[key] = rule
+            derived.append(rule)
+        logger.info(
+            f"[ticket_modifiers] 持帰り列 {len(derived)} 筆（標記 {list(cfg.markers)}、錨定={cfg.anchor}）: "
+            + ", ".join(r.ticket for r in derived)
+        )
         return derived
 
     def propose(self, ticket_name: str) -> Optional[str]:
@@ -516,7 +625,13 @@ def resolve_modifiers(
                 f"扣除 {know.axis_display(axis)} x{take}"
             )
 
-        if remaining == mod.quantity:
+        if remaining > 0 and not know.reports_unattached(axis):
+            # 持帰り列：錨不到 = 單純加點一份外帶（或只有部分份數跟套餐重複），照常核對、不回報
+            logger.info(
+                f"[ticket_modifiers] '{line.name}' x{mod.quantity} 有 {remaining} 份在傳票上找不到"
+                f"附這個貼紙的套餐，當成加點照常核對"
+            )
+        elif remaining == mod.quantity:
             unattached.append(mod)
             logger.warning(
                 f"[ticket_modifiers] 修飾列 '{line.name}'（{know.axis_display(axis)}）"
@@ -545,7 +660,8 @@ def resolve_set_sizes(lines: Sequence[OrderLine], know: ModifierKnowledge) -> No
         1 牛丼お新香みそ汁ｾｯﾄ        <- 套餐（貼紙只有 お新香、みそ汁）
         1   並                      <- 主餐的 size：`並` 一對多，可能是一般牛丼 / チーズ牛丼 / …
 
-    往上找時跳過其他 size 列（`D)牛からペアｾｯﾄ` 下面接兩列 `並`）與修飾列（換湯…）。
+    往上一路找到最近的套餐為止，中間的 size 列（`D)牛からペアｾｯﾄ` 下面接兩列 `並`）、
+    修飾列（換湯…）與其他單品列都跳過。
     找不到套餐、或主餐規則對不上任何變體時不動作，維持原本的「任一種主餐都算」
     （展開時才知道變體，見 OrderRequirements.expand_parsed_items）。
     """
@@ -562,7 +678,7 @@ def resolve_set_sizes(lines: Sequence[OrderLine], know: ModifierKnowledge) -> No
                 continue
             if know.is_set(cand.name):
                 owner = cand
-            break   # 碰到第一個不是 size 列 / 修飾列的列就停：不是套餐就代表這列 size 不屬於套餐
+                break   # 找到最近的套餐就停；不是套餐的列（單品等）跳過繼續往上找
         if owner is None:
             logger.info(
                 f"[ticket_modifiers] size 列 '{line.name}'（第 {line.row_index} 列）上方找不到套餐，"
@@ -696,13 +812,15 @@ def load_modifier_knowledge(
                 f"改用 {ANCHOR_ABOVE}（可用: {list(_ANCHOR_MODES)}）"
             )
             anchor = ANCHOR_ABOVE
+        shown, optional = _parse_show_removed(entry.get("show_removed", False), entry["name"])
         axes.append(AxisCfg(
             name=str(entry["name"]),
             slots=slots,
             display=str(entry.get("display") or ""),
             removable=removable,
             anchor=anchor,
-            show_removed=bool(entry.get("show_removed", False)),
+            show_removed=shown,
+            optional_removed=optional,
         ))
 
     rules: List[SubstitutionRule] = []
@@ -726,18 +844,60 @@ def load_modifier_knowledge(
         grammar=grammar, normalize=norm,
     )
     know.set_sizes = _load_set_sizes(data.get("set_size_rows") or {}, norm, canon)
+    know.takeout = _load_takeout(data.get("takeout_rows") or {}, norm)
     if know.rules:
         def _axis_txt(a):
             rm = f"、只刪 {sorted(a.removable)}" if a.removable else ""
-            return f"{a.name}:{len(a.slots)}槽{rm}、錨定={a.anchor}、被刪的{'照樣顯示' if a.show_removed else '不顯示'}"
+            return f"{a.name}:{len(a.slots)}槽{rm}、錨定={a.anchor}、被刪的{know.removed_mode(a.name)}"
         logger.info(
             f"[ticket_modifiers] 載入軸 {len(know.axes)} 個"
             f"（{'；'.join(_axis_txt(a) for a in axes)}）、"
             f"修飾列台帳 {len(know.rules)} 筆、已判定非修飾列 {len(know.not_modifier)} 筆"
         )
-    else:
+    elif not know.takeout:
         logger.info("[ticket_modifiers] 沒有修飾列台帳，傳票修飾功能停用")
     return know
+
+
+def _parse_show_removed(value, axis_name) -> Tuple[bool, bool]:
+    """show_removed 的值 -> (show_removed, optional_removed)。
+
+    false / true 是 2026-10-28 起的寫法；optional（2026-11-10）是第三種：
+    現場可能只貼變更湯、也可能連原本的 みそ汁 一起貼，前端只列變更湯，兩種貼法都 OK。
+    """
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v == "optional":
+            return False, True
+        if v in ("true", "yes", "on"):
+            return True, False
+        if v in ("false", "no", "off", ""):
+            return False, False
+        logger.warning(
+            f"[ticket_modifiers] 軸 '{axis_name}' 的 show_removed={value!r} 不認得，當成 false"
+            "（可用: false / true / optional）"
+        )
+        return False, False
+    return bool(value), False
+
+
+def _load_takeout(data: dict, norm) -> TakeoutCfg:
+    """menu_modifiers.yaml 的 takeout_rows -> TakeoutCfg（沒寫就是停用）。"""
+    if not data:
+        return TakeoutCfg()
+    anchor = str(data.get("anchor") or ANCHOR_ANYWHERE)
+    if anchor not in _ANCHOR_MODES:
+        logger.warning(
+            f"[ticket_modifiers] takeout_rows 的 anchor={anchor!r} 不認得，"
+            f"改用 {ANCHOR_ANYWHERE}（可用: {list(_ANCHOR_MODES)}）"
+        )
+        anchor = ANCHOR_ANYWHERE
+    exclude = [e.get("ticket") if isinstance(e, dict) else e for e in (data.get("exclude") or [])]
+    return TakeoutCfg(
+        markers=tuple(norm(str(m)) for m in (data.get("markers") or []) if str(m).strip()),
+        anchor=anchor,
+        exclude=frozenset(norm(str(e)) for e in exclude if e and str(e).strip()),
+    )
 
 
 def _load_set_sizes(data: dict, norm, canon) -> SetSizeCfg:
@@ -776,12 +936,83 @@ def load_extra_sets(modifiers_path: Optional[str]) -> List[Tuple[str, List[str]]
     config.load_config 在建菜名索引之前呼叫，讓解析器認得這個名字。貼紙可以是空的
     （套餐本身不印貼紙，內容由下面的 size 列 / 獨立列帶出）。
     """
-    data = _read_yaml(modifiers_path, "menu_modifiers").get("set_size_rows") or {}
+    return _extra_sets_of(_read_yaml(modifiers_path, "menu_modifiers"))
+
+
+def _extra_sets_of(data: dict) -> List[Tuple[str, List[str]]]:
     out = []
-    for entry in data.get("extra_sets") or []:
+    for entry in (data.get("set_size_rows") or {}).get("extra_sets") or []:
         if isinstance(entry, dict) and entry.get("ticket"):
             out.append((str(entry["ticket"]), [str(s) for s in (entry.get("sub_items") or [])]))
     return out
+
+
+def apply_set_overrides(
+    rows: Sequence[Tuple[str, List[str]]],
+    modifiers_path: Optional[str],
+    normalize: Optional[Callable[[str], str]] = None,
+) -> Tuple[List[Tuple[str, List[str]]], Set[str]]:
+    """在建菜名索引之前，把 menu_modifiers.yaml 對菜單的兩種覆寫套到 menus_mapping.yaml 的列上。
+
+    1. label_less_sets：客戶確認「傳票會印、但不印貼紙」的套餐（2026-11-10 回信附件）。
+       **以這裡為準**：客戶菜單有這個名字就把它的貼紙清空，沒有就補一列空的。
+       不能用「D) 開頭」這種規則判斷：大部分 D) 品項都有貼紙。
+    2. set_size_rows.extra_sets：客戶菜單還沒收錄的套餐（暫時補的）。**以客戶菜單為準**，
+       客戶菜單已經有這個名字就忽略這筆。
+
+    比對名稱時先過 normalize（全形/半形、空白），yaml 照客戶給的寫法寫即可。
+
+    Args:
+        rows: [(傳票名, [貼紙])]，menus_mapping.yaml 的順序。不會被改到，回傳新的一份。
+
+    Returns:
+        (rows, empty_ok)
+        empty_ok 是允許「沒有貼紙」的傳票名（原字串）。其他沒寫 sub_items 的品項
+        維持舊行為（退回「貼紙就是它自己」），見 config.load_config 建 menu_variants 那段。
+    """
+    norm = normalize or (lambda s: str(s).strip())
+    data = _read_yaml(modifiers_path, "menu_modifiers")
+    out: List[Tuple[str, List[str]]] = [(str(n), list(s)) for n, s in rows]
+    empty_ok: Set[str] = set()
+
+    label_less: Dict[str, str] = {}
+    for entry in data.get("label_less_sets") or []:
+        name = entry.get("ticket") if isinstance(entry, dict) else entry
+        if name and str(name).strip():
+            label_less.setdefault(norm(str(name)), str(name))
+    if label_less:
+        found: Set[str] = set()
+        for i, (name, subs) in enumerate(out):
+            key = norm(name)
+            if key not in label_less:
+                continue
+            if subs:
+                logger.info(
+                    f"[ticket_modifiers] label_less_sets：客戶菜單的 '{name}' 寫了貼紙 {subs}，"
+                    f"客戶確認不印，改成不需要貼紙"
+                )
+            out[i] = (name, [])
+            empty_ok.add(name)
+            found.add(key)
+        for key, name in label_less.items():
+            if key not in found:
+                out.append((name, []))
+                empty_ok.add(name)
+        logger.info(
+            f"[ticket_modifiers] 不印貼紙的套餐 {len(label_less)} 筆（客戶菜單已有 {len(found)}、"
+            f"補上 {len(label_less) - len(found)}）: {list(label_less.values())}"
+        )
+
+    known = {norm(n) for n, _ in out}
+    for name, subs in _extra_sets_of(data):
+        if norm(name) in known:
+            logger.warning(f"[ticket_modifiers] extra_sets 的 '{name}' 已經在菜單裡，忽略人工補的這筆")
+            continue
+        out.append((name, subs))
+        empty_ok.add(name)
+        known.add(norm(name))
+        logger.info(f"[ticket_modifiers] 人工補的套餐（客戶菜單沒有）: {name} -> {subs or '（本身不印貼紙）'}")
+    return out, empty_ok
 
 
 def _read_yaml(path: Optional[str], label: str) -> dict:

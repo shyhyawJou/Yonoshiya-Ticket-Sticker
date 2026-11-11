@@ -60,6 +60,8 @@ class OrderRequirements:
             )
         # 最近一次解析出的替換與「錨不到的修飾列」，供 TICKET_READY 回報
         self.last_substitutions: List[dict] = []
+        # 最近一次解析出「不在顯示清單、但貼了也收」的品項（show_removed: optional），記到 tray.optional_items
+        self.last_optional_items: Counter = Counter()
         self.last_unattached_modifiers: List[dict] = []
         # 最近一次解析：每一列傳票品項轉成哪些貼紙（[傳票→貼紙] 那行 log 用）
         self.last_mapping_lines: List[str] = []
@@ -256,15 +258,48 @@ class OrderRequirements:
         display 照樣列出、union 照樣收（貼了算 OK，不報 WRONG_ITEM），但不算完成條件 ——
         只貼變更湯也能 TRAY_COMPLETED。
 
-        回傳實際被換掉的品項（給 log 與 MQTT 回報用）。
+        show_removed: optional（2026-11-10）扣 combos 與 display、**不扣 union**：前端只列
+        變更湯（舊 App 不用改就顯示對），只貼變更湯能完成，連みそ汁 一起貼也不報錯。
+        true 的問題是只貼變更湯時，前端那列 みそ汁 永遠不會打勾，看起來像漏貼。
+        貼了的那張 みそ汁 不進 ITEM_CHECKED（見 report_checked_items），回傳值的
+        第二份是這種「貼了也收」的品項，呼叫端記到 tray.optional_items。
+
+        回傳 (實際被換掉的品項, 貼了也收的品項)（給 log 與 MQTT 回報用）。
         """
         removed: Counter = Counter()
         for counter in variant_counters:
             removed.update(self._remove_axis_slot(counter, mod.axis, mod.applied))
+        optional: Counter = Counter()
         if not self.modifier_knowledge.show_removed(mod.axis):
-            self._remove_axis_slot(union, mod.axis, mod.applied)
-            self._remove_axis_slot(primary_counts, mod.axis, mod.applied)
-        return removed
+            shown = self._remove_axis_slot(primary_counts, mod.axis, mod.applied)
+            if self.modifier_knowledge.optional_removed(mod.axis):
+                optional = shown if shown else Counter(removed)
+            else:
+                self._remove_axis_slot(union, mod.axis, mod.applied)
+        return removed, optional
+
+    @staticmethod
+    def report_checked_items(tray) -> List[dict]:
+        """ITEM_CHECKED 的 items：confirmed_counts，但「貼了也收」的品項只報到顯示清單的份數。
+
+        show_removed: optional 的 みそ汁 不在 expected_items 裡，貼了也不能送給前端 ——
+        舊 App 會收到一個清單上沒有的品名。同一張單另外單點一碗 みそ汁 時，清單上有
+        みそ汁 ×1，貼了兩張也只報 1（第二張是換湯那碗多貼的）。
+        """
+        optional = getattr(tray, "optional_items", None) or {}
+        shown = Counter()
+        if optional:
+            for row in getattr(tray, "expected_items_display", None) or []:
+                for item, count in row.items():
+                    shown[item] += count or 0
+        out = []
+        for item, count in tray.confirmed_counts.items():
+            if item in optional:
+                count = min(count, shown.get(item, 0))
+                if count <= 0:
+                    continue
+            out.append({item: count})
+        return out
 
     @staticmethod
     def describe_mapping(item_name, item_num, primary_counts, union, variants,
@@ -280,7 +315,8 @@ class OrderRequirements:
                 notes.append(f"共 {len(variants)} 種組合，也接受 {others}")
         for sub in substitutions:
             notes.append(f"替換 {sub['axis']} 槽 {sub['from']}→{sub['to']}"
-                         + ("（照樣顯示、不算完成條件）" if sub.get("displayed") else ""))
+                         + ("（照樣顯示、不算完成條件）" if sub.get("displayed")
+                            else "（不顯示、貼了也收）" if sub.get("optional") else ""))
         return f"{item_name}×{item_num} → {shown}" + (f"（{'；'.join(notes)}）" if notes else "")
 
     def log_mapping(self, tray_id, order_number, expected_items_list, tag="") -> None:
@@ -346,6 +382,7 @@ class OrderRequirements:
             parsed_items, self.modifier_knowledge, self.slot_count
         )
         self.last_substitutions = []
+        self.last_optional_items = Counter()
         self.last_unattached_modifiers = [
             {"item": m.ticket_name, "axis": m.axis, "quantity": m.quantity}
             for m in unattached
@@ -439,9 +476,10 @@ class OrderRequirements:
             # 三份輸出一起扣（理由見 _apply_substitution）。
             subs_before = len(self.last_substitutions)
             for mod in line.modifiers:
-                removed = self._apply_substitution(
+                removed, optional = self._apply_substitution(
                     mod, variant_counters, union, primary_counts
                 )
+                self.last_optional_items.update(optional)
                 if not removed:
                     logger.warning(
                         f"[tray_state_machine] '{mod.ticket_name}' 錨定到 "
@@ -459,11 +497,12 @@ class OrderRequirements:
                         "quantity": count,
                         # True = 被換掉的那份仍在 expected_items 裡（照樣顯示、貼了算 OK、不算完成條件）
                         "displayed": shown,
+                        # True = 不在 expected_items 裡，但貼了也收、不報錯誤品項（show_removed: optional）
+                        "optional": bool(optional),
                     })
                 logger.info(
                     f"[tray_state_machine] '{item_name}' 依 '{mod.ticket_name}' "
-                    f"扣除 {dict(removed)}（軸={mod.axis}"
-                    + ("，前端照樣顯示、不算完成條件" if shown else "") + "）"
+                    f"扣除 {dict(removed)}（軸={mod.axis}，被刪的{self.modifier_knowledge.removed_mode(mod.axis)}）"
                 )
 
             for sub, count in union.items():

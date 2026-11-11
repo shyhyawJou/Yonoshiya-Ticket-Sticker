@@ -113,6 +113,7 @@ class TicketReader:
             tray.expected_items_display = expected_items_list
             # 主票重新解析等於整筆訂單重來，改名表直接換掉而不是疊加
             tray.report_alias = report_alias
+            tray.optional_items = dict(self.requirements.last_optional_items)
             tray.ticket.contributed_combos = combos
             self.requirements.recompute_expected_combos(tray)
             tray.state = TrayState.WAITING_STICKERS
@@ -120,6 +121,8 @@ class TicketReader:
             order_number = "000" if order_number is None else order_number
             tray.order_number = order_number
             tray.ticket.order_number = order_number   # 這張紙自己的單號，見 apply_extra_ticket_result
+            tray.ticket.parsed_items = list(parsed_items)
+            tray.ticket.is_checked = True
 
             # # 這裡要用複製(list(...))，不能直接指到同一個 list 物件，
             # 否則之後 tray.expected_items_display.extend(...) 會連帶
@@ -272,7 +275,10 @@ class TicketReader:
         target.contributed_display = expected_items_list
         target.contributed_combos = combos
         target.order_number = order_number
+        target.parsed_items = list(parsed_items)
         tray.report_alias.update(report_alias)   # 第二張票只追加，不覆蓋主票的
+        for item, n in self.requirements.last_optional_items.items():
+            tray.optional_items[item] = tray.optional_items.get(item, 0) + n
 
         target.is_ticket_merged = True  # 保留在 extra_tickets 裡，供之後「主 ticket 消失頂替」使用
         # 兩張票的假設要做笛卡兒積：各自可能有多個變體

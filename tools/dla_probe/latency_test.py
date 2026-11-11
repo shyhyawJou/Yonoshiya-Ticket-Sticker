@@ -15,8 +15,8 @@ from ocr_engine import TextSystemDLA
 D = sys.argv[1] if len(sys.argv) > 1 else "/mnt/reserved/record/stream/20260914/ocr_cut"
 files = sorted(glob.glob(os.path.join(D, "*.jpg")))
 
-ts = TextSystemDLA("tasks/ocr/yoshi_det_v01_03.dla", "tasks/ocr/cls_v2.dla",
-                   "tasks/ocr/yoshi_rec_v01_05.dla", "tasks/ocr/yoshinoya/japan_dict.txt")
+ts = TextSystemDLA("tasks/ocr/yoshi_det_v01_05.dla", "tasks/ocr/cls_v2.dla",
+                   "tasks/ocr/yoshi_rec_v01_08_01.dla", "tasks/ocr/yoshinoya/japan_dict.txt")
 
 # 先挑出「正方形框」的樣本，只有這些會受影響
 square = []

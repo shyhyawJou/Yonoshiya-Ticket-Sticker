@@ -75,6 +75,10 @@ class StickerMatcher:
     def _resolve_name(self, text: str, candidates: List[str]):
         return self.folded.resolve(text, candidates, self.fuzzy_matcher)
 
+    def resolve(self, text: str):
+        """單一段文字對到哪個貼紙菜名（不看訂單），回傳 (菜名|None, 分數)。"""
+        return self._resolve_name(text, self.vocab_sticker or self.menus_sticker)
+
     # ------------------------------------------------------------------
     def read_text(self, rec_res: list, dt_boxes: list):
         """只做「這張貼紙上的日文是什麼」，不涉及訂單核對。

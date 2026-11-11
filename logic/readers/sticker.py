@@ -44,10 +44,12 @@ def blocks_completion(ts) -> bool:
 class StickerReader:
     def __init__(self, bus, sticker_matcher, requirements: OrderRequirements,
                  wrong_item_confirm: int = 0, wrong_item_strong_score: float = 0.0,
-                 wrong_item_strong_conf: float = 0.9):
+                 wrong_item_strong_conf: float = 0.9, date_label=None):
         self.bus = bus
         self.sticker_matcher = sticker_matcher
         self.requirements = requirements
+        # 沙拉日期標籤（readers/date_label.py::DateLabelReader）。None = 關閉，貼紙全部照一般比對
+        self.date_label = date_label
 
         # 錯誤品項確認次數（見 settle）。0 = 舊行為：第一次判錯就成立
         self.wrong_item_confirm = int(wrong_item_confirm or 0)
@@ -71,6 +73,17 @@ class StickerReader:
 
     def apply_sticker_result(self, tray: Tray, tray_id: str, dt_boxes, rec_res, is_flip, task_bbox,
                              target=None, frame_crop=None):
+        target_ts = find_task_item(tray.stickers, task_bbox, target)
+        if target_ts is not None:
+            target_ts.is_ocr_busy = False
+            target_ts.last_result_mono = time.monotonic()
+
+        # det 優先、參考圖輔助（readers/date_label.py）；det 一個字都沒讀到時也讓 CV 看一次
+        label = self.date_label.read_with_cv(rec_res, frame_crop) if self.date_label is not None else None
+        if label is not None:
+            self.apply_date_label(tray, tray_id, target_ts, label, dt_boxes, rec_res, frame_crop)
+            return
+
         matched_item = None
         match_status = "UNRECOGNIZED"
 
@@ -79,16 +92,137 @@ class StickerReader:
                 rec_res, dt_boxes, is_flip, tray.expected_items, tray.checked_items
             )
 
-        target_ts = find_task_item(tray.stickers, task_bbox, target)
-        if target_ts is not None:
-            target_ts.is_ocr_busy = False
-            target_ts.last_result_mono = time.monotonic()
+        # 一般サラダ貼紙：先看有沒有缺一般貼紙的日期標籤可以成組，有就併進去、不再計數。
+        # 要在判 MATCHED / WRONG_ITEM 之前：日期標籤先到時サラダ已經滿額，這張會被判成多的
+        if (self.date_label is not None and target_ts is not None
+                and match_status in ("MATCHED", "WRONG_ITEM")
+                and self._report_name(tray, matched_item) == self._report_name(tray, self.date_label.item)):
+            primary = self._open_pair(tray, matched_item, want_label=True, exclude=target_ts)
+            if primary is not None:
+                self._join_pair(tray, primary, target_ts)
+                logger.info(f"[沙拉日期] 一般貼紙 {matched_item} 跟已核對的日期標籤 {primary.date_label} "
+                            f"成組（不重複計數）tray={tray.id} 單號={tray.order_number}")
+                self.debug.sticker(tray, tray_id, target_ts, frame_crop, dt_boxes, rec_res, matched_item, "MATCHED")
+                return
+
+        if match_status in ("MATCHED", "WRONG_ITEM") and self.moved_here(tray, target_ts, matched_item):
+            return
 
         raw_text = getattr(self.sticker_matcher, "last_raw_text", None) if len(rec_res) > 0 else None
         strong = match_status == "WRONG_ITEM" and self.is_strong_wrong(tray, matched_item)
         self.settle(tray, tray_id, target_ts, matched_item, match_status,
                     confirm=self.wrong_item_confirm, raw_text=raw_text, strong=strong)
         self.debug.sticker(tray, tray_id, target_ts, frame_crop, dt_boxes, rec_res, matched_item, match_status)
+
+    def moved_here(self, tray: Tray, ts, name, label: bool = False) -> bool:
+        """ts 讀到訂單裡的 name：是不是那張已核對的同名貼紙被移到這裡來了。是就把位置接回
+        那張（不計數、不判錯），移除 ts，回 True。醬料包（TrayStateMachine.resolve_known_class_items）也走這裡。
+
+        貼紙被快速移動時，tracker 對不上舊框，新位置會建一個新的追蹤物件；舊的那張要
+        sticker_missing_frame 幀（15 幀 ≈ 1.3 s）沒看到才算離開，這段期間它還算「在畫面上」：
+          - 滿額時：新框在舊的離開前就讀完 wrong_item_confirm 次，被判成多一份
+            （2026-11-06 實驗機單號 494，チーズ 1 份：移動後 0.9 s 內錯誤品項成立，舊框 1.3 s 後才離開）
+          - 沒滿時：新框比對成功，checked_items 同時有新舊兩張，confirmed_counts 就被算成 2
+        sticker_settle_frame 調小後新框讀得快，這兩種都更容易發生。
+        計數規則是「同時在畫面上的份數」（confirmed_counts 取 high-water mark，兩份要同時出現
+        才算 2），所以同名貼紙從沒同時出現過，不管是移動還是「包走一份、再放下一份」，都只算一份。
+        判斷跟傳票一樣（readers/ticket.py::apply_extra_ticket_result）：一張紙同時只有一個框，
+        兩張同名貼紙從沒在同一幀一起被偵測到（seen_with，由 tracker 記錄），就是同一張。
+        """
+        if ts is None or not name or ts.is_wrong_item:
+            return False
+        rname = self._report_name(tray, name)
+        if name not in tray.expected_items and rname not in tray.expected_items:
+            return False
+        moved_from = [
+            t for t in tray.stickers
+            if t is not ts and t.is_checked and t.item_name == rname
+            and (t.date_label is not None) == label
+            and t.missing_count > 0 and not t.has_notified_missing   # 這幀沒看到、還沒判定離開
+            and id(t) not in ts.seen_with
+        ]
+        if not moved_from:
+            return False
+        anchor = min(moved_from, key=lambda t: t.missing_count)   # 剛被拿起來的那張消失最短
+        logger.info(
+            f"[貼紙移動] tray={tray.id} 新位置讀到 '{name}'，跟已核對的同名貼紙從沒同時出現"
+            f"（舊框 {anchor.missing_count} 幀沒看到），判定為同一張被移動："
+            f"位置接回已核對的那張，不加計數、不判錯誤品項"
+        )
+        anchor.bbox, anchor.xywhr = ts.bbox, ts.xywhr
+        anchor.missing_count = 0
+        anchor.is_missing = False
+        anchor.seen_with |= ts.seen_with
+        tray.stickers.remove(ts)
+        # set_ocr_busy 送出時改成 CHECKING_STICKERS，settle 沒跑到，要自己改回來
+        if tray.state != TrayState.COMPLETED:
+            tray.state = TrayState.WAITING_STICKERS
+        return True
+
+    # ------------------------------------------------------------------
+    # 沙拉日期標籤（readers/date_label.py）
+    #
+    # 一般サラダ貼紙與日期標籤任一張都能代表那份サラダ（現場不保證兩張都會貼）：
+    # 先到的照一般品項核對（ITEM_CHECKED），後到的另一種跟它成組，不再計數、不再通知前端。
+    # 成組只看「同一筆訂單裡缺另一半」，不看兩張貼紙的位置（兩份以上時誰配誰不重要，
+    # 份數對就好）。多出來的（例如點一份卻有兩張一般貼紙）找不到缺另一半的組，照常判多的。
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _report_name(tray: Tray, item):
+        """settle 會把純異寫改成主變體寫法再記到貼紙上，比對成組時兩邊都用對外的寫法"""
+        return getattr(tray, "report_alias", {}).get(item, item)
+
+    def _open_pair(self, tray: Tray, item, want_label: bool, exclude=None):
+        """找一張已核對、還沒成組、還在畫面上的 item 貼紙；want_label=True 找日期標籤，False 找一般貼紙"""
+        name = self._report_name(tray, item)
+        for t in tray.stickers:
+            if (t is exclude or not t.is_checked or t.is_missing or t.pair_with is not None
+                    or t.pair_partner or t.item_name != name):
+                continue
+            if (t.date_label is not None) == want_label:
+                return t
+        return None
+
+    @staticmethod
+    def _join_pair(tray: Tray, primary, ts) -> None:
+        """ts 併進 primary 那一組：標成已核對（不再送 OCR），但不進 checked_items、不發 ITEM_CHECKED"""
+        ts.is_checked = True
+        ts.item_name = primary.item_name
+        ts.pair_partner = True
+        ts.pair_with = primary
+        primary.pair_with = ts
+        ts.wrong_reads.clear()
+        ts.is_unknown_item = False
+        ts.is_wrong_item = False
+        # set_ocr_busy 送出時改成 CHECKING_STICKERS，settle 沒跑到，要自己改回來
+        if tray.state != TrayState.COMPLETED:
+            tray.state = TrayState.WAITING_STICKERS
+
+    def apply_date_label(self, tray: Tray, tray_id: str, ts, label, dt_boxes, rec_res, frame_crop=None):
+        item = self.date_label.item
+        text = label.describe(item)
+        if ts is not None:
+            ts.date_label = text
+        primary = self._open_pair(tray, item, want_label=False, exclude=ts) if ts is not None else None
+        if primary is not None:
+            self._join_pair(tray, primary, ts)
+            logger.info(f"[沙拉日期] {text}：跟已核對的一般貼紙成組（不重複計數）tray={tray.id} 單號={tray.order_number}")
+            self.debug.sticker(tray, tray_id, ts, frame_crop, dt_boxes, rec_res, item, "MATCHED")
+            return
+
+        matched_item, match_status = self.sticker_matcher.match_known_item(
+            item, tray.expected_items, tray.checked_items)
+        if match_status in ("MATCHED", "WRONG_ITEM") and self.moved_here(tray, ts, item, label=True):
+            return
+        logger.info(
+            f"[沙拉日期] {text}：" + ("還沒有一般貼紙，先以日期標籤核對" if match_status == "MATCHED"
+                                     else f"這筆訂單沒有待核對的 {item}，照錯誤品項處理")
+            + f" tray={tray.id} 單號={tray.order_number}")
+        # 上一張貼紙比對留下的原始文字，不能被當成這張的 matched_text 送給前端
+        self.sticker_matcher.last_matched_text = None
+        self.settle(tray, tray_id, ts, matched_item, match_status,
+                    confirm=self.wrong_item_confirm, raw_text=text)
+        self.debug.sticker(tray, tray_id, ts, frame_crop, dt_boxes, rec_res, matched_item, match_status)
 
     def is_strong_wrong(self, tray: Tray, matched_item) -> bool:
         """這次讀到的錯誤品名是不是強證據，可以不等滿 wrong_item_confirm 次就成立。
@@ -284,16 +418,19 @@ class StickerReader:
             # 2. confirmed_counts = 歷史最高確認進度
             #    只有真的突破歷史最高值，才通知 frontend
             # --------------------------------------------------
+            before = self.requirements.report_checked_items(tray)
             confirmed_increased = self.requirements.update_confirmed_count(
                 tray,
                 matched_item
             )
+            items_list = self.requirements.report_checked_items(tray)
+            if confirmed_increased and items_list == before:
+                # 換湯 show_removed: optional 多貼的 みそ汁：貼了也收，但不在前端清單上，不通知
+                logger.info(f"[tray_state_machine] '{matched_item}' 是換湯多貼的那張（不在前端清單），"
+                            f"不送 ITEM_CHECKED tray={tray.id}")
+                confirmed_increased = False
 
             if confirmed_increased:
-                items_list = [
-                    {item: count}
-                    for item, count in tray.confirmed_counts.items()
-                ]
 
                 payload = {
                     "tray_id": tray_id,
@@ -320,13 +457,12 @@ class StickerReader:
                 for t in tray.stickers
             )
 
-            if all_completed and not has_unresolved_wrong_item:
+            # 已經完成就不再送：換湯 show_removed: optional 時，完成後才貼上的那張 みそ汁 也會走到這裡，
+            # 不擋的話前端會收到第二次 TRAY_COMPLETED（完成後不會退回，只有合併第二張傳票會，那時 state 已改掉）
+            if all_completed and not has_unresolved_wrong_item and tray.state != TrayState.COMPLETED:
                 tray.state = TrayState.COMPLETED
 
-                items_list = [
-                    {item: count}
-                    for item, count in tray.confirmed_counts.items()
-                ]
+                items_list = self.requirements.report_checked_items(tray)
 
                 self.bus.publish_det_status({
                     "tray_id": tray_id,

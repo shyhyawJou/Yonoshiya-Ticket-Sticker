@@ -11,7 +11,7 @@ import time
 from collections import Counter
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import List, Optional, Dict
+from typing import Any, List, Optional, Dict
 
 import numpy as np
 
@@ -48,6 +48,7 @@ class TrackedItem:
     # 這張紙自己的完整單號（50、50-01…），合併/確認時寫入。同一筆訂單可能
     # 有好幾張紙（長單分頁、加點單），各自記，才分得出「是不是同一張」。
     order_number: Optional[str] = None
+    parsed_items: Optional[List[tuple]] = None
     # 追蹤期間曾經跟哪些傳票（id()）在同一幀一起被偵測到。同號的票只有
     # 「同時出現過」才算另一張紙，否則就是已知那張被拿起來移動了。
     seen_with: set = field(default_factory=set)
@@ -63,6 +64,36 @@ class TrackedItem:
     still_resets: int = 0
     ocr_reads: int = 0
     last_result_mono: Optional[float] = None
+    # 沙拉日期標籤（readers/date_label.py）：這張是日期標籤時，記讀到的「サラダ:26.8.8-16:27」
+    date_label: Optional[str] = None
+    # 同一份サラダ的一般貼紙與日期標籤成組（readers/sticker.py::StickerReader._join_pair）。
+    # pair_partner=True 的那張是後到的，不進 checked_items、不計數。
+    # 互相指來指去，所以 repr / == 都不能看它（否則無限遞迴）
+    pair_with: Optional["TrackedItem"] = field(default=None, repr=False, compare=False)
+    pair_partner: bool = False
+
+
+def note_seen_together(items: List[TrackedItem]) -> None:
+    """同一幀一起被偵測到的物件互相記進 seen_with。一張紙同時只有一個框，所以「曾同時出現」
+    = 確實是不同的紙；同名的從沒同時出現 = 同一張被移動（readers/sticker.py::_moved_here）。"""
+    if len(items) < 2:
+        return
+    ids = {id(t) for t in items}
+    for t in items:
+        t.seen_with.update(ids - {id(t)})
+
+
+@dataclass
+class Stub:
+    """客戶聯（small_order_ticket）的狀態封裝：一筆訂單只會有一張。"""
+    item: TrackedItem
+    attempts: int = 0
+    result: Any = None                        # StubParse（解析成功後鎖定）
+    verification: Any = None                  # StubVerification（與主票交叉比對結果）
+    ocr_res: list = field(default_factory=list)
+    order_json: Optional[dict] = None         # 標準客戶聯 JSON 結構
+    fallback_rects: list = field(default_factory=list)  # CV 補救數量框座標 [(x0, y0, x1, y1), ...]
+
 
 @dataclass
 class Tray:
@@ -89,6 +120,10 @@ class Tray:
     # （牛丼小 / 牛丼小盛），對外一律回報主變體那一種，前端才不會收到它沒在
     # TICKET_READY 列出來的品名。比對仍吃 expected_items（含所有寫法）。
     report_alias: Dict[str, str] = field(default_factory=dict)
+    # {菜單名: 份數}：在 expected_items 裡（貼了不報錯），但不在顯示清單、不算完成條件的品項。
+    # 換湯 show_removed: optional 時被換掉的 みそ汁。ITEM_CHECKED 只報到顯示清單的份數
+    # （OrderRequirements.report_checked_items），舊 App 才不會收到清單上沒有的品名。
+    optional_items: Dict[str, int] = field(default_factory=dict)
     checked_items: List[str] = field(default_factory=list) # 目前 tracker 還看得到，而且已經成功確認身份的實體餐點
     locked_items: Dict[str, int] = field(default_factory=dict)  # confirmed 達到 expected 後的品項
     confirmed_counts: Dict[str, int] = field(default_factory=dict) # 已經向前端確認過的歷史最高數量，只增不減
@@ -120,3 +155,26 @@ class Tray:
     order_seq: Optional[int] = None
     order_begin_mono: Optional[float] = None
     perf_start: Optional[dict] = None
+    # 訂單照片組的「開始」那張拍過了沒（LogicEngine.apply_ocr_result，manager/order_photo.py）
+    photo_started: bool = False
+    # 完成（COMPLETED）時已經排定最終照了沒；退回未完成時清掉，再完成會再排一次
+    photo_completed: bool = False
+
+    # 客戶聯小票（small_order_ticket）：一筆訂單最多一張，與主 ticket 交叉驗證用，不影響訂單狀態與完成判定
+    stub: Optional[Stub] = None
+
+    @property
+    def stubs(self) -> List[TrackedItem]:
+        return [self.stub.item] if self.stub is not None else []
+
+    @property
+    def stub_results(self) -> dict:
+        if self.stub is not None and self.stub.result is not None:
+            return {id(self.stub.item): self.stub.result}
+        return {}
+
+    @property
+    def stub_verifications(self) -> dict:
+        if self.stub is not None and self.stub.verification is not None:
+            return {id(self.stub.item): self.stub.verification}
+        return {}

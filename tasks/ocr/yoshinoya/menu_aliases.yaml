@@ -73,6 +73,29 @@ equivalents:
   - group: [ご飯大盛, ご飯大盛り]
     decided_by: chris.fan
     decided_at: 2026-10-20
+  - group: [マヨソース, マヨネーズ]
+    decided_by: chris.fan
+    decided_at: 2026-11-04
+  - group: [ごまドレ, ごまドレッシング]
+    decided_by: chris.fan
+    decided_at: 2026-11-04
+  - group: [和風ドレ, 和風ドレッング]
+    decided_by: chris.fan
+    decided_at: 2026-11-04
+  # 2026-11-10 持帰り列要跟套餐附的貼紙對得起來（menu_modifiers.yaml 的 takeout_rows）
+  - group: [ﾆﾝﾆｸﾏｼﾏｼだれ, ニンニクマシマシたれ]
+    decided_by: chris.fan
+    decided_at: 2026-11-10
+    note: |
+      xlsx 裡 8 處都寫 だれ，只有 `ニンニクマシマシたれ(持帰り` 一筆寫 たれ（少兩點，多半是筆誤）。
+      不做通用的「だれ = たれ」讀音規則：只有這一組需要，其他 たれ/だれ 目前都各自一致。
+  - group: [オム玉子, TPオム玉子]
+    decided_by: chris.fan
+    decided_at: 2026-11-10
+    note: |
+      同一張貼紙，TP（トッピング）只是來源代號。`TPオム玉子(持帰り)` 要能扣掉 D)オム･牛ハヤシ 附的 オム玉子。
+      不加 display：display 對傳票池也生效，會把傳票品名 TPオム玉子 一起改名成 オム玉子。
+      代表名照預設挑傳票也在用的寫法（TPオム玉子）。
 
 # 人工判定「這些寫法不是同一道菜」。寫進來之後就不會再被詢問。
 # 數量軸與份量軸（３個/６個、並/大/特/頭）不需要寫在這裡 —— menu_alias.py

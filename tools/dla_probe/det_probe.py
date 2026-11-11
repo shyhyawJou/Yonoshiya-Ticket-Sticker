@@ -7,7 +7,7 @@ det_probe.py
 的數量都印出來，區分「門檻擋掉」與「模型輸出本身是壞的」。
 
 用法:
-    python3 det_probe.py --det tasks/ocr/yoshi_det_v01_03.dla <影像...>
+    python3 det_probe.py --det tasks/ocr/yoshi_det_v01_05.dla <影像...>
 """
 import argparse
 import os
@@ -25,7 +25,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--det", required=True)
     ap.add_argument("--cls", default="tasks/ocr/cls_v2.dla")
-    ap.add_argument("--rec", default="tasks/ocr/yoshi_rec_v01_05.dla")
+    ap.add_argument("--rec", default="tasks/ocr/yoshi_rec_v01_08_01.dla")
     ap.add_argument("--dict", default="tasks/ocr/yoshinoya/japan_dict.txt")
     ap.add_argument("images", nargs="+")
     args = ap.parse_args()

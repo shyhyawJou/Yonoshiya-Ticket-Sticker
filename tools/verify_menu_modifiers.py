@@ -48,7 +48,7 @@ import yaml  # noqa: E402
 from logic.menu_alias import build_menu_index, load_alias_knowledge  # noqa: E402
 from logic.text_utils import normalize_text  # noqa: E402
 from logic.ticket_modifiers import (  # noqa: E402
-    load_extra_sets, load_modifier_knowledge, resolve_modifiers,
+    ModifierKnowledge, apply_set_overrides, load_modifier_knowledge, resolve_modifiers,
 )
 
 TASKS_DIR = os.path.join(
@@ -72,23 +72,17 @@ class Brand:
         with open(mapping_path, "r", encoding="utf-8-sig") as fh:
             data = yaml.safe_load(fh) or {}
 
-        ticket_pool, sticker_pool = [], []
-        rows = []
-        for row in data.get("mapping", []) or []:
-            name = str(row["name"])
-            subs = [str(s) for s in (row.get("sub_items") or [])]
-            ticket_pool.append(name)
-            sticker_pool.extend(subs)
-            rows.append((name, subs))
-        # 與 config.load_config 相同：人工補的套餐（menu_modifiers.yaml 的 set_size_rows.extra_sets）
-        known = {n for n, _ in rows}
-        self.extra_sets = set()
-        for name, subs in load_extra_sets(os.path.join(self.dir, "menu_modifiers.yaml")):
-            if name not in known:
-                ticket_pool.append(name)
-                sticker_pool.extend(subs)
-                rows.append((name, subs))
-                self.extra_sets.add(name)
+        rows = [
+            (str(row["name"]), [str(s) for s in (row.get("sub_items") or [])])
+            for row in data.get("mapping", []) or []
+        ]
+        # 與 config.load_config 相同：不印貼紙的套餐（label_less_sets）與人工補的套餐（extra_sets）
+        self.raw_names = {N(n) for n, _ in rows}
+        rows, self.extra_sets = apply_set_overrides(
+            rows, os.path.join(self.dir, "menu_modifiers.yaml"), normalize=N,
+        )
+        ticket_pool = [n for n, _ in rows]
+        sticker_pool = [s for _, subs in rows for s in subs]
 
         know = load_alias_knowledge(
             SHARED_READINGS, os.path.join(self.dir, "menu_aliases.yaml")
@@ -122,6 +116,7 @@ class Brand:
             self.modifiers.derive_from_menu(self.menu_variants)
             if self.modifiers.axes else []
         )
+        self.takeout = self.modifiers.derive_takeout_rows(self.menu_variants)
 
     # ------------------------------------------------------------------
     def slot_count(self, ticket_name: str, axis: str) -> int:
@@ -162,10 +157,12 @@ def check_brand(b: Brand, show_coverage: bool = False) -> int:
         print("  沒有 menu_modifiers.yaml（或台帳為空）→ 傳票修飾功能停用")
 
     # --- 1. 軸定義 -----------------------------------------------------
-    print(f"\n[軸] {len(b.modifiers.axes)} 個")
-    for name, axis in b.modifiers.axes.items():
+    takeout_axis = ModifierKnowledge.is_takeout_axis
+    axes = {n: a for n, a in b.modifiers.axes.items() if not takeout_axis(n)}
+    print(f"\n[軸] {len(axes)} 個（持帰り列自動產生的另外列在下面）")
+    for name, axis in axes.items():
         unknown = sorted(s for s in axis.slots if s not in b.sticker_names)
-        print(f"  {name:8} ({axis.display or '-'}) {len(axis.slots)} 個槽位")
+        print(f"  {name:8} ({axis.display or '-'}) {len(axis.slots)} 個槽位，被刪的{b.modifiers.removed_mode(name)}")
         for s in sorted(axis.slots):
             mark = "  ← 菜單裡沒有這個貼紙品名" if s in unknown else ""
             print(f"      {s}{mark}")
@@ -176,13 +173,15 @@ def check_brand(b: Brand, show_coverage: bool = False) -> int:
 
     # --- 2. 台帳 vs 菜單 ------------------------------------------------
     menu_tickets = set(b.menu_variants)
-    registered = set(b.modifiers.rules)
+    registered = {k for k, r in b.modifiers.rules.items() if not takeout_axis(r.axis)}
     stale = sorted(registered - menu_tickets)
     print(f"\n[台帳] 人工登記 {len(b.manual_rules)} 筆 + 自動推導 {len(b.derived)} 筆"
           f" = {len(registered)} 筆修飾列；已結案的非修飾列 "
           f"{len(b.modifiers.not_modifier)} 筆")
     by_axis = defaultdict(list)
     for key, rule in b.modifiers.rules.items():
+        if takeout_axis(rule.axis):
+            continue
         tag = "" if key in b.manual_rules else " (推導)"
         by_axis[rule.axis].append(key + tag)
     for axis in sorted(by_axis):
@@ -224,9 +223,35 @@ def check_brand(b: Brand, show_coverage: bool = False) -> int:
     else:
         print("\n  [ok] 文法命中的修飾列全部都已歸軸或已結案")
 
-    # --- 4. 覆蓋率：哪些套餐提供哪一軸的槽位 -----------------------------
+    # --- 4. 持帰り列：每一列能扣哪些套餐 ---------------------------------
+    if b.modifiers.takeout:
+        print(f"\n[持帰り列] {len(b.takeout)} 筆（標記 {list(b.modifiers.takeout.markers)}，"
+              f"錨定={b.modifiers.takeout.anchor}）")
+        for rule in b.takeout:
+            providers = [n for n in sorted(menu_tickets) if b.slot_count(n, rule.axis) > 0]
+            stickers = "、".join(sorted(b.modifiers.slot_members(rule.axis)))
+            print(f"  {rule.ticket}  貼紙={stickers}  可扣的套餐 {len(providers)} 個")
+            for n in providers if show_coverage else providers[:6]:
+                print(f"      {n}")
+            if not show_coverage and len(providers) > 6:
+                print(f"      …（--coverage 列出全部）")
+            if not providers:
+                # 不算錯誤：這種外帶品項只會被單點。但寫法跟套餐的 sub_items 不一致時
+                # （たれ / だれ）也長這樣，所以印出來讓人看一眼。
+                print("      （沒有任何套餐附這個貼紙：只會被當成加點。若套餐其實有附，"
+                      "多半是寫法不一致，要在 menu_aliases.yaml 補等價）")
+
+    # --- 5. 不印貼紙的套餐 ------------------------------------------------
+    label_less = sorted(n for n in b.extra_sets)
+    if label_less:
+        print(f"\n[不印貼紙的套餐] {len(label_less)} 筆（label_less_sets / extra_sets）")
+        for n in label_less:
+            src = "客戶菜單已有，貼紙清空" if N(n) in b.raw_names else "客戶菜單沒有，補上"
+            print(f"  {n}  （{src}；套餐判定={'是' if b.modifiers.is_set(n) else '否 ← size 列不會歸給它'}）")
+
+    # --- 6. 覆蓋率：哪些套餐提供哪一軸的槽位 -----------------------------
     if show_coverage:
-        for axis in b.modifiers.axes:
+        for axis in axes:
             providers = [
                 (name, b.slot_count(name, axis))
                 for name in sorted(menu_tickets)
@@ -259,11 +284,26 @@ BOWL = "牛丼・並"
 SET_CHEESE = "D)ﾁｰｽﾞ牛丼ｻﾗﾀﾞS"       # サラダ、みそ汁
 SET_NEGITAMA = "D)ねぎ玉牛丼ｻﾗﾀﾞS"   # サラダ、みそ汁、玉子
 SET_MENTAI = "D)明高ﾏﾖ牛丼ｻﾗﾀﾞS"    # サラダ、みそ汁
-SET_PAIR = "D)牛からペアｾｯﾄ"        # extra_sets 人工補的，本身不印貼紙
+SET_PAIR = "D)牛からペアｾｯﾄ"        # label_less_sets：客戶確認本身不印貼紙
+SET_PARTY = "D)牛からﾊﾟｰﾃｨｾｯﾄ"       # label_less_sets
+NAMI2 = "D)牛丼 並 ２個セット"       # label_less_sets，下面接兩列 並
+NAMI3 = "D)牛丼 並 ３個セット"       # label_less_sets，下面接三列 並
 KARAAGE6 = "から揚げ６個"        # 傳票印 唐揚げ６個，等價層折成 から揚げ6個
+# 持帰り列（takeout_rows）
+TOJI = "とじ丼 並(玉子)"            # 月見牛とじ丼 並、玉子
+EGG = "玉子"                        # 單品玉子
+EGG_TO = "玉子(持帰り)"             # 外帶時另外印的那一列，跟套餐的玉子是同一張貼紙
+NINNIKU = "ﾆﾝﾆｸ唐揚超特"            # …、ﾆﾝﾆｸﾏｼﾏｼだれ、玉子
+NINNIKU_TO = "ニンニクマシマシたれ(持帰り"   # 截斷的名稱，貼紙寫成 たれ（menu_aliases.yaml 補等價）
+OMU = "D)オム･牛ハヤシ"             # 牛オムハヤシライス、オム玉子
+OMU_TO = "TPオム玉子(持帰り)"       # 貼紙 TPオム玉子（menu_aliases.yaml 補等價）
 
 # 2026-10-28 起湯軸的設定（menu_modifiers.yaml）：anchor=anywhere、remove_slots=[みそ汁]。
 # 場景的第 4 欄可以暫時改掉軸設定（例如 show_removed），只在該場景有效。
+# 沒寫第 4 欄的場景一律用 show_removed: false 跑（BASE_KNOBS）：它們驗的是錨定與扣除，
+# 「被扣的那碗從聯集消失」是最嚴格的檢查。yaml 實際用的 optional 另有專門的場景。
+BASE_KNOBS = {"show_removed": False, "optional_removed": False}
+OPTIONAL = {"show_removed": False, "optional_removed": True}
 
 SCENARIOS = [
     # (說明, 傳票列 [(品名, 數量)], 檢查函式)
@@ -297,7 +337,7 @@ SCENARIOS = [
         lambda r: r["union"]["牛丼並"] == 1 and r["union"]["チーズ牛丼並盛"] == 0 and len(r["combos"]) == 1,
     ),
     (
-        "現場傳票 319：D)牛からペアｾｯﾄ（人工補的）+ 並 + 並 + 唐揚げ６個 -> 牛丼並 x2",
+        "現場傳票 319：D)牛からペアｾｯﾄ（不印貼紙）+ 並 + 並 + 唐揚げ６個 -> 牛丼並 x2",
         [(SET_PAIR, 1), ("並", 1), ("並", 1), (KARAAGE6, 1)],
         lambda r: (
             r["union"]["牛丼並"] == 2 and r["union"]["チーズ牛丼並盛"] == 0
@@ -305,14 +345,96 @@ SCENARIOS = [
         ),
     ),
     (
+        "不印貼紙：D)牛丼 並 ２個セット + 並 + 並 -> 只要 牛丼並 x2，套餐本身不要求貼紙",
+        [(NAMI2, 1), ("並", 1), ("並", 1)],
+        lambda r: (
+            r["union"]["牛丼並"] == 2 and sum(r["union"].values()) == 2
+            and len(r["combos"]) == 1 and r["combos"][0] == Counter({"牛丼並": 2})
+        ),
+    ),
+    (
+        "不印貼紙：D)牛丼 並 ３個セット + 並 x3 列 -> 牛丼並 x3",
+        [(NAMI3, 1), ("並", 1), ("並", 1), ("並", 1)],
+        lambda r: r["union"]["牛丼並"] == 3 and sum(r["union"].values()) == 3 and len(r["combos"]) == 1,
+    ),
+    (
+        "不印貼紙：D)牛からﾊﾟｰﾃｨｾｯﾄ + 並 + 並 + 唐揚げ６個 -> 牛丼並 x2 + 唐揚げ",
+        [(SET_PARTY, 1), ("並", 1), ("並", 1), (KARAAGE6, 1)],
+        lambda r: (
+            r["union"]["牛丼並"] == 2 and r["union"]["チーズ牛丼並盛"] == 0
+            and N(SET_PARTY) not in r["union"] and sum(r["union"].values()) == 3
+        ),
+    ),
+    (
+        "持帰り：とじ丼 並(玉子) + 玉子(持帰り) -> 玉子 只要 1 顆（同一張貼紙）",
+        [(TOJI, 1), (EGG_TO, 1)],
+        lambda r: (
+            r["union"]["玉子"] == 1 and r["display"].get("玉子") == 1
+            and all(c.get("玉子", 0) == 1 for c in r["combos"])
+            and r["union"][r["c"]("月見牛とじ丼 並")] == 1
+            and r["unattached"] == 0 and r["subs"]
+        ),
+    ),
+    (
+        "內用：とじ丼 並(玉子) 沒有持帰り列 -> 玉子 照常要核對",
+        [(TOJI, 1)],
+        lambda r: r["union"]["玉子"] == 1 and all(c.get("玉子", 0) == 1 for c in r["combos"]),
+    ),
+    (
+        "持帰り列印在套餐上方：往下找，照樣只要 1 顆",
+        [(EGG_TO, 1), (TOJI, 1)],
+        lambda r: r["union"]["玉子"] == 1 and r["unattached"] == 0,
+    ),
+    (
+        "外帶套餐 x2 + 玉子(持帰り) x2 -> 玉子 2 顆",
+        [(TOJI, 2), (EGG_TO, 2)],
+        lambda r: r["union"]["玉子"] == 2 and all(c.get("玉子", 0) == 2 for c in r["combos"]),
+    ),
+    (
+        "單點外帶 玉子(持帰り)，沒有套餐 -> 照常核對、不回報錨不到",
+        [(EGG_TO, 1)],
+        lambda r: r["union"]["玉子"] == 1 and r["unattached"] == 0,
+    ),
+    (
+        "單品 玉子 不當錨：玉子 + 玉子(持帰り) -> 兩顆都要",
+        [(EGG, 1), (EGG_TO, 1)],
+        lambda r: r["union"]["玉子"] == 2 and r["unattached"] == 0,
+    ),
+    (
+        "持帰り扣的是自己那張貼紙：ﾆﾝﾆｸ唐揚超特 + ニンニクマシマシたれ(持帰り -> だれ 1、玉子 照常",
+        [(NINNIKU, 1), (NINNIKU_TO, 1)],
+        lambda r: (
+            r["union"][r["c"]("ﾆﾝﾆｸﾏｼﾏｼだれ")] == 1 and r["union"]["玉子"] == 1
+            and r["unattached"] == 0
+        ),
+    ),
+    (
+        "TPオム玉子(持帰り) 扣 D)オム･牛ハヤシ 附的 オム玉子（等價）-> 只要 1",
+        [(OMU, 1), (OMU_TO, 1)],
+        lambda r: r["union"][r["c"]("オム玉子")] == 1 and r["unattached"] == 0,
+    ),
+    (
+        "持帰り + 換湯在同一張傳票：互不干擾",
+        [(SET, 1), (TOJI, 1), (EGG_TO, 1), (CHG_SHIJIMI, 1)],
+        lambda r: (
+            r["union"]["みそ汁"] == 0 and r["union"]["玉子"] == 1
+            and r["union"]["※変更しじみ"] == 1 and r["unattached"] == 0
+        ),
+    ),
+    (
+        "size 列跟套餐之間隔了持帰り列：跳過，照樣認得套餐",
+        [(SET_CHEESE, 1), (EGG_TO, 1), ("並", 1)],
+        lambda r: r["union"]["チーズ牛丼並盛"] == 1 and r["union"]["牛丼並"] == 0 and len(r["combos"]) == 1,
+    ),
+    (
         "size 列上方沒有套餐：維持原本的一對多（4 種主餐任一）",
         [("並", 1)],
         lambda r: len(r["combos"]) == 4,
     ),
     (
-        "size 列跟套餐之間隔了普通品項：不算屬於套餐，維持一對多",
+        "size 列跟套餐之間隔了普通品項：跳過普通品項，照樣認得上方最近的套餐（2026-11 起）",
         [(SET_CHEESE, 1), (KARAAGE6, 1), ("並", 1)],
-        lambda r: len(r["combos"]) == 4,
+        lambda r: r["union"]["チーズ牛丼並盛"] == 1 and r["union"]["牛丼並"] == 0 and len(r["combos"]) == 1,
     ),
     (
         "size 列跟套餐之間隔了換湯列：跳過修飾列，照樣認得套餐",
@@ -413,7 +535,45 @@ SCENARIOS = [
             and all(c.get("みそ汁", 0) == 0 for c in r["combos"])      # 不算完成條件
             and r["subs"] and all(s["displayed"] for s in r["subs"])
         ),
-        {"show_removed": True},
+        {"show_removed": True, "optional_removed": False},
+    ),
+    (
+        "show_removed=optional：前端不列 みそ汁、不算完成條件，但貼了也收",
+        [(SET, 1), (CHG_SHIJIMI, 1)],
+        lambda r: (
+            r["union"]["みそ汁"] == 1                                  # 貼了不報錯誤品項
+            and r["display"].get("みそ汁", 0) == 0                     # 前端不列
+            and all(c.get("みそ汁", 0) == 0 for c in r["combos"])      # 不算完成條件
+            and r["optional"] == Counter({"みそ汁": 1})
+            and r["subs"] and all(s["optional"] and not s["displayed"] for s in r["subs"])
+            and r["union"]["※変更しじみ"] == 1
+        ),
+        OPTIONAL,
+    ),
+    (
+        "optional + 另外單點 みそ汁：清單 みそ汁 ×1（單點那碗）、最多收 2 張、完成要 1 張",
+        [(SET, 1), (CHG_SHIJIMI, 1), (PLAIN_MISO, 1)],
+        lambda r: (
+            r["union"]["みそ汁"] == 2 and r["display"].get("みそ汁") == 1
+            and all(c.get("みそ汁", 0) == 1 for c in r["combos"])
+            and r["optional"] == Counter({"みそ汁": 1})
+        ),
+        OPTIONAL,
+    ),
+    (
+        "optional + 套餐 x2 只換一碗：清單 みそ汁 ×1、最多收 2 張、完成要 1 張",
+        [(SET, 2), (CHG_SHIJIMI, 1)],
+        lambda r: (
+            r["union"]["みそ汁"] == 2 and r["display"].get("みそ汁") == 1
+            and all(c.get("みそ汁", 0) == 1 for c in r["combos"])
+        ),
+        OPTIONAL,
+    ),
+    (
+        "optional 不影響持帰り列：とじ丼 並(玉子) + 玉子(持帰り) 照樣只收 1 顆玉子",
+        [(TOJI, 1), (EGG_TO, 1)],
+        lambda r: r["union"]["玉子"] == 1 and not r["optional"],
+        OPTIONAL,
     ),
     (
         "一個套餐被換兩次：第二次沒有槽位可用，錨不到",
@@ -474,8 +634,8 @@ def run_scenarios(b: Brand) -> int:
             print(f"  [skip] {desc}\n         菜單裡沒有: {missing}")
             continue
         saved = dict(know.axes)
-        if knobs and "soup" in know.axes:   # 暫時改湯軸設定，只在這個場景有效
-            know.axes["soup"] = dataclasses.replace(know.axes["soup"], **knobs[0])
+        if "soup" in know.axes:   # 暫時改湯軸設定，只在這個場景有效
+            know.axes["soup"] = dataclasses.replace(know.axes["soup"], **(knobs[0] if knobs else BASE_KNOBS))
         try:
             union, display, combos, _alias = sm.requirements.expand_parsed_items(norm_items)
         finally:
@@ -487,6 +647,8 @@ def run_scenarios(b: Brand) -> int:
             "combos": combos,
             "unattached": len(sm.requirements.last_unattached_modifiers),
             "subs": list(sm.requirements.last_substitutions),
+            "optional": Counter(sm.requirements.last_optional_items),
+            "c": b.sticker_index.canonical_or_self,   # 貼紙寫法 -> 代表菜名（checks 用）
         }
         ok = False
         try:
@@ -503,6 +665,39 @@ def run_scenarios(b: Brand) -> int:
             print(f"         假設: {[dict(c) for c in combos]}")
             print(f"         錨不到: {sm.requirements.last_unattached_modifiers}")
     print(f"\n  {len(SCENARIOS) - failed}/{len(SCENARIOS)} 通過")
+    return failed + run_report_checks()
+
+
+def run_report_checks() -> int:
+    """ITEM_CHECKED / TRAY_COMPLETED 的 items（OrderRequirements.report_checked_items）。
+
+    show_removed: optional 多貼的 みそ汁 不能送給前端（不在清單上）；單點的那碗照常報。
+    """
+    from types import SimpleNamespace
+    from logic.order_requirements import OrderRequirements as R
+
+    def tray(display, optional, confirmed):
+        return SimpleNamespace(expected_items_display=display, optional_items=optional,
+                               confirmed_counts=confirmed)
+
+    cases = [
+        ("只換湯、多貼了 みそ汁：items 不含 みそ汁",
+         tray([{"お新香": 1}, {"※変更しじみ": 1}], {"みそ汁": 1}, {"お新香": 1, "みそ汁": 1, "※変更しじみ": 1}),
+         [{"お新香": 1}, {"※変更しじみ": 1}]),
+        ("另外單點 みそ汁、貼了兩張：只報清單上的 1",
+         tray([{"※変更しじみ": 1}, {"みそ汁": 1}], {"みそ汁": 1}, {"みそ汁": 2, "※変更しじみ": 1}),
+         [{"みそ汁": 1}, {"※変更しじみ": 1}]),
+        ("沒有 optional 品項：跟以前一樣照 confirmed_counts",
+         tray([{"牛丼並": 1}], {}, {"牛丼並": 1, "たれ": 1}),
+         [{"牛丼並": 1}, {"たれ": 1}]),
+    ]
+    failed = 0
+    print(f"\n{'=' * 72}\nITEM_CHECKED 回報\n{'=' * 72}")
+    for desc, t, want in cases:
+        got = R.report_checked_items(t)
+        ok = got == want
+        failed += 0 if ok else 1
+        print(f"  [{'ok  ' if ok else 'FAIL'}] {desc}" + ("" if ok else f"\n         得到 {got}，應為 {want}"))
     return failed
 
 

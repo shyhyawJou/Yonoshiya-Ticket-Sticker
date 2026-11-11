@@ -101,6 +101,10 @@ class StabilityCfg:
     # 靜止判定：相鄰兩幀中心位移超過框短邊的這個比例，就算還在動、穩定幀數歸零。
     # 0 = 關閉（只要偵測對得上就累積，舊行為）。不寫也可以。
     still_shift_ratio: float = 0.0
+    # 貼紙（含醬料包）的穩定幀門檻，跟傳票的 n_settle_frame 分開：現場傳票通常早就解析完，
+    # 貼紙卻常常出現不到一秒就被打包，貼紙要搶時間、傳票寧可多等幾幀拍清楚。
+    # 0 = 跟 n_settle_frame 一樣（舊行為）。不寫也可以。
+    sticker_settle_frame: int = 0
     # 錯誤品項確認：同一張貼紙連續這麼多次 OCR 都沒比對成功（讀到不在訂單內的品名，
     # 或讀不出菜名）才成立、才通知前端。用來擋畫面模糊/遮擋時一時看錯字造成的 NGtoOK。
     # 0 = 關閉（第一次判錯就成立、讀不出字不通知，舊行為）。不寫也可以。
@@ -266,6 +270,31 @@ class OrderGuardCfg:
 
 
 @dataclass
+class OrderPhotoCfg:
+    """每筆訂單的照片組（manager/order_photo.py）：客戶不用看影片就能看到每一單。
+
+    整段可以不寫，不寫 = 關閉 —— 機器上的 config.yaml（執行期會被改寫，算狀態）
+    不需要為這個功能改動。
+
+    enabled:        存兩張原始高清全幀到 full_screen/（凌晨跟其他高清圖一起上傳）：
+                    傳票確認（TICKET_READY）當下 <時間>_No<單號>-start.jpg、
+                    最終狀態那一刻 <時間>_No<單號>-final-<OK|NG|NGtoOK>.jpg
+                    （OK / NGtoOK = 完成後 completed_delay_ms；NG = 收尾當下）。
+    ui_screenshot:  拍最終照時同時請 App 截一張 UI 畫面（ocr/v1/app/cmd/screenshot，
+                    App 自己存檔、上傳 Dashboard）。App 版本不支援時這個指令沒人收，不影響辨識。
+    completed_delay_ms: 訂單完成（TRAY_COMPLETED）後等幾毫秒才拍。App 收到狀態要一點時間重畫，
+                    馬上截會截到切換中的畫面（2026-11-09 實測 0 ms 截到「OK」但底色還是紅的）。
+    hold_events_ms: NG 收尾時送出截圖指令後，重置事件（TRAY_RESET / WAITING_TICKET /
+                    TRAY_REMOVED）延後幾毫秒才發，讓 App 先截到最終狀態、再清畫面。
+                    App 收到指令約 40 ms 就截圖（2026-11-09 實驗機實測）。0 = 不延後。
+    """
+    enabled: bool = False
+    ui_screenshot: bool = True
+    completed_delay_ms: int = 500
+    hold_events_ms: int = 300
+
+
+@dataclass
 class CloudUploadCfg:
     """每日上傳到雲端（Dashboard + S3），接口是同仁的 aibox_uploader/。
 
@@ -400,6 +429,7 @@ class Config:
     cloud_upload: CloudUploadCfg = field(default_factory=CloudUploadCfg)
     debug_sheet: DebugSheetCfg = field(default_factory=DebugSheetCfg)
     frame_label: FrameLabelCfg = field(default_factory=FrameLabelCfg)
+    order_photo: OrderPhotoCfg = field(default_factory=OrderPhotoCfg)
     # 該部署「真正會出現」的詞彙。與 menus_ticket/menus_sticker 分開，
     # 因為後者來自 menus_mapping.yaml（吉野家 1235 筆），拿來當小場景的
     # 模糊比對候選會大量錯配。留空則退回舊行為。
@@ -539,19 +569,17 @@ def load_config(config_path: str, overrides=None) -> Config:
                     sub_items=[str(s) for s in mc["sub_items"]]
                 ))
 
-        # 人工補的套餐（menu_modifiers.yaml 的 set_size_rows.extra_sets）：客戶菜單還沒收錄、
-        # 但現場會出現的。menus_mapping.yaml 是 xlsx 的忠實投影、不可手改，所以補在那邊。
-        # 要在建菜名索引之前加，解析器才認得這個名字。貼紙可以是空的（套餐本身不印貼紙）。
-        from logic.ticket_modifiers import load_extra_sets
-        known_names = {mc.name for mc in mapping_cases}
-        extra_set_names = set()
-        for name, subs in load_extra_sets(_resolve(base_dir, inc.get("menu_modifiers") or "menu_modifiers.yaml")):
-            if name in known_names:
-                logger.warning(f"[config] extra_sets 的 '{name}' 已經在 menus_mapping.yaml 裡，忽略人工補的這筆")
-                continue
-            mapping_cases.append(MappingCasesCfg(name=name, sub_items=subs))
-            extra_set_names.add(name)
-            logger.info(f"[config] 人工補的套餐（客戶菜單沒有）: {name} -> {subs or '（本身不印貼紙）'}")
+        # menu_modifiers.yaml 對菜單的覆寫：不印貼紙的套餐（label_less_sets，客戶確認、以它為準）
+        # 與客戶菜單還沒收錄的套餐（set_size_rows.extra_sets）。menus_mapping.yaml 是 xlsx 的
+        # 忠實投影、不可手改，所以寫在那邊。要在建菜名索引之前套用，解析器才認得這些名字。
+        from logic.text_utils import normalize_text as _norm_name
+        from logic.ticket_modifiers import apply_set_overrides
+        rows, extra_set_names = apply_set_overrides(
+            [(mc.name, mc.sub_items) for mc in mapping_cases],
+            _resolve(base_dir, inc.get("menu_modifiers") or "menu_modifiers.yaml"),
+            normalize=lambda s: _norm_name(s, ignore_space=True),
+        )
+        mapping_cases = [MappingCasesCfg(name=n, sub_items=s) for n, s in rows]
 
         # ------------------------------------------------------------------
         # 菜名等價層（同菜異寫）
@@ -597,7 +625,7 @@ def load_config(config_path: str, overrides=None) -> Config:
             key = ticket_index.canonical_or_self(mc.name)
             combo = [sticker_index.canonical_or_self(sub) for sub in mc.sub_items]
             combos = menu_variants.setdefault(key, [])
-            # 同內容的重複列不必留兩份。空組合只收人工補的套餐（本身不印貼紙）：其他品項
+            # 同內容的重複列不必留兩份。空組合只收 menu_modifiers.yaml 補的套餐（本身不印貼紙）：其他品項
             # 沒寫 sub_items 時維持舊行為（退回「貼紙就是它自己」）
             if (combo or mc.name in extra_set_names) and combo not in combos:
                 combos.append(combo)
@@ -631,6 +659,9 @@ def load_config(config_path: str, overrides=None) -> Config:
         # 推導條件很嚴，詳見 ModifierKnowledge.derive_from_menu。
         if modifier_knowledge.axes:
             modifier_knowledge.derive_from_menu(menu_variants)
+        # 持帰り列（玉子(持帰り) …）：外帶時跟套餐附的是同一張貼紙，扣掉套餐那一份。
+        # 必須在 derive_from_menu 之後（見 ModifierKnowledge.derive_takeout_rows）。
+        modifier_knowledge.derive_takeout_rows(menu_variants)
 
         # Load deployment vocabularies (optional).
         # 純文字檔，一行一個詞；支援 UTF-8 / UTF-8-BOM 與 CRLF。
@@ -710,6 +741,7 @@ def load_config(config_path: str, overrides=None) -> Config:
             sticker_missing_frame=int(st["sticker_missing_frame"]),
             ticket_leave_frame=int(st["ticket_leave_frame"]),
             still_shift_ratio=float(st.get("still_shift_ratio") or 0.0),
+            sticker_settle_frame=int(st.get("sticker_settle_frame") or 0),
             wrong_item_confirm=int(st.get("wrong_item_confirm") or 0),
             wrong_item_strong_score=float(st.get("wrong_item_strong_score") or 0.0),
             wrong_item_strong_conf=float(st.get("wrong_item_strong_conf", 0.9) or 0.0),
@@ -869,6 +901,15 @@ def load_config(config_path: str, overrides=None) -> Config:
             max_queue=max(1, int(fl.get("max_queue", FrameLabelCfg.max_queue))),
         )
 
+        # 每筆訂單的照片組：舊 config 沒這一段也能載入，不寫 = 關閉
+        op = base.get("order_photo") or {}
+        order_photo_cfg = OrderPhotoCfg(
+            enabled=bool(op.get("enabled", OrderPhotoCfg.enabled)),
+            ui_screenshot=bool(op.get("ui_screenshot", OrderPhotoCfg.ui_screenshot)),
+            completed_delay_ms=max(0, int(op.get("completed_delay_ms", OrderPhotoCfg.completed_delay_ms))),
+            hold_events_ms=max(0, int(op.get("hold_events_ms", OrderPhotoCfg.hold_events_ms))),
+        )
+
         # Camera
         ca = base["camera_params"]
         bright_ctrl = base["birghtness_controller"]
@@ -909,6 +950,7 @@ def load_config(config_path: str, overrides=None) -> Config:
             cloud_upload=cloud_upload_cfg,
             debug_sheet=debug_sheet_cfg,
             frame_label=frame_label_cfg,
+            order_photo=order_photo_cfg,
             vocab_ticket=vocab_ticket,
             vocab_sticker=vocab_sticker,
             mode=mode,
