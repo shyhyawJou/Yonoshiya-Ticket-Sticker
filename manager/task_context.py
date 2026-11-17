@@ -130,6 +130,9 @@ class TaskContext:
             # 吉野家大傳票的 CV 輔助：det 之前先用表格版面決定方向（只有 legacy 解析器用得到）
             ticket_cv_orient=bool(getattr(cfg, "ticket_cv_assist", False)) and cfg.ticket_parser == "legacy",
         )
+        # 正方形貼紙選方向時，「讀出來的字是不是菜名」用貼紙比對器判斷（ocr_engine._predict_ambiguous）。
+        # 每次都從 self.logic 取，switch_mode 換掉 LogicEngine 後自動用新的
+        self.ocr.ocr_sys.text_check = self._is_sticker_menu_text
         self.ocr.start()
 
         # --- mqtt connect ---
@@ -143,6 +146,15 @@ class TaskContext:
         logger.info(f"已成功載入任務: {task}")
 
     # ---------- OCR 結果 ----------
+
+    def _is_sticker_menu_text(self, text: str) -> bool:
+        """OCR 執行緒呼叫：這段字對得到貼紙菜單（門檻跟 StickerMatcher.match 採用比對結果的 60 分一致）。
+        只讀比對器的索引，不改它的狀態"""
+        matcher = getattr(getattr(self, "logic", None), "sticker_matcher", None)
+        if matcher is None:
+            return False
+        name, score = matcher.resolve(text)
+        return name is not None and (score or 0) > 60
 
     def _on_ocr_result(self, frame_crop, rec_res, dt_boxes, is_flip, time_cost, metadata) -> None:
         """由 OCR Thread 呼叫的 callback"""

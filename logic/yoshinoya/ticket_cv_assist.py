@@ -10,7 +10,8 @@
       數量  det 框 + predict_quantity（只解碼 1~9 的正方形 crop），一致就用、不一致取信心高的，
             都讀不到但数欄有墨跡就當 1（跟 legacy 的預設 1 一樣，只是這裡有方框 / 墨跡證明這列是品項）
       單號  CV 單號框附近的 det 框；沒有才用 CV 框讀。CV 找不到單號框時，改取表格上方偏右
-            （_find_order_no 的搜尋範圍）字最高的 det 數字框
+            （_find_order_no 的搜尋範圍）字最高的 det 數字框；CV 找到的框附近沒有 det 數字、
+            框裡也讀不出來時（框找錯了），也用這個 det 數字框
 
 為什麼不直接全用 CV 框讀：rec 是拿 det 的切圖訓練的，CV 框給 rec 平均讀得比 det 框差
 （2026-10 的 41 張測試：只用 CV 框 27 張全對、現行 det 32 張、這個分工 38/39）。
@@ -87,7 +88,7 @@ class CvAssist:
             logger.info(f"[CV輔助] 表格{'右' if layout.cut_side == 'right' else '左'}側外框在傳票框外"
                         f"（偵測框比傳票窄），外框位置由数欄 / 金額欄線推算")
 
-        cells, det_order = self._assign_det_boxes(layout, dt_boxes, rec_res)
+        cells, det_order, loose_order = self._assign_det_boxes(layout, dt_boxes, rec_res)
         rows_dbg: List[dict] = []
         items: List[Tuple[str, int]] = []
         rescued: List[str] = []
@@ -133,6 +134,12 @@ class CvAssist:
             if order_number:
                 rescued.append("單號")
                 logger.info(f"[CV補救] 單號：det 沒讀到，CV 框讀到「{text}」→ {order_number}")
+        if order_number is None and loose_order is not None:
+            # CV 找到的單號框不對（2026-11-16 實驗機：紙張右緣的深色背景在除背景後留下一條 7x40 px 的直條，
+            # 比 397 的字還高，被當成單號框），det 在同一塊搜尋範圍裡讀到的數字不能因此丟掉
+            order_number = loose_order
+            logger.info(f"[CV輔助] 單號：CV 單號框 {tuple(round(v) for v in layout.order_no_box)} 附近沒有 det 數字、"
+                        f"框裡也讀不出來，改用表格上方的 det 數字「{loose_order}」")
         if order_number is None:
             logger.warning("[CV輔助] 單號未確認（det 與 CV 框都沒讀到）")
 
@@ -148,18 +155,23 @@ class CvAssist:
 
     # ------------------------------------------------------------------
     def _assign_det_boxes(self, layout: TicketLayout, dt_boxes, rec_res):
-        """det 框換到 CV 影像座標，依中心點分到 (列, 欄)；單號另外挑。"""
+        """det 框換到 CV 影像座標，依中心點分到 (列, 欄)；單號另外挑。
+
+        回傳 (cells, 單號, 退路單號)：
+          單號      CV 單號框附近的 det 數字；CV 沒找到單號框時是下面的退路單號
+          退路單號  _find_order_no 搜尋的那一塊（表格上方偏右）裡字最高的 det 數字。CV 找到單號框時
+                    只在「框附近沒有 det 數字、CV 讀框也讀不出來」時才用（見 parse），CV 框找錯的退路
+        """
         M = np.asarray(layout.matrix, dtype=np.float64)
         ob, th = layout.order_no_box, layout.text_h
         cells: dict = {}
         orders = []
-        # CV 沒找到單號框時（光線不均、單號被壓到…），det 讀到的數字不能就這樣丟掉：
-        # 改收 _find_order_no 搜尋的那一塊（表格上方偏右）裡的數字框，挑字最高的（單號是表格上方最大的字）
+        # CV 沒找到單號框（光線不均、單號被壓到…）或找錯時，det 讀到的數字不能就這樣丟掉：
+        # 改收 _find_order_no 搜尋的那一塊裡的數字框，挑字最高的（單號是表格上方最大的字）
         loose = []
-        if ob is None:
-            left, _, _, right = layout.cols
-            tw, yt = right - left, layout.y_top
-            region = (left + 0.40 * tw, right + 0.08 * tw, yt - 6.0 * th, yt - 0.4 * th)
+        left, _, _, right = layout.cols
+        tw, yt = right - left, layout.y_top
+        region = (left + 0.40 * tw, right + 0.08 * tw, yt - 6.0 * th, yt - 0.4 * th)
         from logic.yoshinoya.order_parser import normalize_order_number
         for idx, (box, (text, conf)) in enumerate(zip(dt_boxes, rec_res)):
             if conf < (_MIN_DET_SCORE_NEGI if text.startswith("ねぎ") else _MIN_DET_SCORE):
@@ -170,7 +182,7 @@ class CvAssist:
             if no and ob is not None and ob[0] - 2 * th < cx < ob[2] + 2 * th and ob[1] - th < cy < ob[3] + th:
                 orders.append((float(conf), no))
                 continue
-            if no and ob is None and region[0] < cx < region[1] and region[2] < cy < region[3]:
+            if no and region[0] < cx < region[1] and region[2] < cy < region[3]:
                 loose.append((float(p[:, 1].max() - p[:, 1].min()), float(conf), no))
                 continue
             cell = layout.cell_of(cx, cy)
@@ -179,11 +191,12 @@ class CvAssist:
                 cells.setdefault(cell, []).append(_DetBox(idx, float(p[:, 0].min()), float(p[:, 0].max()),
                                                           text.strip(), float(conf),
                                                           p[:, 0].min() < float(layout.col_x(1, cy)) - 2))
-        if loose:
+        loose_no = max(loose)[2] if loose else None
+        if ob is None and loose:
             _, conf, no = max(loose)
             logger.info(f"[CV輔助] 單號：CV 找不到單號框，改用表格上方的 det 數字「{no}」（conf={conf:.2f}）")
-            return cells, no
-        return cells, (max(orders)[1] if orders else None)
+            return cells, no, None
+        return cells, (max(orders)[1] if orders else None), loose_no
 
     def _resolve(self, text: str):
         if not text:

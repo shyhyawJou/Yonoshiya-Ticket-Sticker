@@ -379,8 +379,11 @@ class OcrRecSaveCfg:
     max_per_order:  每筆訂單最多存幾張，超過就不再存並警告一次（貼紙被反覆重讀時量會很大）。
     max_queue:      背景佇列上限（單位：一次 OCR）；滿了整筆丟棄並警告，不拖慢辨識。
     font_path:      日文字型，留空 = 專案內的 tasks/ocr/NotoSansJP-Bold.otf（跟 debug_sheet 同一個）。
+
+    預設關閉（2026-11-16）：這是除錯用的，一筆訂單可能存幾百張。現場的 config.yaml 是狀態、部署不會覆蓋，
+    預設開的話沒寫這一段的機台一更新程式就開始存。要用時在 config.yaml 寫 enabled: true。
     """
-    enabled: bool = True
+    enabled: bool = False
     max_per_order: int = 3000
     max_queue: int = 400
     font_path: str = ""

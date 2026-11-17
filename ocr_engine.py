@@ -153,9 +153,17 @@ class TextSystemDLA:
         #   實測讀出「た玉」0.68、「玉並」0.51~0.85, 而正確的「玉子」也有 0.75~0.83,
         #   分數區間重疊, 門檻擋不住, 只能真的把四個方向都讀過。
         #   180 度不重跑 det(框座標直接換算), 所以四方向只要 2 次 det + 4 次單框 rec。
+        #
+        # 2026-11-16: 門檻改成 1.01(= 一律四個方向都讀)。現場(v3.4.2)貼紙「玉子」轉 180 讀成「肉」
+        #   信心剛好 1.000, 被當成滿分就沒讀 90 度, 真正的方向(逆轉 90「玉子」1.000)根本沒被讀到。
+        #   錯的方向也會讀到 1.000, 所以滿分不代表方向對; 四個方向都讀過、還平手時,
+        #   靠 text_check(讀出來的字是不是菜單上的名字)分, 見 _predict_ambiguous。
         self.orient_ambiguous_aspect = 0.7      # 長短比落在 [0.7, 1.4) 視為方向不明
         self.orient_ambiguous_area_ratio = 0.5  # 方向不明的框需佔總面積多少才啟動補救
-        self.orient_retry_conf_thresh = 1.0     # 原樣/轉180 的最佳信心低於此值, 才再比順轉/逆轉 90
+        self.orient_retry_conf_thresh = 1.01    # 原樣/轉180 的最佳信心低於此值, 才再比順轉/逆轉 90（> 1 = 一律比）
+        # 正方形框選方向時用的「這段字是不是菜單上的名字」(text -> bool)。由 TaskContext 注入貼紙比對器的判斷;
+        # None(離線工具)= 只比 rec 信心。只用在 obj_type == "sticker"
+        self.text_check = None
 
         self._prof_reset()
         logger.info("模型初始化完成。")
@@ -422,8 +430,14 @@ class TextSystemDLA:
         dt_boxes = np.array(dt_boxes_new)
         return dt_boxes
 
-    def get_rotate_crop_image(self, img, points):
-        """根據 Detection 的座標，從原圖裁剪出每個文字區域"""
+    def get_rotate_crop_image(self, img, points, rotate_tall: bool = True):
+        """根據 Detection 的座標，從原圖裁剪出每個文字區域
+
+        rotate_tall: 框高 >= 寬 1.3 倍時轉 90 度（PaddleOCR 處理直排文字的做法）。det 路徑（_postprocess_and_crop）
+        傳 False：整張圖的方向在前面就決定好了（轉 90 用 _check_boxes_need_rotate_90 整張轉），傳票、貼紙都是橫排，
+        瘦高的框是單一數字 / 單字（單號「4」、數量「1」、数），轉 90 度再 rec 會讀錯
+        （2026-11-16 ocr_rec 小圖：單號「4」轉成側躺讀成「3」）。StandaloneRecDLA 的同名函式本來就不轉。
+        """
         assert len(points) == 4, "shape of points must be 4*2"
 
         # 計算目標裁剪區域的寬高
@@ -461,8 +475,8 @@ class TextSystemDLA:
         )
         dst_img_height, dst_img_width = dst_img.shape[0:2]
 
-        # 如果高度 > 寬度 1.3 倍，代表是豎排文字，旋轉 90 度
-        if dst_img_height * 1.0 / dst_img_width >= 1.3:
+        # 如果高度 > 寬度 1.3 倍，代表是豎排文字，旋轉 90 度（只給 rotate_tall=True 的呼叫端，見 docstring）
+        if rotate_tall and dst_img_height * 1.0 / dst_img_width >= 1.3:
             dst_img = np.rot90(dst_img)
         return dst_img
 
@@ -553,8 +567,14 @@ class TextSystemDLA:
         return decode_out
 
     # ====================
-    def run_cls(self, img_list):
-        """執行方向分類"""
+    def run_cls(self, img_list, apply: bool = True):
+        """執行方向分類
+
+        apply=True：判成 180 度（信心 > cls_thresh）的框就地轉正（PaddleOCR 原本的逐框轉正）。
+        apply=False：只回傳每個框的判斷，不動影像 —— det 路徑（_recognize）用：cls 只拿來投票決定整張要不要翻，
+        整張方向定了之後再逐框翻，只會把判不準的單字框（1 / 数 / 單號，上下翻過來長得很像）翻錯
+        （2026-11-16 起）。flip_count 一樣是判成 180 度的框數。
+        """
         st2 = time.time()
         
         flip_count = 0
@@ -575,7 +595,8 @@ class TextSystemDLA:
             cls_res[idx] = [label, score]
 
             if "180" in label and score > self.cls_thresh:
-                img_list[idx] = cv2.rotate(img, 1)
+                if apply:
+                    img_list[idx] = cv2.rotate(img, 1)
                 flip_count += 1
         
         et2 = time.time()
@@ -594,19 +615,34 @@ class TextSystemDLA:
             (實測 9 框中有 5 框),把它們算進分母會把比例稀釋到永遠不過半
             (4/9 = 0.44),結果整張圖不翻轉。
 
-            但 run_cls 已經把每個框「各自」轉正了,所以文字仍然讀得正確,
-            只有 dt_boxes / rec_res 的順序是顛倒的 —— 這會讓 order_parser
+            (舊版 run_cls 還會把每個框「各自」轉正,所以文字仍然讀得正確;2026-11-16 起 det 路徑
+            不再逐框轉正,整張不翻的話字也會讀錯),而 dt_boxes / rec_res 的順序是顛倒的 —— 這會讓 order_parser
             以影像下緣的單號去算 takeout_y,進而把所有文字框濾光,
             最後靜默回傳空品項清單。
 
         因此改成只採計「夠長的文字框」(寬高比 >= min_aspect) 的票。
         若一個長框都沒有 (例如 sticker 只有名稱+編號兩個短框),
-        則退回原本的全體多數決,維持舊行為。
+        則改由全部的框投票。
 
-        回傳 (is_flip, unanimous)。unanimous=False 代表長框的票有分歧(例如 1/2、
-        3/4),呼叫端不該採信這次的 is_flip,改用 _decide_flip_by_rec 兩個方向
-        都讀過再決定。沒有長框、退回全體多數決時一律回 unanimous=True(舊行為)。
+        信心不到 cls_thresh 的票算「不確定」,不算「不翻」(2026-11-17 起)：
+            舊版把「判 180 但信心不到 0.9」直接當成不翻票,cls 拿不定主意時
+            反而被當成全票同意不翻,於是根本不會去比兩個方向。現場實測:
+              貼紙「ねぎぬき」cls=180/0.68~0.90 -> 不翻 -> 倒著讀出「10号食」0.10
+                (轉 180 讀「ねぎぬき」1.000);擾動 120 次錯 5 次,全是這種
+              傳票 99 倒著放 + 微模糊,長框 cls 180/0.72、180/0.67、0/0.73 -> 長框 0/3 不翻
+                -> 整張亂碼(原樣長框信心 0.60,轉 180 是 0.99)
+            判 0 但信心不到 0.9 也一樣不確定(兩類的 cls,0/0.73 等於 180 有 0.27)。
+
+        回傳 (is_flip, unanimous)。unanimous=True 只在「每一票都過 cls_thresh 且方向一致」;
+        有票不確定或方向分歧時回 False,呼叫端不該採信這次的 is_flip,改用
+        _decide_flip_by_rec 兩個方向都讀過再決定。
         """
+        def vote(label, score):
+            """True = 翻、False = 不翻、None = 不確定(信心不到 cls_thresh)"""
+            if score <= self.cls_thresh:
+                return None
+            return "180" in label
+
         long_votes = []
         for img, (label, score) in zip(img_crop_list, cls_res):
             h, w = img.shape[:2]
@@ -615,30 +651,22 @@ class TextSystemDLA:
             # 180 度旋轉不改變寬高比,所以用 run_cls 轉正後的 crop 計算也是安全的
             if (w / float(h)) < min_aspect:
                 continue
-            long_votes.append("180" in label and score > self.cls_thresh)
+            long_votes.append(vote(label, score))
 
-        all_flip = sum(
-            1 for label, score in cls_res
-            if "180" in label and score > self.cls_thresh
-        )
+        all_votes = [vote(label, score) for label, score in cls_res]
+        all_flip = sum(1 for v in all_votes if v is True)
 
-        if not long_votes:
-            ratio = all_flip / len(cls_res) if cls_res else 0.0
-            is_flip = ratio > 0.5
-            logger.warning(
-                f"[翻轉投票] 無長文字框(寬高比>={min_aspect})可投票,退回全體多數決: "
-                f"{all_flip}/{len(cls_res)} ratio={ratio:.2f} -> is_flip={is_flip}"
-            )
-            return is_flip, True
-
-        ratio = sum(long_votes) / len(long_votes)
-        is_flip = ratio > 0.5
-        unanimous = ratio in (0.0, 1.0)
+        votes = long_votes or all_votes
+        n_flip = sum(1 for v in votes if v is True)
+        n_keep = sum(1 for v in votes if v is False)
+        n_unsure = len(votes) - n_flip - n_keep
+        is_flip = n_flip > len(votes) / 2 if votes else False
+        unanimous = n_unsure == 0 and (n_flip == 0 or n_keep == 0)
+        scope = "長文字框" if long_votes else f"無長文字框(寬高比>={min_aspect}),全體"
         logger.info(
-            f"[翻轉投票] 長文字框 {sum(long_votes)}/{len(long_votes)} ratio={ratio:.2f} "
-            f"-> {f'is_flip={is_flip}' if unanimous else '票數分歧，改比兩個方向的辨識信心'} "
-            f"(全體 {all_flip}/{len(cls_res)}="
-            f"{all_flip / len(cls_res) if cls_res else 0:.2f})"
+            f"[翻轉投票] {scope} 翻 {n_flip} / 不翻 {n_keep} / 不確定 {n_unsure} "
+            f"-> {f'is_flip={is_flip}' if unanimous else ('有不確定的票' if n_unsure else '票數分歧') + '，改比兩個方向的辨識信心'}"
+            + (f" (全體翻 {all_flip}/{len(cls_res)})" if long_votes else "")
         )
         return is_flip, unanimous
 
@@ -669,6 +697,10 @@ class TextSystemDLA:
         「不翻」而解析出空品項 —— 這台的傳票九成是倒著進來的,而 cls 信心不到
         cls_thresh 的框一律被算成「不翻」票,平手時就偏向錯的那邊。
         cls 拿不定主意的時候,直接看哪個方向讀得出字比較可靠。
+        2026-11-17 起 cls 信心不到 cls_thresh 的票也算拿不定主意(見 _decide_flip)。
+
+        貼紙先比讀出來對得到菜單的框數、再比信心(跟 _predict_ambiguous 同一套分數);
+        傳票只比長框信心。
 
         跟 _predict_ambiguous 共用 _read_both_flips(不經 cls、180 度不重跑 det)。
         **只回傳方向**,不回傳這次讀到的字:這兩次讀取是為了比較而省略了 cls 逐框
@@ -676,14 +708,17 @@ class TextSystemDLA:
         方向判對了,單號卻從 '4' 變成讀不到。方向定了之後照一般流程重讀。
         """
         reads = self._read_both_flips(ori_im, dt_boxes, obj_type)
-        scored = [(self._long_box_rec_conf(rec, boxes), rec, flip) for rec, boxes, flip in reads]
+        scored = [((self._menu_hits(rec, obj_type), self._long_box_rec_conf(rec, boxes)), rec, flip)
+                  for rec, boxes, flip in reads]
         # max 遇到同分取先出現的,也就是原樣
         _, _, is_flip = max(scored, key=lambda s: s[0])
 
+        check = obj_type == "sticker" and self.text_check is not None
         summary = " | ".join(
             f"{'轉180' if flip else '原樣'} 長框信心 {conf:.3f}"
+            f"{('，菜單' if hits else '，非菜單') if check else ''}"
             f"「{'/'.join(t for t, _ in rec)[:40] or '∅'}」"
-            for conf, rec, flip in scored
+            for (hits, conf), rec, flip in scored
         )
         logger.info(f"[翻轉投票] 方向比對: {summary} -> is_flip={is_flip}")
         return is_flip
@@ -918,7 +953,7 @@ class TextSystemDLA:
 
         dt_boxes = self.sorted_boxes(dt_boxes)
         img_crop_list = [
-            self.get_rotate_crop_image(img, box.astype(np.float32))
+            self.get_rotate_crop_image(img, box.astype(np.float32), rotate_tall=False)
             for box in dt_boxes
         ]
         return dt_boxes, img_crop_list
@@ -963,6 +998,22 @@ class TextSystemDLA:
         confs = [float(c) for _, c in rec_res]
         return sum(confs) / len(confs)
 
+    def _menu_hits(self, rec_res, obj_type) -> int:
+        """讀出來對得到貼紙菜單的框數(text_check)。選方向時排在 rec 信心前面:錯的方向也會讀到 1.000
+        (2026-11-16 現場:玉子 轉 180 讀成「肉」1.000),而錯的方向讀出來多半不是菜名。
+        用整份菜單、不用這張訂單的品項 —— 拿訂單去挑方向，等於挑「看起來是對的」那個，錯的貼紙會被說成對的。
+        只用在 sticker;傳票或沒有注入 text_check(離線工具)一律 0 = 只比信心。"""
+        check = self.text_check if obj_type == "sticker" else None
+        if check is None:
+            return 0
+        n = 0
+        for t, _ in rec_res:
+            try:
+                n += 1 if (t and check(t)) else 0
+            except Exception:   # 比對器出錯不能讓貼紙讀不到
+                pass
+        return n
+
     def _recognize(self, ori_im, dt_boxes, obj_type):
         """
         det 之後的共用流程: sticker 過濾 + 裁切 -> cls 方向分類 ->
@@ -977,12 +1028,12 @@ class TextSystemDLA:
         raw_dt_boxes = dt_boxes   # 方向比對要從原始 det 結果重新過濾/裁切, 見 _decide_flip_by_rec
         dt_boxes, img_crop_list = self._postprocess_and_crop(ori_im, dt_boxes, obj_type)
 
-        # 3. 方向分類
-        img_crop_list, cls_res, flip_count, elapse2 = self.run_cls(img_crop_list)
+        # 3. 方向分類：只投票決定整張的方向，不逐框轉正（見 run_cls 的 apply）
+        img_crop_list, cls_res, flip_count, elapse2 = self.run_cls(img_crop_list, apply=False)
         # 只採計長文字框的方向票,避免單字框(1/数/483)把翻轉比例稀釋到永遠不過半
         is_flip, unanimous = self._decide_flip(img_crop_list, cls_res)
         if not unanimous:
-            # 票數分歧時 cls 的結論不可靠,兩個方向都讀過、比辨識信心決定方向;
+            # 票數分歧或有信心不到 cls_thresh 的票時 cls 的結論不可靠,兩個方向都讀過、比辨識信心決定方向;
             # 之後照一般流程讀(翻轉就重跑 det + cls)
             self.prof["path"].append("翻轉比對")
             is_flip = self._decide_flip_by_rec(ori_im, raw_dt_boxes, obj_type)
@@ -998,9 +1049,8 @@ class TextSystemDLA:
                 return [], [], is_flip
 
             # 180 度重新 det 後,同樣需要再過濾一次 sticker,理由相同
+            # (整張已經轉正,不再跑 cls 逐框轉正 —— 見 run_cls 的 apply)
             dt_boxes, img_crop_list = self._postprocess_and_crop(rotated_im, dt_boxes, obj_type)
-
-            img_crop_list, cls_res, _, _ = self.run_cls(img_crop_list)
 
         # 5. 文字識別
         rec_res, elapse3 = self.run_rec(img_crop_list)
@@ -1042,7 +1092,7 @@ class TextSystemDLA:
 
     def _predict_ambiguous(self, ori_im, dt_boxes, obj_type):
         """
-        框近乎正方形(幾何無解)時, 四個方向都讀過, 取平均 rec 信心最高者。
+        框近乎正方形(幾何無解)時, 四個方向都讀過, 先取讀出菜名的(text_check), 再取平均 rec 信心最高者。
         cls 在兩個字的短框上過不了 cls_thresh, 所以 180 度不交給 cls,
         而是跟 90 度一樣明確讀一次來比。
 
@@ -1053,9 +1103,18 @@ class TextSystemDLA:
         names = {(False, False): "原樣", (False, True): "轉180",
                  (True, False): "順轉90", (True, True): "逆轉90"}
 
+        # 分數 = (讀出來對得到菜單的框數, 平均 rec 信心)。先看菜單再看信心，理由見 _menu_hits
+        check = self.text_check if obj_type == "sticker" else None
+
+        def menu_hits(rec):
+            return self._menu_hits(rec, obj_type)
+
+        def score(c):
+            return (menu_hits(c[1]), self._mean_rec_conf(c[1]))
+
         # (is_rotated_90, rec_res, dt_boxes, is_flip); max 遇到同分取先出現的, 所以平手時偏好原樣
         cands = [(False,) + r for r in self._read_both_flips(ori_im, dt_boxes, obj_type)]
-        best = max(cands, key=lambda c: self._mean_rec_conf(c[1]))
+        best = max(cands, key=score)
 
         if self._mean_rec_conf(best[1]) < self.orient_retry_conf_thresh:
             self.prof["path"].append("含90度")
@@ -1063,11 +1122,12 @@ class TextSystemDLA:
             r_dt_boxes, _ = self.run_det(rotated_im)
             if len(r_dt_boxes) > 0:
                 cands += [(True,) + r for r in self._read_both_flips(rotated_im, r_dt_boxes, obj_type)]
-                best = max(cands, key=lambda c: self._mean_rec_conf(c[1]))
+                best = max(cands, key=score)
 
         summary = " | ".join(
             f"{names[(rot90, flip)]} "
-            f"{'/'.join(t for t, _ in rec) or '∅'}({self._mean_rec_conf(rec):.3f})"
+            f"{'/'.join(t for t, _ in rec) or '∅'}({self._mean_rec_conf(rec):.3f}"
+            f"{'' if check is None else ('，菜單' if menu_hits(rec) else '，非菜單')})"
             for rot90, rec, _, flip in cands
         )
         is_rotated_90, rec_res, dt_boxes, is_flip = best

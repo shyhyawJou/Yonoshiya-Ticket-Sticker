@@ -492,9 +492,10 @@ class TrayStateMachine:
                 )
 
     def _leave_pair(self, tray_id: str, ts) -> bool:
-        """成組的サラダ貼紙（一般貼紙 + 日期標籤，見 StickerReader._join_pair）其中一張離開。
+        """成組的沙拉貼紙（一般貼紙 + 日期標籤，見 StickerReader._join_pair）其中一張離開。
 
-        組裡還有一張在畫面上就不扣 checked_items：日期標籤被手遮住、掀起來，那份サラダ其實還在。
+        組裡還有一張在畫面上就不扣 checked_items：日期標籤被手遮住、掀起來，那份沙拉其實還在。
+        口味沙拉收著、還沒配到一般貼紙的日期標籤（pair_partner、pair_with=None）離開也是什麼都不扣。
         回傳 True = 已處理完（不要再扣）；False = 照一般已核對貼紙離開處理。
         """
         other = ts.pair_with

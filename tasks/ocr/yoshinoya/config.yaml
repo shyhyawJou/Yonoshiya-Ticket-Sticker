@@ -9,10 +9,10 @@ mqtt:
     session: v1
 runtime:
     model:
-        object_det: ../mmr_11cls_v01_04.dla
-        ocr_det: ../yoshi_det_v01_06.dla
+        object_det: ../mmr_11cls_v01_05.dla
+        ocr_det: ../yoshi_det_v01_07.dla
         ocr_cls: ../cls_v2.dla
-        ocr_rec: ../yoshi_rec_v01_09_01.dla
+        ocr_rec: ../yoshi_rec_v01_10_01.dla
         text: ./japan_dict.txt
     camera:
         source: 0
@@ -52,7 +52,7 @@ order_guard:
 # 最終狀態同時請 App 截 UI（ocr/v1/app/cmd/screenshot）。OK / NGtoOK 在完成時拍，NG 在收尾時拍。不寫這段 = 關閉
 order_photo:
     enabled: true
-    ui_screenshot: true
+    ui_screenshot: false
     completed_delay_ms: 500 # 完成（TRAY_COMPLETED）後等多久才拍（App 要時間重畫）
     hold_events_ms: 300     # NG 收尾時，截圖指令送出後重置事件延後幾毫秒才發（App 先截到最終畫面）
 camera_params:

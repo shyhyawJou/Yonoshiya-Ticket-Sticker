@@ -6,12 +6,15 @@ readers/label_cv.py
 寫成不綁沙拉的形式，之後別的固定版面標籤可以共用（一類一個 reference_img/<類別>/ 資料夾）。
 
 參考圖放在 label.yaml 同一個資料夾，版面不用手動標：載入時每張參考圖自己用水平投影切列，
-fields 指定「第幾列」（-2 = 倒數第二列），欄位上方的所有列就是模板區（沙拉：サラダ +
-保存方法 / 消費期限，每張都一樣）。新增參考圖只要把轉正的 crop 丟進資料夾。
+fields 指定「第幾列」（-2 = 倒數第二列）。模板區預設是欄位上方的所有列；template 可以改成
+「欄位正上方 rows_above 列 + include 指定的欄位列」，跳過最上面的品名列。新增參考圖只要把
+轉正的 crop 丟進資料夾；切不出那麼多列的參考圖（品名跟小字黏成一列）載入時略過、記 log。
 
 CV 只當輔助（det 優先）：模板分數不到 min_score 就完全不參與。
 2026-11-06 實驗機實測（7 張沙拉日期標籤、502 張一般貼紙）：沙拉 0.93~0.99、一般貼紙最高 0.46；
 四個方向都判對；歪 10 度時開始讀錯（det 不受影響），所以不能讓 CV 取代 det。
+2026-11-16 改成跳過品名列（沙拉的 label.yaml）：現場 サラダ 日期標籤的品名列被另一張貼紙蓋住時，
+含品名的模板只有 0.45 對不到；「消費期限 那列小字 + 日期列」不受影響，數據見 label.yaml。
 """
 
 from __future__ import annotations
@@ -39,15 +42,22 @@ class LabelCvConfig:
     min_score: float = 0.75                # 模板分數門檻（TM_CCOEFF_NORMED）
     scales: Tuple[float, float] = (0.80, 1.25)
     fields: Dict[str, int] = field(default_factory=dict)   # 欄位名 -> 第幾列（負數從下面數）
+    # 模板區：None = 欄位上方的所有列；N = 只取欄位正上方 N 列（上面至少還要有一列，也就是跳過品名列）
+    template_rows_above: Optional[int] = None
+    template_include: Tuple[str, ...] = ()                 # 一起放進模板區的欄位（例如 date）
 
     @classmethod
     def from_dict(cls, raw: Optional[dict]) -> "LabelCvConfig":
         raw = raw or {}
         sc = raw.get("scales") or cls.scales
+        tpl = raw.get("template") or {}
+        above = tpl.get("rows_above")
         return cls(enabled=bool(raw.get("enabled", False)), refs=str(raw.get("refs") or cls.refs),
                    min_score=float(raw.get("min_score", cls.min_score)),
                    scales=(float(sc[0]), float(sc[1])),
-                   fields={str(k): int(v) for k, v in (raw.get("fields") or {}).items()})
+                   fields={str(k): int(v) for k, v in (raw.get("fields") or {}).items()},
+                   template_rows_above=None if above is None else int(above),
+                   template_include=tuple(str(k) for k in (tpl.get("include") or ())))
 
 
 @dataclass
@@ -115,7 +125,10 @@ class LabelTemplate:
                 self.refs.append(ref)
         lo, hi = cfg.scales
         self.coarse_scales = np.arange(lo, hi + 1e-6, 0.10)
-        logger.info(f"[{tag}] 參考圖 {len(self.refs)} 張（{folder}），模板門檻 {cfg.min_score:g}，欄位 {cfg.fields}")
+        tpl = ("欄位上方所有列" if cfg.template_rows_above is None
+               else f"欄位正上方 {cfg.template_rows_above} 列" + (f" + {list(cfg.template_include)}" if cfg.template_include else ""))
+        logger.info(f"[{tag}] 參考圖 {len(self.refs)} 張（{folder}），模板門檻 {cfg.min_score:g}，"
+                    f"模板區 {tpl}，欄位 {cfg.fields}")
 
     @property
     def ready(self) -> bool:
@@ -137,6 +150,21 @@ class LabelTemplate:
         top = [r for r in rows if r[3] <= first]
         if not top:
             logger.warning(f"[{self.tag}] 參考圖 {os.path.basename(path)} 欄位上方沒有模板區，略過")
+            return None
+        n = self.cfg.template_rows_above
+        if n is not None:
+            if len(top) < n + 1:
+                logger.info(f"[{self.tag}] 參考圖 {os.path.basename(path)} 欄位上方只切出 {len(top)} 列"
+                            f"（品名跟小字黏在一起），模板區要跳過品名列、取 {n} 列，這張不用")
+                return None
+            top = top[-n:] if n > 0 else []
+        try:
+            top = top + [fields[k] for k in self.cfg.template_include]
+        except KeyError as e:
+            logger.warning(f"[{self.tag}] template.include 的 {e} 不在 fields 裡，參考圖 {os.path.basename(path)} 略過")
+            return None
+        if not top:
+            logger.warning(f"[{self.tag}] 參考圖 {os.path.basename(path)} 模板區是空的，略過")
             return None
         anchor = (min(r[0] for r in top), min(r[1] for r in top), max(r[2] for r in top), max(r[3] for r in top))
         return _Ref(os.path.basename(path), gray, anchor, fields)

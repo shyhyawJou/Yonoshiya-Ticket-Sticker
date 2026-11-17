@@ -97,7 +97,7 @@ class StickerReader:
         if (self.date_label is not None and target_ts is not None
                 and match_status in ("MATCHED", "WRONG_ITEM")
                 and self._report_name(tray, matched_item) == self._report_name(tray, self.date_label.item)):
-            primary = self._open_pair(tray, matched_item, want_label=True, exclude=target_ts)
+            primary = self._open_pair(tray, {self._report_name(tray, matched_item)}, want_label=True, exclude=target_ts)
             if primary is not None:
                 self._join_pair(tray, primary, target_ts)
                 logger.info(f"[沙拉日期] 一般貼紙 {matched_item} 跟已核對的日期標籤 {primary.date_label} "
@@ -112,6 +112,9 @@ class StickerReader:
         strong = match_status == "WRONG_ITEM" and self.is_strong_wrong(tray, matched_item)
         self.settle(tray, tray_id, target_ts, matched_item, match_status,
                     confirm=self.wrong_item_confirm, raw_text=raw_text, strong=strong)
+        if self.date_label is not None and target_ts is not None and match_status == "MATCHED":
+            # 口味沙拉的一般貼紙照常核對（上面的 settle），有先到、收著等它的日期標籤就配成一組
+            self._attach_held_label(tray, target_ts)
         self.debug.sticker(tray, tray_id, target_ts, frame_crop, dt_boxes, rec_res, matched_item, match_status)
 
     def moved_here(self, tray: Tray, ts, name, label: bool = False) -> bool:
@@ -143,9 +146,14 @@ class StickerReader:
         ]
         if not moved_from:
             return False
-        anchor = min(moved_from, key=lambda t: t.missing_count)   # 剛被拿起來的那張消失最短
+        self._reattach(tray, ts, min(moved_from, key=lambda t: t.missing_count),   # 剛被拿起來的那張消失最短
+                       f"'{name}'，跟已核對的同名貼紙")
+        return True
+
+    def _reattach(self, tray: Tray, ts, anchor, what: str) -> None:
+        """ts 是 anchor 被移動到新位置：位置接回 anchor，移除 ts（不計數、不判錯）"""
         logger.info(
-            f"[貼紙移動] tray={tray.id} 新位置讀到 '{name}'，跟已核對的同名貼紙從沒同時出現"
+            f"[貼紙移動] tray={tray.id} 新位置讀到 {what}從沒同時出現"
             f"（舊框 {anchor.missing_count} 幀沒看到），判定為同一張被移動："
             f"位置接回已核對的那張，不加計數、不判錯誤品項"
         )
@@ -157,40 +165,57 @@ class StickerReader:
         # set_ocr_busy 送出時改成 CHECKING_STICKERS，settle 沒跑到，要自己改回來
         if tray.state != TrayState.COMPLETED:
             tray.state = TrayState.WAITING_STICKERS
-        return True
 
     # ------------------------------------------------------------------
     # 沙拉日期標籤（readers/date_label.py）
     #
-    # 一般サラダ貼紙與日期標籤任一張都能代表那份サラダ（現場不保證兩張都會貼）：
-    # 先到的照一般品項核對（ITEM_CHECKED），後到的另一種跟它成組，不再計數、不再通知前端。
-    # 成組只看「同一筆訂單裡缺另一半」，不看兩張貼紙的位置（兩份以上時誰配誰不重要，
-    # 份數對就好）。多出來的（例如點一份卻有兩張一般貼紙）找不到缺另一半的組，照常判多的。
+    # 沙拉品項分兩種（2026-11-16 現場說明）：
+    #   原味 サラダ（date_label.item）：日期標籤本身就是它的貼紙。一般貼紙與日期標籤任一張都能
+    #     代表那份サラダ（現場不保證兩張都會貼）：先到的照一般品項核對（ITEM_CHECKED），後到的
+    #     另一種跟它成組，不再計數、不再通知前端（v3.4.1 起）。
+    #   口味沙拉（date_label.flavored，ポテトサラダ 等）：一定有完整名稱的一般貼紙，日期標籤是附屬的。
+    #     日期標籤不能代替它：先到的話「收著」（已處理、不計數、不報錯），一般貼紙照常核對後跟它成組。
+    # 日期標籤進來時依序：
+    #   1. 有已核對、還沒成組的沙拉一般貼紙（原味或口味）-> 成組
+    #   2. 原味 サラダ 還沒到齊 -> 以日期標籤核對 サラダ
+    #   3. 口味沙拉還有沒配到日期標籤的份數 -> 收著
+    #   4. 都不是 -> 多的，照錯誤品項（サラダ）
+    # 1 排在 2 前面是刻意的：同一筆同時點原味與口味沙拉時，日期標籤分不出是誰的。先成組的錯法是
+    # 「原味只貼了日期標籤、卻被配給口味的一般貼紙」-> サラダ 顯示沒到（店員看得到）；反過來的錯法是
+    # 「原味根本沒放、口味附的日期標籤被當成 サラダ」-> 訂單完成，缺餐被靜默放過。
+    # 成組只看「同一筆訂單裡缺另一半」，不看兩張貼紙的位置（份數對就好）。
+    # 成組 / 收著的那張是 pair_partner：is_checked（不再送 OCR）但不進 checked_items；
+    # 離開畫面時的處理見 TrayStateMachine._leave_pair。
     # ------------------------------------------------------------------
     @staticmethod
     def _report_name(tray: Tray, item):
         """settle 會把純異寫改成主變體寫法再記到貼紙上，比對成組時兩邊都用對外的寫法"""
         return getattr(tray, "report_alias", {}).get(item, item)
 
-    def _open_pair(self, tray: Tray, item, want_label: bool, exclude=None):
-        """找一張已核對、還沒成組、還在畫面上的 item 貼紙；want_label=True 找日期標籤，False 找一般貼紙"""
-        name = self._report_name(tray, item)
+    def _salad_names(self, tray: Tray, flavored_only: bool = False) -> set:
+        names = self.date_label.flavored if flavored_only else self.date_label.items
+        return {self._report_name(tray, n) for n in names}
+
+    def _open_pair(self, tray: Tray, names, want_label: bool, exclude=None):
+        """找一張已核對、還沒成組、還在畫面上、名稱在 names 裡的貼紙；want_label=True 找日期標籤，False 找一般貼紙"""
         for t in tray.stickers:
             if (t is exclude or not t.is_checked or t.is_missing or t.pair_with is not None
-                    or t.pair_partner or t.item_name != name):
+                    or t.pair_partner or t.item_name not in names):
                 continue
             if (t.date_label is not None) == want_label:
                 return t
         return None
 
     @staticmethod
-    def _join_pair(tray: Tray, primary, ts) -> None:
-        """ts 併進 primary 那一組：標成已核對（不再送 OCR），但不進 checked_items、不發 ITEM_CHECKED"""
+    def _join_pair(tray: Tray, primary, ts, item_name=None) -> None:
+        """ts 併進 primary 那一組（primary=None = 收著等一般貼紙）：標成已核對（不再送 OCR），
+        但不進 checked_items、不發 ITEM_CHECKED"""
         ts.is_checked = True
-        ts.item_name = primary.item_name
+        ts.item_name = primary.item_name if primary is not None else item_name
         ts.pair_partner = True
         ts.pair_with = primary
-        primary.pair_with = ts
+        if primary is not None:
+            primary.pair_with = ts
         ts.wrong_reads.clear()
         ts.is_unknown_item = False
         ts.is_wrong_item = False
@@ -198,25 +223,92 @@ class StickerReader:
         if tray.state != TrayState.COMPLETED:
             tray.state = TrayState.WAITING_STICKERS
 
+    @staticmethod
+    def _held_labels(tray: Tray, exclude=None):
+        """收著、還沒配到一般貼紙的日期標籤（還在畫面上）"""
+        return [t for t in tray.stickers
+                if t is not exclude and t.date_label is not None and t.pair_partner
+                and t.pair_with is None and not t.is_missing]
+
+    def _flavored_waiting(self, tray: Tray, exclude=None) -> Optional[str]:
+        """口味沙拉還有沒配到日期標籤的份數時，回傳其中一個品名（收著的日期標籤記在它名下）；沒有回 None"""
+        names = self._salad_names(tray, flavored_only=True)
+        need = Counter({n: c for n, c in Counter(tray.expected_items).items() if n in names})
+        if not need:
+            return None
+        used = 0
+        for t in tray.stickers:
+            if t is exclude or t.date_label is None or not t.pair_partner or t.is_missing:
+                continue
+            owner = t.pair_with.item_name if t.pair_with is not None else t.item_name
+            if t.pair_with is None or owner in names:
+                used += 1
+        if sum(need.values()) - used <= 0:
+            return None
+        return sorted(need)[0]
+
+    def _attach_held_label(self, tray: Tray, ts) -> None:
+        """剛核對成功的沙拉一般貼紙：有收著的日期標籤就配成一組（一般貼紙計數，日期標籤不計數）"""
+        if (ts.date_label is not None or ts.pair_with is not None or ts.pair_partner
+                or not ts.is_checked or ts.item_name not in self._salad_names(tray)):
+            return
+        held = self._held_labels(tray, exclude=ts)
+        if not held:
+            return
+        label = held[0]
+        label.pair_with, ts.pair_with = ts, label
+        label.item_name = ts.item_name
+        logger.info(f"[沙拉日期] 一般貼紙 {ts.item_name} 跟先前收著的日期標籤 {label.date_label} 成組"
+                    f"（日期標籤不計數）tray={tray.id} 單號={tray.order_number}")
+
+    def _label_moved_here(self, tray: Tray, ts) -> bool:
+        """不計數的日期標籤（成組的另一半 / 收著的）被移到這裡：位置接回，回 True。判斷同 moved_here"""
+        moved_from = [
+            t for t in tray.stickers
+            if t is not ts and t.date_label is not None and t.is_checked and t.pair_partner
+            and t.missing_count > 0 and not t.has_notified_missing and id(t) not in ts.seen_with
+        ]
+        if not moved_from:
+            return False
+        self._reattach(tray, ts, min(moved_from, key=lambda t: t.missing_count), "日期標籤，跟已處理的日期標籤")
+        return True
+
     def apply_date_label(self, tray: Tray, tray_id: str, ts, label, dt_boxes, rec_res, frame_crop=None):
         item = self.date_label.item
         text = label.describe(item)
         if ts is not None:
             ts.date_label = text
-        primary = self._open_pair(tray, item, want_label=False, exclude=ts) if ts is not None else None
+            if self._label_moved_here(tray, ts):
+                return
+
+        # 1. 已核對、還沒成組的沙拉一般貼紙
+        primary = self._open_pair(tray, self._salad_names(tray), want_label=False, exclude=ts) if ts is not None else None
         if primary is not None:
             self._join_pair(tray, primary, ts)
-            logger.info(f"[沙拉日期] {text}：跟已核對的一般貼紙成組（不重複計數）tray={tray.id} 單號={tray.order_number}")
-            self.debug.sticker(tray, tray_id, ts, frame_crop, dt_boxes, rec_res, item, "MATCHED")
+            logger.info(f"[沙拉日期] {text}：跟已核對的一般貼紙 {primary.item_name} 成組（不重複計數）"
+                        f"tray={tray.id} 單號={tray.order_number}")
+            self.debug.sticker(tray, tray_id, ts, frame_crop, dt_boxes, rec_res, primary.item_name, "MATCHED")
             return
 
+        # 2. 原味 サラダ 還沒到齊：日期標籤代表它
         matched_item, match_status = self.sticker_matcher.match_known_item(
             item, tray.expected_items, tray.checked_items)
         if match_status in ("MATCHED", "WRONG_ITEM") and self.moved_here(tray, ts, item, label=True):
             return
+        if match_status != "MATCHED" and ts is not None:
+            # 3. 口味沙拉還有沒配到日期標籤的份數：收著，等它的一般貼紙
+            flavor = self._flavored_waiting(tray, exclude=ts)
+            if flavor is not None:
+                self._join_pair(tray, None, ts, item_name=flavor)
+                logger.info(f"[沙拉日期] {text}：口味沙拉 {flavor} 附的日期標籤，一般貼紙還沒到，先收著"
+                            f"（不計數、不報錯）tray={tray.id} 單號={tray.order_number}")
+                self.debug.sticker(tray, tray_id, ts, frame_crop, dt_boxes, rec_res, flavor, "MATCHED")
+                return
+
+        # 4. 多的
         logger.info(
             f"[沙拉日期] {text}：" + ("還沒有一般貼紙，先以日期標籤核對" if match_status == "MATCHED"
-                                     else f"這筆訂單沒有待核對的 {item}，照錯誤品項處理")
+                                     else f"這筆訂單沒有待核對的沙拉，照錯誤品項（{item}）處理")
             + f" tray={tray.id} 單號={tray.order_number}")
         # 上一張貼紙比對留下的原始文字，不能被當成這張的 matched_text 送給前端
         self.sticker_matcher.last_matched_text = None

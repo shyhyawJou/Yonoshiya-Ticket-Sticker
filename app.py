@@ -887,7 +887,7 @@ def main():
     parser.add_argument("--profile", choices=["yoshinoya", "suzumo"])
     task = parser.parse_args().profile or "ocr"
     # 目前僅供人工辨識：StreamManager 沒有用這個參數，也沒有經 MQTT 對外發布
-    version = "3.4.2"
+    version = "3.4.3"
 
     # 一次開機的起點，log 裡往上找這行就是這一輪的開頭（模型檔名見後面的 [dla_guard]）
     logger.info(f"{'=' * 20} [程式啟動] v{version} task={task} pid={os.getpid()} {'=' * 20}")
