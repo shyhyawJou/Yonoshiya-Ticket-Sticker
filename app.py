@@ -16,6 +16,7 @@ from loguru import logger
 from utils.clip_video import Clip, PeriodicClipRecorder
 from utils.frame_writer import AsyncFrameWriter, full_screen_tag
 from utils.frame_labeler import AsyncFrameLabelWriter
+from utils.ocr_rec_writer import AsyncRecCropWriter
 from utils import clock_guard
 from utils.disk_guard import DiskGuard
 from utils.perf_stats import LOOP_PROFILER, ocr_done_line
@@ -147,6 +148,12 @@ class StreamManager:
         # --- 全幀的 mmrotate 標籤檔（X-AnyLabeling JSON）：存 full_screen 的當下，在圖旁邊輸出同檔名的 .json ---
         # 見 utils/frame_labeler.py
         self.frame_labeler = AsyncFrameLabelWriter(self.task.cfg.frame_label)
+
+        # --- 每筆訂單的 rec 小圖：rec 實際讀的每個框 + 最終辨識結果畫在小圖上，存到 <日期>/ocr_rec/<訂單>/ ---
+        # 見 utils/ocr_rec_writer.py。關閉時 OCR 引擎也不把小圖帶回主迴圈
+        self.ocr_rec_writer = AsyncRecCropWriter(self.task.cfg.ocr_rec_save, PROJECT_DIR)
+        if getattr(self.task, "ocr", None) is not None:
+            self.task.ocr.keep_rec_crops = self.ocr_rec_writer.enabled
 
         # 錄影 watchdog 只是保險：訂單本身有 order_guard.timeout_sec 超時收尾
         # （寫 CSV + 重置 + 停錄影），這裡刻意多留 30 秒，正常情況一定是訂單先收。
@@ -375,6 +382,26 @@ class StreamManager:
                 continue
         return out
 
+    def _save_ocr_rec(self, logic, ocr_result: dict, metadata: dict) -> None:
+        """這次 OCR 的每個框小圖（rec 實際讀的那張）+ 最終辨識結果，交給背景另存。見 utils/ocr_rec_writer.py。
+
+        放在套用完這筆 OCR 結果之後，這時 tray 上才有訂單編號（傳票解析完才會設）。結果是 OCR 引擎最後採用的
+        rec_res，跟 debug sheet 畫的是同一份。任何錯誤都只記 log，不影響辨識。
+        """
+        crops = metadata.pop("rec_crops", None)          # 不管有沒有開都拿掉，不讓小圖跟著 metadata 活到下一輪
+        writer = self.ocr_rec_writer
+        if not writer.enabled or not crops:
+            return
+        try:
+            tray = logic.trays.get(metadata.get("tray_id"))
+            order_no = getattr(tray, "order_number", None)
+            order_key = f"No{order_no}" if order_no else f"tray{metadata.get('tray_id')}"
+            folder = Path(str(self.save_dir)) / str(self.event_recorder.date) / "ocr_rec"
+            writer.submit(folder, order_key, str(metadata.get("type") or "ocr"),
+                          (metadata.get("trace") or {}).get("job"), crops, ocr_result.get("rec_res"))
+        except Exception as e:
+            logger.error(f"[ocr_rec] 提交失敗（略過，不影響辨識）: {e!r}")
+
     def _save_full_screen(self, tag: str) -> str | None:
         """存一張當下的原始全幀到 full_screen，檔名帶「為什麼存」的標籤；並在旁邊輸出同檔名的 mmrotate 偵測標籤檔。
 
@@ -588,6 +615,7 @@ class StreamManager:
                     trace = metadata.get("trace") or {}
                     if trace.get("start_mono") is not None and trace.get("end_mono") is not None:
                         LOOP_PROFILER.add_ocr(1000 * (trace["end_mono"] - trace["start_mono"]))
+                    self._save_ocr_rec(logic, ocr_result, metadata)
                 t_now = time.perf_counter(); stage["apply"] = 1000 * (t_now - t_prev); t_prev = t_now
 
                 out, detections = mmr.detect(frame, self.show_box)
@@ -719,6 +747,8 @@ class StreamManager:
         if getattr(self, "disk_guard", None) is not None:
             self.disk_guard.stop()
 
+        if getattr(self, "ocr_rec_writer", None) is not None:
+            self.ocr_rec_writer.stop(wait=True)   # 小圖很小，佇列裡的會寫完才結束
         if getattr(self, "frame_labeler", None) is not None:
             self.frame_labeler.stop(wait=True)   # 標籤檔很小，佇列裡的會寫完才結束
         if self.frame_writer:

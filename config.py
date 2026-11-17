@@ -370,6 +370,23 @@ class DebugSheetCfg:
 
 
 @dataclass
+class OcrRecSaveCfg:
+    """每筆訂單另存「rec 實際讀的每個框小圖」，最終辨識結果畫在小圖上（utils/ocr_rec_writer.py）。
+
+    存到 <save_dir>/<日期>/ocr_rec/<訂單>/。跟 debug_sheet 一樣，整段可以不寫，全部欄位都有預設值。
+
+    enabled:        false = 不存（OCR 引擎也不會把小圖帶回主迴圈）。
+    max_per_order:  每筆訂單最多存幾張，超過就不再存並警告一次（貼紙被反覆重讀時量會很大）。
+    max_queue:      背景佇列上限（單位：一次 OCR）；滿了整筆丟棄並警告，不拖慢辨識。
+    font_path:      日文字型，留空 = 專案內的 tasks/ocr/NotoSansJP-Bold.otf（跟 debug_sheet 同一個）。
+    """
+    enabled: bool = True
+    max_per_order: int = 3000
+    max_queue: int = 400
+    font_path: str = ""
+
+
+@dataclass
 class FrameLabelCfg:
     """全幀的 mmrotate 偵測標籤檔（utils/frame_labeler.py）。
 
@@ -429,6 +446,7 @@ class Config:
     cloud_upload: CloudUploadCfg = field(default_factory=CloudUploadCfg)
     debug_sheet: DebugSheetCfg = field(default_factory=DebugSheetCfg)
     frame_label: FrameLabelCfg = field(default_factory=FrameLabelCfg)
+    ocr_rec_save: OcrRecSaveCfg = field(default_factory=OcrRecSaveCfg)
     order_photo: OrderPhotoCfg = field(default_factory=OrderPhotoCfg)
     # 該部署「真正會出現」的詞彙。與 menus_ticket/menus_sticker 分開，
     # 因為後者來自 menus_mapping.yaml（吉野家 1235 筆），拿來當小場景的
@@ -894,6 +912,15 @@ def load_config(config_path: str, overrides=None) -> Config:
         )
 
         # 全幀的 mmrotate 標籤檔：舊 config 沒這一段也能載入，整段用 dataclass 的預設值
+        # 每筆訂單的 rec 小圖：舊 config 沒這一段也能載入，整段用 dataclass 的預設值
+        orc = base.get("ocr_rec_save") or {}
+        ocr_rec_save_cfg = OcrRecSaveCfg(
+            enabled=bool(orc.get("enabled", OcrRecSaveCfg.enabled)),
+            max_per_order=max(1, int(orc.get("max_per_order", OcrRecSaveCfg.max_per_order))),
+            max_queue=max(1, int(orc.get("max_queue", OcrRecSaveCfg.max_queue))),
+            font_path=str(orc.get("font_path") or ""),
+        )
+
         fl = base.get("frame_label") or {}
         frame_label_cfg = FrameLabelCfg(
             enabled=bool(fl.get("enabled", FrameLabelCfg.enabled)),
@@ -950,6 +977,7 @@ def load_config(config_path: str, overrides=None) -> Config:
             cloud_upload=cloud_upload_cfg,
             debug_sheet=debug_sheet_cfg,
             frame_label=frame_label_cfg,
+            ocr_rec_save=ocr_rec_save_cfg,
             order_photo=order_photo_cfg,
             vocab_ticket=vocab_ticket,
             vocab_sticker=vocab_sticker,

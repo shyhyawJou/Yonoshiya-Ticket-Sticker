@@ -1,0 +1,13 @@
+# 過濾掉所有副檔名
+*.log
+*.dla
+*.otf
+
+# 檔案
+rclone.conf
+.gitignoreE
+說明.md
+yoshinoya_MQTT.md
+
+# 目錄
+**/__pycache__

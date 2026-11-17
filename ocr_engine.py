@@ -172,6 +172,9 @@ class TextSystemDLA:
             "cls_n": 0, "cls_ms": 0.0,
             "rec_rounds": 0, "rec_boxes": 0, "rec_ms": 0.0, "rec_infer_ms": 0.0,
         }
+        # 這次讀取裡每一輪 run_rec 的（rec_res, 實際送進 rec 的每個框小圖）。方向比對 / 重讀會讓同一次讀取跑好幾輪，
+        # 最後採用哪一輪，用回傳的 rec_res 物件去對（rec_crops_for）。只存參考，不複製影像
+        self._rec_log = []
 
     def _save_debug_image(self, img, filename):
         """儲存 debug 圖片"""
@@ -753,7 +756,19 @@ class TextSystemDLA:
         self.prof["rec_rounds"] += 1
         self.prof["rec_boxes"] += img_num
         self.prof["rec_ms"] += 1000 * (et3 - st3)
+        self._rec_log.append((rec_res, list(img_list)))
         return rec_res, et3 - st3
+
+    def rec_crops_for(self, rec_res):
+        """這次讀取最後採用的那份 rec_res，對應「實際送進 rec 的每個框小圖」（跟 rec_res / dt_boxes 同順序）。
+
+        一次讀取可能跑好幾輪 rec（翻轉比對、轉 180 重讀、正方形四個方向），最後採用的不一定是最後一輪，
+        所以用 rec_res 物件本身去對。對不上（例如 det 沒有框、根本沒跑 rec）回傳 None。
+        """
+        for res, crops in reversed(self._rec_log):
+            if res is rec_res and len(crops) == len(res):
+                return crops
+        return None
 
     def _check_boxes_need_rotate_90(self, dt_boxes, ratio_thresh=1.4, vertical_ratio=None):
         """
@@ -1403,6 +1418,9 @@ class AsyncOCR:
         self.result_callback = result_callback
         self.worker_thread = None
         self._job_seq = 0   # [OCR#n] 的 n，本次開機的流水號
+        # 每筆結果附上「rec 實際讀的每個框小圖」（metadata["rec_crops"]），給 app.py 另存。預設關閉：沒人要就不多佔記憶體；
+        # app.py 依 ocr_rec_save 設定打開
+        self.keep_rec_crops = False
 
     @property
     def is_busy(self):
@@ -1465,6 +1483,15 @@ class AsyncOCR:
             return layout, f"CV方向不可信{ms:.0f}ms"
         return layout, f"CV版面{ms:.0f}ms(轉{layout.rotate})"
 
+    def _attach_rec_crops(self, metadata, rec_res):
+        """把這次讀取最後採用的 rec_res 對應的每個框小圖掛到 metadata，跟著結果帶回主迴圈。出任何錯都不影響辨識。"""
+        if not self.keep_rec_crops or metadata is None:
+            return
+        try:
+            metadata["rec_crops"] = self.ocr_sys.rec_crops_for(rec_res)
+        except Exception as e:
+            logger.warning(f"[ocr_rec] 取框小圖失敗（略過，不影響辨識）: {e!r}")
+
     def _worker_loop(self):
         """後台工作迴圈"""
         while self.running:
@@ -1494,6 +1521,7 @@ class AsyncOCR:
                     metadata['M_inv_full'] = np.linalg.inv(transform @ affine_to_homogeneous(metadata['M']))
                     trace['end_mono'] = time.monotonic()
                     trace['prof'] = dict(self.ocr_sys.prof, path=list(self.ocr_sys.prof["path"]))
+                    self._attach_rec_crops(metadata, rec_res)
                     if self.result_callback:
                         self.result_callback(upright, rec_res, boxes, False,
                                              time.perf_counter()-t0, metadata)
@@ -1551,6 +1579,7 @@ class AsyncOCR:
                 metadata['M_inv_full'] = T_total_inv
                 t3 = time.perf_counter()
 
+                self._attach_rec_crops(metadata, rec_res)
                 if self.result_callback:
                     try:
                         self.result_callback(frame_crop, rec_res, dt_boxes, is_flip, time_cost, metadata)

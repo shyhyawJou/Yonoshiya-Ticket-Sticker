@@ -202,3 +202,6 @@ cloud_upload:
     module_dir: aibox_uploader
     retry_sec: 300
 ticket_cv_assist: true
+
+ocr_rec_save:
+  enabled: false     # true = 存，false = 不存
